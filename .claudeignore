@@ -1,0 +1,4 @@
+*.json
+data/
+vel_log/
+History/
