@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Multi-pane Chart — refactored</title>
+	<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
     /* стили без изменений, только мелкие улучшения читаемости */
     body { margin:0; font-family:Arial, sans-serif; }
@@ -803,7 +804,7 @@ function createPane(id) {
     series: null,
     lastCandle: null,
     requestId: 0,
-    ws: new WebSocket(`ws://155.212.219.59:8765`),
+    ws: new WebSocket(`ws://89.107.10.204:8765`),
     tfSeconds: TF_MAP[layout[`pane${id}`]?.tf || "M1"],
     selectedLine: null,
     data: [],  // ← ДОБАВИТЬ ЭТУ СТРОКУ
@@ -1939,7 +1940,7 @@ drawings[2] = [];
         }
 
         // Создаём новый ws
-        state.ws = new WebSocket(`ws://155.212.219.59:8765`);
+        state.ws = new WebSocket(`ws://89.107.10.204:8765`);
 
         state.ws.onopen = () => {
             setTF(id, layout[`pane${id}`]?.tf || "M1");
