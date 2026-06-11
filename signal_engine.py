@@ -1,19 +1,27 @@
 """
-signal_engine.py
+signal_engine.py  (parallel index.html — переработанная версия)
 
-Основан на реальной статистике из analyze_memory (5780 паттернов Dukascopy):
+Веса пересмотрены после реплея 11677 живых сигналов из signal_log.json.
+Каждый фактор измерен по dir-hit (как часто цена реально шла в его сторону):
 
-РАБОТАЕТ:
-  - Часовой bias (02/07 UTC → UP, 11/12/13/21 UTC → DOWN)
-  - near_high + slow velocity → DOWN 63.9% (сильный edge)
-  - near_high + fast velocity → UP 53.1% (слабый edge)
-  - Позиция у края диапазона
-  - AUD/USD и EUR/USD имеют DOWN перевес ~59%
+ОСТАВЛЕНО (реальный edge на live):
+  - pressure контрарный (F5)        → dir-hit 55-56%  (+5..+6)
+  - near_low → UP (F1)              → dir-hit 55.6%   (+5.6)
+  - flat у сопротивления → DOWN (F2)→ dir-hit 54.9%   (+4.9)
+  - микротренд истощение (F6)       → dir-hit 54-55%  (+4..+5)
+  - near_high → DOWN (F1)           → dir-hit 53.7%   (+3.7)
 
-НЕ РАБОТАЕТ (убрано):
-  - HTF тренд (trend_up 50.5% vs trend_down 49.9% — шум)
-  - near_low + velocity (нет edge)
-  - pressure (слабый фактор)
+УБРАНО / ПОНИЖЕНО (на live edge отсутствует, было переобучение Dukascopy):
+  - Часовой bias (F3)               → UP-часы 49.2%, DOWN-часы 50.9% → УДАЛЁН
+  - near_high + fast → UP (F2)      → dir-hit 48.6% (отриц.)         → УДАЛЁН
+  - near_high + slow → DOWN (F2)    → 155 паттернов, 51.6%   → вес 3→1
+  - символьный DOWN-перевес (F4)    → dir-hit 51.5%          → УДАЛЁН
+
+ПОРОГ: MIN_SCORE поднят 3→4.
+  Реплей: score>=3 → 53.7% | score>=4 → 54.5% (закрывает payout 85-90%).
+
+ВАЖНО: последний квартал данных (06-02..06-11) показал просадку edge —
+паттерны со временем затухают, требуется мониторинг на свежих данных.
 
 MATCHING ПАТТЕРНОВ:
   - Основной поиск: символ + сессия + зона + час±1 + velocity_bin + micro_trend
@@ -58,24 +66,19 @@ PIP_SIZE = {
     "USD/JPY": 0.01
 }
 
-MIN_SCORE = 3
+# MIN_SCORE поднят 3→4 после реплея signal_log.json:
+#   score>=3 → WIN 53.7% | score>=4 → WIN 54.5% (закрывает payout 85-90%)
+MIN_SCORE = 4
 MAX_SCORE = 9
 
-# Часовой bias из analyze_memory (Dukascopy 5780 паттернов)
-HOUR_BIAS = {
-    2:  ("UP",   2),   # UP 62.8%  — сильный
-    4:  ("UP",   1),   # UP 59.0%  — средний
-    7:  ("UP",   2),   # UP 60.6%  — сильный
-    20: ("UP",   1),   # UP 56.2%  — слабый
-    11: ("DOWN", 1),   # DOWN 56.9% — средний
-    12: ("DOWN", 1),   # DOWN 57.1% — средний
-    13: ("DOWN", 2),   # DOWN 58.2% — сильный
-    14: ("DOWN", 1),   # DOWN 56.0% — слабый
-    21: ("DOWN", 2),   # DOWN 60.0% — сильный
-}
+# Часовой bias — УДАЛЁН.
+# Реплей 11677 живых сигналов: UP-часы 49.2%, DOWN-часы 50.9% (live edge ~0).
+# Паттерн из Dukascopy не переносится на live. Оставлен пустым → фактор не срабатывает.
+HOUR_BIAS = {}
 
-# Пары с историческим DOWN перевесом ~59%
-DOWN_BIAS_SYMBOLS = {"AUD/USD", "EUR/USD"}
+# Символьный DOWN-перевес — УДАЛЁН.
+# Реплей: dir-hit 51.5% (edge +1.5, шум). Пустое множество → фактор не срабатывает.
+DOWN_BIAS_SYMBOLS = set()
 
 # Минимум паттернов для показа реального винрейта
 MIN_MEMORY_SAMPLES = 15
@@ -347,11 +350,12 @@ def evaluate_signal(
     # near_high + fast → UP  53.1% (Δ+3.6  — слабый)
     if near_high:
         if vbin == "slow":
-            score_down += 3
-            reason.append(f"🐢 Медленный подход к сопротивлению [{vbin}] → DOWN 63.9% исторически")
+            # вес понижен 3→1: на live всего 155 паттернов, dir-hit 51.6% (переобучение)
+            score_down += 1
+            reason.append(f"🐢 Медленный подход к сопротивлению [{vbin}] → DOWN (слабый)")
         elif vbin == "fast":
-            score_up += 1
-            reason.append(f"⚡ Быстрый импульс к сопротивлению [{vbin}] → возможно продолжение UP")
+            # fast→UP УДАЛЁН: на live dir-hit 48.6% (отрицательный edge). Вклад 0.
+            reason.append(f"⚡ Быстрый импульс к сопротивлению [{vbin}] (нейтрально)")
         elif vbin == "flat":
             score_down += 1
             reason.append(f"😴 Цена стоит у сопротивления [{vbin}] → вероятен разворот")
