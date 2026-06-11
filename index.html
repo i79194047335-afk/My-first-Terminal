@@ -1,0 +1,1754 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Trading Terminal</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<style>
+    body { margin:0; font-family:Arial, sans-serif; }
+    #layoutMenu { position:absolute; top:8px; right:10px; z-index:5000; }
+    #layoutBtn { background:#fff; border:1px solid #aaa; padding:4px 10px; cursor:pointer; }
+    #layoutDropdown { display:none; position:absolute; right:0; background:#fff; border:1px solid #aaa; margin-top:4px; min-width:160px; box-shadow:0 2px 8px rgba(0,0,0,0.15); }
+    #layoutDropdown div { padding:6px 12px; cursor:pointer; }
+    #layoutDropdown div:hover { background:#f0f0f0; }
+
+    #contextMenu, #lineMenu {
+        position:absolute; display:none; background:#fff; border:1px solid #aaa;
+        padding:10px; z-index:6000; font-size:12px; box-shadow:0 2px 10px rgba(0,0,0,0.2);
+    }
+    #contextMenu { background:#ffffff; color:#000000; }
+    #contextMenu input, #lineMenu input, #lineMenu select { width:100%; margin:6px 0; }
+
+    #container {
+        display: flex;
+        width: 100%;
+        height: 100vh;
+    }
+
+    .column {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-width: 0;
+        border-right: 1px solid #ccc;
+    }
+    .column:last-child { border-right: none; }
+
+    /* Price pane fills the entire column — no stochastic sub-pane */
+    .price-pane {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .hidden { display:none !important; }
+    .toolbar { padding:6px; border-bottom:1px solid #ccc; background:#f9f9f9; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .chart-wrapper { position:relative; flex:1; overflow:hidden; }
+    .chart { width:100%; height:100%; }
+
+    .expand, .scrollRight, .resetZoom {
+        position:absolute; top:8px; z-index:1000; cursor:pointer;
+        background:#fff; border:1px solid #aaa; padding:3px 7px; border-radius:3px;
+    }
+    .expand      { right:8px; }
+    .scrollRight { right:38px; }
+    .resetZoom   { right:68px; }
+
+    .tv-countdown {
+        position:absolute; right:6px; padding:3px 7px; font-size:11px; font-weight:bold;
+        border-radius:3px; pointer-events:none; z-index:1000; color:#fff;
+    }
+
+    select, button { padding:4px 8px; border:1px solid #bbb; background:#f3f3f3; cursor:pointer; }
+    button { border-radius:3px; }
+
+    .menu-item { cursor:pointer; padding:4px 0; }
+
+    .zoomCenter {
+        position:absolute; bottom:6px; left:50%; transform:translateX(-50%);
+        display:flex; gap:4px; z-index:1200;
+    }
+    .zoomBtn {
+        width:22px; height:22px; display:flex; align-items:center; justify-content:center;
+        background:#ffffff; border:1px solid #aaa; border-radius:3px;
+        cursor:pointer; font-size:14px; font-weight:bold; user-select:none;
+    }
+    .zoomBtn:hover { background:#f0f0f0; }
+
+    #signalPanel {
+        position: absolute; left: 8px; top: 8px;
+        width: 220px; max-width: calc(50% - 16px);
+        background: rgba(15,15,15,0.88); color: #fff; padding: 8px 10px 8px 10px;
+        font-size: 12px; z-index: 2000; box-sizing: border-box;
+        border-radius: 4px; border: 1px solid #333; overflow: hidden; display: none;
+        pointer-events: none; /* chart clicks pass through */
+    }
+    #signalPanel .sig-close {
+        position: absolute; top: 4px; right: 6px;
+        cursor: pointer; font-size: 13px; color: #aaa;
+        pointer-events: all; /* close button itself is clickable */
+    }
+    #signalPanel.up   { border-top: 3px solid #26a69a; }
+    #signalPanel.down { border-top: 3px solid #ef5350; }
+    #signalPanel.skip { border-top: 3px solid #555; }
+
+    /* ============================================================
+       INDICATORS PANEL
+       ============================================================ */
+    #indicatorsPanel {
+        position: absolute;
+        display: none;
+        background: #fff;
+        border: 1px solid #aaa;
+        border-radius: 4px;
+        padding: 10px 14px;
+        z-index: 7000;
+        font-size: 12px;
+        min-width: 280px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+    }
+    #indicatorsPanel .ind-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 0;
+        border-bottom: 1px solid #f0f0f0;
+        flex-wrap: wrap;
+    }
+    #indicatorsPanel .ind-row:last-child { border-bottom: none; }
+    #indicatorsPanel .ind-label { font-weight: bold; min-width: 70px; }
+    #indicatorsPanel .ind-param { width: 44px; padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px; }
+    #indicatorsPanel .ind-color { width: 28px; height: 22px; padding: 0; border: 1px solid #ccc; border-radius: 3px; cursor: pointer; }
+    #indicatorsPanel .ind-section-title {
+        font-weight: bold; font-size: 11px; color: #888;
+        text-transform: uppercase; letter-spacing: 0.5px;
+        padding: 8px 0 3px; display: block;
+    }
+
+    /* ============================================================
+       MOBILE TAB BAR
+       ============================================================ */
+    #mobileTabBar { display: none; }
+
+    @media (max-width: 768px) {
+        #mobileTabBar {
+            display: flex; position: fixed; bottom: 0; left: 0; right: 0;
+            height: 48px; background: #1a1a2e; border-top: 1px solid #333; z-index: 9000;
+        }
+        .mob-tab {
+            flex: 1; display: flex; align-items: center; justify-content: center;
+            font-size: 14px; font-weight: bold; color: #888; cursor: pointer;
+            border: none; background: none; transition: color 0.15s, border-top 0.15s;
+            border-top: 3px solid transparent; padding: 0;
+        }
+        .mob-tab.active { color: #fff; border-top-color: #2962FF; background: rgba(41,98,255,0.08); }
+        #container { flex-direction: column; height: calc(100dvh - 48px); }
+        .column {
+            flex: none; width: 100%; height: calc(100dvh - 48px);
+            border-right: none; border-bottom: none; display: none;
+        }
+        .column.mob-active { display: flex; }
+        .toolbar {
+            flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+            gap: 4px; padding: 3px 4px; min-height: 0; height: 34px;
+            align-items: center; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+        }
+        .toolbar::-webkit-scrollbar { display: none; }
+        .toolbar select, .toolbar button {
+            font-size: 11px; padding: 2px 6px; white-space: nowrap; flex-shrink: 0; height: 26px;
+        }
+        #layoutMenu { display: none; }
+        .expand, .scrollRight, .resetZoom { padding: 5px 10px; font-size: 14px; }
+        .zoomBtn { width: 28px; height: 28px; font-size: 16px; }
+    }
+</style>
+</head>
+<body>
+
+<div id="layoutMenu">
+    <div id="layoutBtn">Layout ▼</div>
+    <div id="layoutDropdown">
+        <div onclick="exportLayout()">Save to File</div>
+        <div onclick="document.getElementById('importFile').click()">Load from File</div>
+    </div>
+</div>
+
+<!-- MOBILE TAB BAR -->
+<div id="mobileTabBar">
+    <button class="mob-tab active" id="mobTab1" onclick="switchMobileTab(1)">📈 Chart 1</button>
+    <button class="mob-tab"        id="mobTab2" onclick="switchMobileTab(2)">📊 Chart 2</button>
+    <button class="mob-tab"        id="mobTabLayout" onclick="toggleMobileLayout(event)">⚙️ Layout</button>
+</div>
+
+<!-- Candle color context menu -->
+<div id="contextMenu">
+    <div>Свеча вверх</div><input type="color" id="upColor">
+    <div>Свеча вниз</div><input type="color" id="downColor">
+    <div>Верхний фитиль</div><input type="color" id="wickUpColor">
+    <div>Нижний фитиль</div><input type="color" id="wickDownColor">
+    <button id="resetColors" onclick="resetColors()">Reset Default</button>
+</div>
+
+<!-- Line / overlay context menu -->
+<div id="lineMenu">
+    <div style="margin-bottom:6px;">Цвет</div>
+    <input type="color" id="lineColorPicker">
+    <div style="margin:8px 0 6px;">Толщина</div>
+    <select id="lineWidthSelect">
+        <option value="1">1 px</option>
+        <option value="2">2 px</option>
+        <option value="3">3 px</option>
+        <option value="4">4 px</option>
+    </select>
+    <div id="fillColorBlock" style="display:none">
+        <div style="margin:8px 0 6px;">Заливка</div>
+        <input type="color" id="fillColorPicker">
+    </div>
+    <div style="border-top:1px solid #ddd; margin:10px 0;"></div>
+    <div class="menu-item" onclick="copyLine()">Копировать</div>
+    <div class="menu-item" onclick="deleteSelectedLine()">Удалить</div>
+</div>
+
+<!-- Alert context menu -->
+<div id="alertMenu"
+    style="position:fixed;display:none;background:#1e1e1e;color:white;border:1px solid #444;
+           border-radius:6px;padding:6px 0;font-size:13px;z-index:999999;">
+    <div style="padding:6px 14px;cursor:pointer;" onclick="deleteAlert()">Удалить</div>
+</div>
+
+<!-- Chart context menu -->
+<div id="chartMenu"
+    style="position:fixed;display:none;background:#1e1e1e;color:white;border:1px solid #444;
+           border-radius:6px;padding:6px 0;font-size:13px;z-index:999999;">
+    <div style="padding:6px 14px;cursor:pointer;" onclick="addAlertFromChartMenu()">Добавить alert</div>
+    <div style="padding:6px 14px;cursor:pointer;" onclick="event.stopPropagation(); openChartSettings();">Настройки графика</div>
+</div>
+
+<!-- ====== INDICATORS PANEL ====== -->
+<div id="indicatorsPanel">
+    <span class="ind-section-title">Overlay (на графике)</span>
+
+    <!-- SMA -->
+    <div class="ind-row">
+        <input type="checkbox" id="ind_sma" onchange="onIndToggle('sma')">
+        <span class="ind-label">SMA</span>
+        <span>Period</span>
+        <input type="number" class="ind-param" id="ind_sma_period" value="20" min="2" max="500" onchange="onIndParam('sma')">
+        <input type="color" class="ind-color" id="ind_sma_color" value="#2962FF" onchange="onIndColor('sma')">
+    </div>
+
+    <!-- EMA -->
+    <div class="ind-row">
+        <input type="checkbox" id="ind_ema" onchange="onIndToggle('ema')">
+        <span class="ind-label">EMA</span>
+        <span>Period</span>
+        <input type="number" class="ind-param" id="ind_ema_period" value="21" min="2" max="500" onchange="onIndParam('ema')">
+        <input type="color" class="ind-color" id="ind_ema_color" value="#ff9800" onchange="onIndColor('ema')">
+    </div>
+
+    <!-- Bollinger -->
+    <div class="ind-row">
+        <input type="checkbox" id="ind_bollinger" onchange="onIndToggle('bollinger')">
+        <span class="ind-label">Bollinger</span>
+        <span>P</span>
+        <input type="number" class="ind-param" id="ind_bollinger_period" value="20" min="2" max="500" onchange="onIndParam('bollinger')">
+        <span>×</span>
+        <input type="number" class="ind-param" id="ind_bollinger_mult" value="2" min="0.1" max="10" step="0.1" onchange="onIndParam('bollinger')">
+        <input type="color" class="ind-color" id="ind_bollinger_color" value="#9c27b0" onchange="onIndColor('bollinger')">
+    </div>
+
+    <span class="ind-section-title">Oscillators (отдельная панель)</span>
+
+    <!-- RSI -->
+    <div class="ind-row">
+        <input type="checkbox" id="ind_rsi" onchange="onIndToggle('rsi')">
+        <span class="ind-label">RSI</span>
+        <span>Period</span>
+        <input type="number" class="ind-param" id="ind_rsi_period" value="14" min="2" max="200" onchange="onIndParam('rsi')">
+        <input type="color" class="ind-color" id="ind_rsi_color" value="#e91e63" onchange="onIndColor('rsi')">
+    </div>
+
+    <!-- MACD -->
+    <div class="ind-row">
+        <input type="checkbox" id="ind_macd" onchange="onIndToggle('macd')">
+        <span class="ind-label">MACD</span>
+        <span>F</span>
+        <input type="number" class="ind-param" id="ind_macd_fast" value="12" min="2" max="200" onchange="onIndParam('macd')">
+        <span>S</span>
+        <input type="number" class="ind-param" id="ind_macd_slow" value="26" min="2" max="200" onchange="onIndParam('macd')">
+        <span>Sig</span>
+        <input type="number" class="ind-param" id="ind_macd_signal" value="9" min="2" max="200" onchange="onIndParam('macd')">
+    </div>
+
+    <!-- Stochastic -->
+    <div class="ind-row">
+        <input type="checkbox" id="ind_stochastic" onchange="onIndToggle('stochastic')">
+        <span class="ind-label">Stoch</span>
+        <span>K</span>
+        <input type="number" class="ind-param" id="ind_stochastic_period" value="14" min="2" max="200" onchange="onIndParam('stochastic')">
+        <span>Sm</span>
+        <input type="number" class="ind-param" id="ind_stochastic_smoothK" value="3" min="1" max="20" onchange="onIndParam('stochastic')">
+        <span>D</span>
+        <input type="number" class="ind-param" id="ind_stochastic_smoothD" value="3" min="1" max="20" onchange="onIndParam('stochastic')">
+        <input type="color" class="ind-color" id="ind_stochastic_color" value="#2962FF" onchange="onIndColor('stochastic')">
+    </div>
+</div>
+
+<input type="file" id="importFile" style="display:none" accept=".json">
+
+<div id="container">
+
+<!-- COLUMN 1 -->
+<div class="column" id="column1">
+    <div class="price-pane" id="pane1">
+        <div class="toolbar">
+            <select id="symbolSelect">
+                <option value="AUD/USD">AUD/USD</option>
+                <option value="EUR/USD">EUR/USD</option>
+                <option value="USD/CAD">USD/CAD</option>
+                <option value="USD/JPY">USD/JPY</option>
+            </select>
+            <select id="tf1"></select>
+            <button id="hlineBtn1" onclick="setTool('hline')">Линия</button>
+            <button id="lineOverlayBtn" onclick="setTool('lineOverlay')">Луч</button>
+            <button id="rectOverlayBtn" onclick="setTool('rectOverlay')">Зона</button>
+            <button id="clearDrawingsBtn">Удалить всё</button>
+            <button id="chartSyncBtn">Sync</button>
+            <button id="indBtn1" onclick="openIndicatorsPanel(1, event)">Indicators ▾</button>
+        </div>
+        <div class="chart-wrapper" id="wrapper1">
+            <div class="chart" id="chart1"></div>
+            <div class="tv-countdown" id="countdown1"></div>
+            <div class="zoomCenter">
+                <div class="zoomBtn" onclick="zoomChart(1,-1)">−</div>
+                <div class="zoomBtn" onclick="zoomChart(1,1)">+</div>
+            </div>
+            <div class="resetZoom" onclick="autoScaleChart(1)">A</div>
+            <div class="scrollRight" onclick="homeChart(1)">⌂</div>
+            <div class="expand" onclick="toggleFull(1)">⛶</div>
+        </div>
+    </div>
+</div>
+
+<!-- COLUMN 2 -->
+<div class="column" id="column2">
+    <div class="price-pane" id="pane2">
+        <div class="toolbar">
+            <select id="tf2"></select>
+            <button id="hlineBtn2"       onclick="setTool('hline')">Линия</button>
+            <button id="lineOverlayBtn2" onclick="setTool('lineOverlay')">Луч</button>
+            <button id="rectOverlayBtn2" onclick="setTool('rectOverlay')">Зона</button>
+            <button id="signalLogBtn"    onclick="toggleSignalPanel()">Сигналы</button>
+            <button id="indBtn2"         onclick="openIndicatorsPanel(2, event)">Indicators ▾</button>
+        </div>
+        <div class="chart-wrapper" id="wrapper2">
+            <div id="signalPanel"></div>
+            <div class="chart" id="chart2"></div>
+            <div class="tv-countdown" id="countdown2"></div>
+            <div class="zoomCenter">
+                <div class="zoomBtn" onclick="zoomChart(2,-1)">−</div>
+                <div class="zoomBtn" onclick="zoomChart(2,1)">+</div>
+            </div>
+            <div class="resetZoom" onclick="autoScaleChart(2)">A</div>
+            <div class="scrollRight" onclick="homeChart(2)">⌂</div>
+            <div class="expand" onclick="toggleFull(2)">⛶</div>
+        </div>
+    </div>
+</div>
+
+</div><!-- #container -->
+
+<script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
+<script src="js/time-mapper.js"></script>
+<script src="js/drawing-engine.js"></script>
+<script src="js/indicators.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/drawing-controller.js"></script>
+<script src="js/context-menu.js"></script>
+<script src="js/ui-tools.js"></script>
+
+<script>
+// ============================================================================
+// Patch setTool / updateToolButtonState to keep pane-2 buttons in sync.
+// Must use window assignment (not function declaration) to avoid hoisting
+// stomping the ui-tools.js version before we capture it.
+// ============================================================================
+(function() {
+    const _orig = window.setTool;
+    window.setTool = function setTool(tool) {
+        _orig(tool);
+        const ids2 = { lineOverlay: "lineOverlayBtn2", rectOverlay: "rectOverlayBtn2", hline: "hlineBtn2" };
+        ["lineOverlayBtn2", "hlineBtn2", "rectOverlayBtn2"].forEach(id => {
+            const b = document.getElementById(id);
+            if (b) { b.style.background = ""; b.style.color = ""; }
+        });
+        if (ids2[tool]) {
+            const b = document.getElementById(ids2[tool]);
+            if (b) { b.style.background = "#2962FF"; b.style.color = "#fff"; }
+        }
+    };
+
+    const _origBtn = window.updateToolButtonState;
+    window.updateToolButtonState = function updateToolButtonState(isActive) {
+        _origBtn(isActive);
+        const b2 = document.getElementById("hlineBtn2");
+        if (!b2) return;
+        if (isActive) { b2.style.background = "#2962FF"; b2.style.color = "#fff"; }
+        else          { b2.style.background = ""; b2.style.color = ""; }
+    };
+})();
+
+// ============================================================================
+// Constants
+// ============================================================================
+const TF_MAP = {
+    S5:5, S10:10, S15:15, S30:30, M1:60, M3:180, M5:300, M15:900, H1:3600
+};
+const DEFAULT_BAR_COUNT = 122;
+const TZ_OFFSET = 5;
+const DEFAULT_COLORS = {
+    up: "#26a69a", down: "#ef5350", wickUp: "#26a69a", wickDown: "#ef5350"
+};
+
+// ============================================================================
+// Global state
+// ============================================================================
+const layout = StorageLayer.loadLayout(DEFAULT_COLORS);
+const panes  = [1, 2];
+
+if (!layout.symbol)     layout.symbol = "AUD/USD";
+if (!layout.indicators) layout.indicators = {};
+
+let currentSymbol = layout.symbol;
+
+const panesState  = {};
+const drawings    = { 1: [], 2: [] };
+const pendingAlerts = {};
+
+let ws1 = null, ws2 = null;
+let isDragging         = false;
+let contextLinePane    = null;
+let contextLineObject  = null;
+let syncEnabled        = true;
+
+// Indicators panel state
+let indicatorPanelPane = null; // which pane the panel is showing for
+
+// ============================================================================
+// Utilities
+// ============================================================================
+function getPaneElements(id) {
+    return {
+        wrapper:  document.getElementById(`wrapper${id}`),
+        chartDiv: document.getElementById(`chart${id}`),
+        tfSelect: document.getElementById(`tf${id}`),
+        countdown: document.getElementById(`countdown${id}`)
+    };
+}
+function updateCursor(el, type) { el.style.cursor = type; }
+
+function deselectLine() {
+    Object.values(panesState).forEach(st => {
+        if (st.selectedLine) {
+            st.selectedLine.line.applyOptions({ color: st.selectedLine.color, lineWidth: st.selectedLine.width });
+            st.selectedLine = null;
+        }
+    });
+}
+function selectLine(obj) {
+    deselectLine();
+    const st = panesState[obj.paneId];
+    st.selectedLine = obj;
+    obj.line.applyOptions({ color: "#2962FF" });
+}
+
+function addHorizontalLine(id, price) {
+    const { series } = panesState[id];
+    const line = series.createPriceLine({
+        price, color: "#000000", lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true
+    });
+    const obj = { paneId: id, type: "hline", price, line, color: "#000000", width: 2 };
+    drawings[id].push(obj);
+    StorageLayer.saveDrawings(id, layout, panesState, drawings);
+    return obj;
+}
+
+function addAlertLine(id, price) {
+    const { series } = panesState[id];
+    const line = series.createPriceLine({
+        price, color: "#000000", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "🔔"
+    });
+    const obj = { id: null, paneId: id, type: "alert", price, symbol: currentSymbol, triggered: false, line };
+    pendingAlerts[price] = obj;
+    drawings[id].push(obj);
+    panesState[id].ws.send(JSON.stringify({ type: "add_alert", symbol: currentSymbol, price }));
+    StorageLayer.saveDrawings(id, layout, panesState, drawings);
+}
+
+function getEventCoords(e) {
+    if (e.touches && e.touches.length > 0)
+        return { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
+    if (e.changedTouches && e.changedTouches.length > 0)
+        return { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY };
+    return { clientX: e.clientX, clientY: e.clientY };
+}
+function isDrawingActive() {
+    return DrawingController.getTool() !== "idle" || DrawingController.isDragging();
+}
+
+// ============================================================================
+// SINGLE WebSocket message handler (used by both createPane and switchSymbol)
+// ============================================================================
+function handleMessage(id, state, msg) {
+    const els = getPaneElements(id);
+
+    if (
+        msg.type !== "alert" &&
+        msg.type !== "alert_created" &&
+        msg.type !== "analysis" &&
+        msg.type !== "signal" &&
+        msg.requestId !== state.requestId
+    ) return;
+
+    if (msg.type === "history") {
+        if (!state.chart) createChartInternal(id, state.tfSeconds);
+
+        if (msg.data?.length) {
+            state.data = msg.data;
+            state.series.setData(state.data);
+            state.lastCandle = msg.data.at(-1);
+
+            // Load or recompute indicators after first history
+            if (!state.indicatorsLoaded) {
+                state.indicatorsLoaded = true;
+                state.indicatorManager.loadFrom(
+                    layout.indicators[id] || [],
+                    state.data
+                );
+                syncIndicatorPanelToState(id);
+            } else {
+                state.indicatorManager.recomputeAll(state.data);
+            }
+        }
+
+        StorageLayer.restoreDrawings(id, layout, panesState, drawings);
+
+        setTimeout(() => {
+            state.chart.resize(els.chartDiv.clientWidth, els.chartDiv.clientHeight);
+            applyBarCount(id);
+            state.chart.timeScale().scrollToRealTime();
+        }, 120);
+
+        state.drawingEngine?.render();
+    }
+
+    if (msg.type === "update" && msg.candle) {
+        state.series.update(msg.candle);
+
+        const last = state.data[state.data.length - 1];
+        if (last && last.time === msg.candle.time) {
+            state.data[state.data.length - 1] = msg.candle;
+        } else {
+            state.data.push(msg.candle);
+            if (state.data.length > 30000) state.data.shift();
+        }
+
+        state.lastCandle = msg.candle;
+        state.indicatorManager?.recomputeAll(state.data);
+    }
+
+    if (msg.type === "analysis") updateMarketEngine(msg);
+    if (msg.type === "signal")   showSignal(msg);
+
+    if (msg.type === "alert" && msg.symbol === currentSymbol) {
+        playAlertSound();
+        showAlertPopup(msg.symbol + " @ " + msg.price);
+        panes.forEach(paneId => {
+            drawings[paneId].forEach(obj => {
+                if (obj.type === "alert" && obj.id === msg.id) {
+                    obj.triggered = true;
+                    obj.line.applyOptions({ color: "#ff0000", lineWidth: 2, title: "🔕" });
+                    StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+                }
+            });
+        });
+    }
+
+    if (msg.type === "alert_created") {
+        let obj = pendingAlerts[msg.price];
+        let key = msg.price;
+        if (!obj) {
+            for (const k of Object.keys(pendingAlerts)) {
+                if (Math.abs(parseFloat(k) - msg.price) < 0.00001) {
+                    obj = pendingAlerts[k]; key = k; break;
+                }
+            }
+        }
+        if (obj) {
+            obj.id = msg.id;
+            StorageLayer.saveDrawings(obj.paneId, layout, panesState, drawings);
+            delete pendingAlerts[key];
+        }
+    }
+}
+
+// ============================================================================
+// createPane
+// ============================================================================
+function createPane(id) {
+    const els = getPaneElements(id);
+
+    els.tfSelect.addEventListener("keydown", e => {
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") e.preventDefault();
+    });
+
+    const state = panesState[id] = {
+        chart: null, series: null, lastCandle: null, requestId: 0,
+        ws: new WebSocket(`ws://89.107.10.204:8765`),
+        tfSeconds: TF_MAP[layout[`pane${id}`]?.tf || "M1"],
+        selectedLine: null, data: [], syncBound: false,
+        indicatorManager: null, indicatorsLoaded: false
+    };
+
+    if (id === 1) ws1 = state.ws;
+    if (id === 2) ws2 = state.ws;
+
+    Object.keys(TF_MAP).forEach(tf => {
+        const opt = document.createElement("option");
+        opt.value = tf; opt.text = tf;
+        els.tfSelect.appendChild(opt);
+    });
+    els.tfSelect.value = layout[`pane${id}`]?.tf || "M1";
+
+    state.ws.onopen    = () => setTF(id, els.tfSelect.value);
+    state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
+
+    els.tfSelect.onchange = () => setTF(id, els.tfSelect.value);
+    setInterval(() => updateCountdown(id), 250);
+
+    // ────────────────────────────────────────────────────────────
+    function createChartInternal(paneId, tfSec) {
+        const { chartDiv } = getPaneElements(paneId);
+        const st = panesState[paneId];
+
+        st.chart = LightweightCharts.createChart(chartDiv, {
+            width: chartDiv.clientWidth,
+            height: chartDiv.clientHeight,
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            layout: {
+                panes: { separatorColor: '#cccccc' }
+            },
+            localization: {
+                timeFormatter: (time) => {
+                    const ts = (typeof time === "object" ? time.timestamp : time) * 1000;
+                    const d  = new Date(ts + TZ_OFFSET * 3600 * 1000);
+                    const Y  = d.getUTCFullYear();
+                    const M  = String(d.getUTCMonth()+1).padStart(2,"0");
+                    const D  = String(d.getUTCDate()).padStart(2,"0");
+                    const h  = String(d.getUTCHours()).padStart(2,"0");
+                    const m  = String(d.getUTCMinutes()).padStart(2,"0");
+                    const s  = String(d.getUTCSeconds()).padStart(2,"0");
+                    return `${D}.${M}.${Y} ${h}:${m}:${s}`;
+                }
+            },
+            timeScale: {
+                timeVisible: true,
+                secondsVisible: tfSec < 60,
+                rightBarStaysOnScroll: true,
+                rightOffset: 12,
+                tickMarkFormatter: (time) => {
+                    const ts = (typeof time === "object" ? time.timestamp : time) * 1000;
+                    const d  = new Date(ts + TZ_OFFSET * 3600 * 1000);
+                    const h  = String(d.getUTCHours()).padStart(2,"0");
+                    const m  = String(d.getUTCMinutes()).padStart(2,"0");
+                    const s  = String(d.getUTCSeconds()).padStart(2,"0");
+                    return `${h}:${m}:${s}`;
+                }
+            }
+        });
+
+        st.series = st.chart.addSeries(
+            LightweightCharts.CandlestickSeries,
+            { priceFormat: { type: 'price', precision: 5, minMove: 0.00001 } },
+            0
+        );
+
+        // Indicator manager — created here, loaded later in handleMessage
+        st.indicatorManager = new IndicatorManager(paneId, st.chart, st.series, chartDiv);
+
+        // Drawing overlay
+        st.drawingEngine = new DrawingEngine(paneId, st.chart, st.series, chartDiv);
+
+        applyColors();
+        setupInteractionHandlers(paneId, st, els);
+    }
+
+    // Expose createChartInternal so handleMessage can call it on first history
+    // (closure over id/state/els is correct here)
+    window[`_createChart${id}`] = createChartInternal;
+
+    function updateCountdown(paneId) {
+        const st = panesState[paneId];
+        if (!st.lastCandle || !st.series) return;
+        const now    = Math.floor(Date.now() / 1000);
+        const bucket = Math.floor(now / st.tfSeconds) * st.tfSeconds;
+        let remain   = st.tfSeconds - (now - bucket);
+        if (remain < 0) remain = 0;
+        const m  = Math.floor(remain / 60).toString().padStart(2,'0');
+        const s  = (remain % 60).toString().padStart(2,'0');
+        const y  = st.series.priceToCoordinate(st.lastCandle.close);
+        if (y === null) return;
+        const el = getPaneElements(paneId).countdown;
+        el.style.top  = (y + 9) + "px";
+        el.style.background = st.lastCandle.close >= st.lastCandle.open ? "#089981" : "#f23645";
+        el.innerText  = `${m}:${s}`;
+    }
+}
+
+// ============================================================================
+// createChartInternal — called from handleMessage on first history
+// ============================================================================
+function createChartInternal(id, tfSec) {
+    window[`_createChart${id}`]?.(id, tfSec);
+}
+
+// ============================================================================
+// Interaction handlers (drawing, drag, context menus, touch)
+// ============================================================================
+function setupInteractionHandlers(paneId, st, els) {
+    const id = paneId;
+
+    let touchPrevX = null, touchPrevY = null;
+    let touchStartX = null, touchStartY = null;
+    let mobileEditMode = null, mobileEditPrevX = null, mobileEditPrevY = null;
+    let mobileEditStartX = null, mobileEditStartY = null;
+
+    els.wrapper.addEventListener("touchstart", e => {
+        const tool = DrawingController.getTool();
+        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay" || tool === "hline");
+
+        if (isDrawing) {
+            st.chart.applyOptions({ handleScroll: false, handleScale: false });
+            e.preventDefault();
+            touchStartX = e.touches[0].clientX; touchStartY = e.touches[0].clientY;
+            touchPrevX  = e.touches[0].clientX; touchPrevY  = e.touches[0].clientY;
+            if (!st.drawingEngine.cursorActive) st.drawingEngine.showCursor();
+            return;
+        }
+
+        if (tool === "idle") {
+            const touch = e.touches[0];
+            const rect  = els.wrapper.getBoundingClientRect();
+            const x = touch.clientX - rect.left;
+            const y = touch.clientY - rect.top;
+            mobileEditStartX = touch.clientX; mobileEditStartY = touch.clientY;
+            mobileEditPrevX  = touch.clientX; mobileEditPrevY  = touch.clientY;
+
+            const pointHit = st.drawingEngine.hitTestPoint(x, y);
+            if (pointHit) {
+                mobileEditMode = "point";
+                DrawingController.startDrag(pointHit.obj, null, null, pointHit.pointIndex);
+                st.chart.applyOptions({ handleScroll: false, handleScale: false });
+                e.preventDefault(); return;
+            }
+            const lineHit = st.drawingEngine.hitTestLine(x, y);
+            if (lineHit) {
+                mobileEditMode = "line";
+                DrawingController.startDrag(lineHit, 0, 0, null);
+                DrawingController.originalPoints = lineHit.points.map(p => ({ ...p }));
+                st.chart.applyOptions({ handleScroll: false, handleScale: false });
+                e.preventDefault(); return;
+            }
+            const stLocal = panesState[id];
+            if (stLocal.selectedLine) {
+                const lineY = st.series.priceToCoordinate(stLocal.selectedLine.price);
+                if (lineY !== null && Math.abs(lineY - y) < 16) {
+                    mobileEditMode = "hline"; isDragging = true;
+                    st.chart.applyOptions({ handleScroll: false, handleScale: false });
+                    e.preventDefault(); return;
+                }
+            }
+        }
+    }, { passive: false });
+
+    els.wrapper.addEventListener("touchmove", e => {
+        e.preventDefault();
+        const tool = DrawingController.getTool();
+        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay");
+        const touch = e.touches[0];
+        const rect  = els.wrapper.getBoundingClientRect();
+        const tx = touch.clientX - rect.left;
+        const ty = touch.clientY - rect.top;
+
+        if (isDrawing) {
+            if (touchPrevX !== null) {
+                const dx = touch.clientX - touchPrevX, dy = touch.clientY - touchPrevY;
+                st.drawingEngine.moveCursor(dx, dy);
+                const newX = st.drawingEngine.cursorX, newY = st.drawingEngine.cursorY;
+                const preview = DrawingController.getPreviewLine();
+                if (preview && DrawingController.getTempStart()) {
+                    const rawTime = st.chart.timeScale().coordinateToTime(newX);
+                    const price   = st.series.coordinateToPrice(newY);
+                    if (rawTime && price !== null) {
+                        const time = typeof rawTime === "object" ? rawTime.timestamp : rawTime;
+                        if (typeof time === "number") { preview.points[1] = { time, price }; st.drawingEngine.render(); }
+                    }
+                }
+            }
+            touchPrevX = touch.clientX; touchPrevY = touch.clientY; return;
+        }
+
+        if (mobileEditMode && mobileEditPrevX !== null) {
+            const dx = touch.clientX - mobileEditPrevX, dy = touch.clientY - mobileEditPrevY;
+            mobileEditPrevX = touch.clientX; mobileEditPrevY = touch.clientY;
+
+            if (mobileEditMode === "point") {
+                const draggedLine = DrawingController.getDraggedLine();
+                const pointIndex  = DrawingController.getDraggedPointIndex();
+                if (!draggedLine || pointIndex === null) return;
+                const p = draggedLine.points[pointIndex];
+                const px = st.drawingEngine.timeMapper.getX(p.time);
+                const py = st.series.priceToCoordinate(p.price);
+                if (px === null || py === null) return;
+                const newX    = Math.max(0, Math.min(rect.width,  px + dx));
+                const newY    = Math.max(0, Math.min(rect.height, py + dy));
+                const rawTime = st.chart.timeScale().coordinateToTime(newX);
+                const price   = st.series.coordinateToPrice(newY);
+                if (!rawTime || price === null) return;
+                const time = typeof rawTime === "object" ? rawTime.timestamp : rawTime;
+                if (typeof time !== "number") return;
+                draggedLine.points[pointIndex] = { time, price };
+                st.drawingEngine.render(); return;
+            }
+            if (mobileEditMode === "line") {
+                const draggedLine = DrawingController.getDraggedLine();
+                if (!draggedLine) return;
+                const cx = rect.width / 2, cy2 = rect.height / 2;
+                const rawT1 = st.chart.timeScale().coordinateToTime(cx);
+                const rawT2 = st.chart.timeScale().coordinateToTime(cx + dx);
+                const p1v   = st.series.coordinateToPrice(cy2);
+                const p2v   = st.series.coordinateToPrice(cy2 + dy);
+                if (!rawT1 || !rawT2 || p1v === null || p2v === null) return;
+                const t1 = typeof rawT1 === "object" ? rawT1.timestamp : rawT1;
+                const t2 = typeof rawT2 === "object" ? rawT2.timestamp : rawT2;
+                draggedLine.points = DrawingController.originalPoints.map(p => ({
+                    time: p.time + (t2 - t1), price: p.price + (p2v - p1v)
+                }));
+                st.drawingEngine.render(); return;
+            }
+            if (mobileEditMode === "hline") {
+                const stLocal = panesState[id];
+                if (!stLocal.selectedLine) return;
+                const lineY = st.series.priceToCoordinate(stLocal.selectedLine.price);
+                if (lineY === null) return;
+                const newPrice = st.series.coordinateToPrice(lineY + dy);
+                if (newPrice === null) return;
+                stLocal.selectedLine.price = newPrice;
+                stLocal.selectedLine.line.applyOptions({ price: newPrice });
+                if (stLocal.selectedLine.type === "alert") {
+                    panesState[id].ws.send(JSON.stringify({ type: "update_alert", symbol: currentSymbol, id: stLocal.selectedLine.id, price: newPrice }));
+                }
+                return;
+            }
+        }
+    }, { passive: false });
+
+    els.wrapper.addEventListener("touchend", e => {
+        const tool = DrawingController.getTool();
+        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay" || tool === "hline");
+
+        if (isDrawing) {
+            const isTap = touchStartX !== null && e.changedTouches.length > 0 &&
+                Math.abs(e.changedTouches[0].clientX - touchStartX) < 8 &&
+                Math.abs(e.changedTouches[0].clientY - touchStartY) < 8;
+            touchStartX = null; touchStartY = null; touchPrevX = null; touchPrevY = null;
+            if (!isTap) return;
+
+            if (tool === "lineOverlay" || tool === "rectOverlay") {
+                const cx = st.drawingEngine.cursorX, cy = st.drawingEngine.cursorY;
+                if (cx === null || cy === null) return;
+                const rawTime = st.chart.timeScale().coordinateToTime(cx);
+                const price   = st.series.coordinateToPrice(cy);
+                if (!rawTime || price === null) return;
+                const time = typeof rawTime === "object" ? rawTime.timestamp : rawTime;
+                if (typeof time !== "number") return;
+                if (!DrawingController.getTempStart()) {
+                    const startPoint = { time, price };
+                    DrawingController.setTempStart(startPoint);
+                    const preview = {
+                        type: tool === "lineOverlay" ? "line" : "rect",
+                        paneId: id, points: [startPoint, { ...startPoint }],
+                        color: "#000000", width: 2,
+                        ...(tool === "rectOverlay" ? { fillColor: "rgba(41,98,255,0.15)", showMidline: true, midColor: "#000000", midWidth: 1, extendRight: true } : {})
+                    };
+                    DrawingController.setPreviewLine(preview);
+                    st.drawingEngine.addDrawing(preview); return;
+                }
+                const preview = DrawingController.getPreviewLine();
+                preview.points[1] = { time, price };
+                DrawingController.clearPreview(); DrawingController.resetTool(); st.drawingEngine.hideCursor();
+                ["lineOverlayBtn","rectOverlayBtn","lineOverlayBtn2","rectOverlayBtn2"].forEach(id => {
+                    const b = document.getElementById(id);
+                    if (b) { b.style.background = ""; b.style.color = ""; }
+                });
+                StorageLayer.saveDrawings(id, layout, panesState, drawings);
+                st.chart.applyOptions({ handleScroll: true, handleScale: true }); return;
+            }
+            if (tool === "hline") {
+                const cy = st.drawingEngine.cursorY;
+                if (cy === null) return;
+                const price = st.series.coordinateToPrice(cy);
+                if (price === null) return;
+                addHorizontalLine(id, price);
+                DrawingController.resetTool(); st.drawingEngine.hideCursor();
+                updateToolButtonState(false);
+                st.chart.applyOptions({ handleScroll: true, handleScale: true }); return;
+            }
+        }
+        if (mobileEditMode) {
+            if (mobileEditMode === "point" || mobileEditMode === "line") {
+                DrawingController.stopDrag();
+                StorageLayer.saveDrawings(id, layout, panesState, drawings);
+            }
+            if (mobileEditMode === "hline") {
+                isDragging = false;
+                StorageLayer.saveDrawings(id, layout, panesState, drawings);
+            }
+            st.chart.applyOptions({ handleScroll: true, handleScale: true });
+            mobileEditMode = null; mobileEditPrevX = null; mobileEditPrevY = null;
+            mobileEditStartX = null; mobileEditStartY = null;
+        }
+    });
+
+    // Click handler
+    st.chart.subscribeClick(param => {
+        if (isMobile() && isDrawingActive()) return;
+
+        // Time sync between panes
+        if (syncEnabled && typeof param.time === "number") {
+            const otherId = id === 1 ? 2 : 1;
+            const other   = panesState[otherId];
+            if (other?.chart && other.tfSeconds) {
+                const visible = other.chart.timeScale().getVisibleRange();
+                if (visible && (param.time < visible.from || param.time > visible.to)) {
+                    other.chart.timeScale().setVisibleRange({
+                        from: param.time - other.tfSeconds * 50,
+                        to:   param.time + other.tfSeconds * 50
+                    });
+                }
+            }
+        }
+
+        if (!param.point) return;
+
+        // Overlay line selection
+        if (DrawingController.getTool() === "idle") {
+            const found = st.drawingEngine.hitTestLine(param.point.x, param.point.y);
+            st.drawingEngine.drawings.forEach(d => d.selected = false);
+            if (found) found.selected = true;
+            st.drawingEngine.render();
+        }
+
+        if (DrawingController.getTool() === "lineOverlay") {
+            const price = st.series.coordinateToPrice(param.point.y);
+            if (price === null) return;
+            const time = param.time;
+            if (typeof time !== "number") return;
+            if (!DrawingController.getTempStart()) {
+                const startPoint = { time, price };
+                DrawingController.setTempStart(startPoint);
+                const preview = { type: "line", paneId: id, points: [startPoint, startPoint], color: "#000000", width: 2 };
+                DrawingController.setPreviewLine(preview);
+                st.drawingEngine.addDrawing(preview); return;
+            }
+            const preview = DrawingController.getPreviewLine();
+            preview.points[1] = { time, price };
+            DrawingController.clearPreview(); DrawingController.resetTool();
+            StorageLayer.saveDrawings(id, layout, panesState, drawings);
+            ["lineOverlayBtn","lineOverlayBtn2"].forEach(bid => {
+                const b = document.getElementById(bid);
+                if (b) { b.style.background = ""; b.style.color = ""; }
+            });
+            return;
+        }
+
+        if (DrawingController.getTool() === "rectOverlay") {
+            const price = st.series.coordinateToPrice(param.point.y);
+            if (price === null) return;
+            let rawTime = param.time;
+            if (!rawTime) return;
+            const time = typeof rawTime === "object" ? rawTime.timestamp : rawTime;
+            if (typeof time !== "number") return;
+            if (!DrawingController.getTempStart()) {
+                const startPoint = { time, price };
+                DrawingController.setTempStart(startPoint);
+                const preview = { type: "rect", paneId: id, points: [startPoint, startPoint], color: "#000000", width: 2, fillColor: "rgba(41,98,255,0.15)", showMidline: true, midColor: "#000000", midWidth: 1, extendRight: true };
+                DrawingController.setPreviewLine(preview);
+                st.drawingEngine.addDrawing(preview); return;
+            }
+            const preview = DrawingController.getPreviewLine();
+            preview.points[1] = { time, price };
+            DrawingController.clearPreview(); DrawingController.resetTool();
+            StorageLayer.saveDrawings(id, layout, panesState, drawings);
+            ["rectOverlayBtn","rectOverlayBtn2"].forEach(bid => {
+                const b = document.getElementById(bid);
+                if (b) { b.style.background = ""; b.style.color = ""; }
+            });
+            return;
+        }
+
+        const price = st.series.coordinateToPrice(param.point.y);
+        if (price === null) return;
+
+        if (DrawingController.getTool() === "hline") {
+            addHorizontalLine(id, price);
+            DrawingController.resetTool(); updateToolButtonState(false);
+            updateCursor(els.wrapper, "default"); return;
+        }
+        if (DrawingController.getTool() === "alert") {
+            addAlertLine(id, price);
+            DrawingController.resetTool();
+            const alertBtn = document.getElementById("AlertBtn");
+            if (alertBtn) { alertBtn.style.background = ""; alertBtn.style.color = ""; }
+            return;
+        }
+
+        // hline hit test
+        let found = null;
+        drawings[id].forEach(obj => {
+            const ly = st.series.priceToCoordinate(obj.price);
+            if (ly !== null && Math.abs(ly - param.point.y) < 6) found = obj;
+        });
+        if (found) selectLine(found); else deselectLine();
+    });
+
+    // Mouse move — overlay drag + hline drag
+    function onMoveOverlay(e) {
+        const coords = getEventCoords(e);
+        if (DrawingController.isDragging()) {
+            const draggedLine = DrawingController.getDraggedLine();
+            const rect  = els.wrapper.getBoundingClientRect();
+            const x = coords.clientX - rect.left, y = coords.clientY - rect.top;
+            let rawTime = st.chart.timeScale().coordinateToTime(x);
+            const price = st.series.coordinateToPrice(y);
+            if (!rawTime || price === null) return;
+            const time = typeof rawTime === "object" ? rawTime.timestamp : rawTime;
+            if (typeof time !== "number") return;
+            const draggedPointIndex = DrawingController.getDraggedPointIndex();
+            if (draggedPointIndex !== null) {
+                draggedLine.points[draggedPointIndex] = { time, price };
+                st.drawingEngine.render(); return;
+            }
+            const deltaTime  = time  - DrawingController.getDragStartTime();
+            const deltaPrice = price - DrawingController.getDragStartPrice();
+            draggedLine.points = DrawingController.originalPoints.map(p => ({ time: p.time + deltaTime, price: p.price + deltaPrice }));
+            st.drawingEngine.render(); return;
+        }
+        if (DrawingController.getTool() !== "lineOverlay" && DrawingController.getTool() !== "rectOverlay") return;
+        const tempStart = DrawingController.getTempStart();
+        const preview   = DrawingController.getPreviewLine();
+        if (!tempStart || !preview) return;
+        const rect  = els.wrapper.getBoundingClientRect();
+        const x = coords.clientX - rect.left, y = coords.clientY - rect.top;
+        const price = st.series.coordinateToPrice(y);
+        if (price === null) return;
+        const time = st.chart.timeScale().coordinateToTime(x);
+        if (time === null) return;
+        preview.points[1] = { time, price };
+        st.drawingEngine.render();
+    }
+    els.wrapper.addEventListener("mousemove", onMoveOverlay);
+
+    function onMoveHLine(e) {
+        const stLocal = panesState[id];
+        if (!isDragging || !stLocal.selectedLine) return;
+        const coords = getEventCoords(e);
+        const rect   = els.wrapper.getBoundingClientRect();
+        const y      = coords.clientY - rect.top;
+        const newPrice = st.series.coordinateToPrice(y);
+        if (newPrice === null) return;
+        stLocal.selectedLine.price = newPrice;
+        stLocal.selectedLine.line.applyOptions({ price: newPrice });
+        if (stLocal.selectedLine.type === "alert") {
+            panesState[id].ws.send(JSON.stringify({ type: "update_alert", symbol: currentSymbol, id: stLocal.selectedLine.id, price: newPrice }));
+        }
+    }
+    els.wrapper.addEventListener("mousemove", onMoveHLine);
+
+    // Context menu
+    els.wrapper.addEventListener("contextmenu", e => {
+        e.preventDefault();
+        const rect = els.wrapper.getBoundingClientRect();
+        const x = e.clientX - rect.left, y = e.clientY - rect.top;
+        const overlayHit = st.drawingEngine.hitTestLine(x, y);
+        if (overlayHit) {
+            st.drawingEngine.drawings.forEach(d => d.selected = false);
+            overlayHit.selected = true; st.drawingEngine.render();
+            showOverlayMenu(e.pageX, e.pageY, id, overlayHit); return;
+        }
+        let found = null;
+        drawings[id].forEach(obj => {
+            const ly = st.series.priceToCoordinate(obj.price);
+            if (ly !== null && Math.abs(ly - y) < 8) found = obj;
+        });
+        if (found) {
+            selectLine(found);
+            if (found.type === "alert") { showAlertMenu(e.pageX, e.pageY, id, found); return; }
+            showOverlayMenu(e.pageX, e.pageY, id, found);
+        } else {
+            const price = st.series.coordinateToPrice(y);
+            if (price !== null) showChartMenu(e.pageX, e.pageY, id, price);
+        }
+    });
+
+    // mousedown — drag start (desktop)
+    function onDownHLine(e) {
+        if (isMobile()) return;
+        const stLocal = panesState[id];
+        if (!stLocal.selectedLine) return;
+        const coords = getEventCoords(e);
+        const rect   = els.wrapper.getBoundingClientRect();
+        const y      = coords.clientY - rect.top;
+        const lineY  = st.series.priceToCoordinate(stLocal.selectedLine.price);
+        if (lineY === null) return;
+        if (Math.abs(lineY - y) < 12) {
+            isDragging = true;
+            st.chart.applyOptions({ handleScroll: false, handleScale: false });
+            updateCursor(els.wrapper, "ns-resize");
+        }
+    }
+    els.wrapper.addEventListener("mousedown", onDownHLine);
+
+    function onDownOverlay(e) {
+        if (isMobile()) return;
+        if (DrawingController.getTool() !== "idle") return;
+        const coords = getEventCoords(e);
+        const rect   = els.wrapper.getBoundingClientRect();
+        const x = coords.clientX - rect.left, y = coords.clientY - rect.top;
+        const pointHit = st.drawingEngine.hitTestPoint(x, y);
+        if (pointHit) {
+            DrawingController.startDrag(pointHit.obj, null, null, pointHit.pointIndex);
+            st.chart.applyOptions({ handleScroll: false, handleScale: false }); return;
+        }
+        const found = st.drawingEngine.hitTestLine(x, y);
+        if (!found) return;
+        const projection = st.drawingEngine.getProjectionOnLine(found, x, y);
+        if (!projection) return;
+        const rawStart = st.chart.timeScale().coordinateToTime(projection.projX);
+        if (!rawStart) return;
+        const startTime  = typeof rawStart === "object" ? rawStart.timestamp : rawStart;
+        const startPrice = st.series.coordinateToPrice(projection.projY);
+        if (startPrice === null) return;
+        DrawingController.startDrag(found, startTime, startPrice, null);
+        st.chart.applyOptions({ handleScroll: false, handleScale: false });
+    }
+    els.wrapper.addEventListener("mousedown", onDownOverlay);
+
+    function onUpOverlay() {
+        if (isMobile()) return;
+        if (!DrawingController.isDragging()) return;
+        DrawingController.stopDrag();
+        st.chart.applyOptions({ handleScroll: true, handleScale: true });
+        StorageLayer.saveDrawings(id, layout, panesState, drawings);
+    }
+    els.wrapper.addEventListener("mouseup", onUpOverlay);
+
+    function onUpHLine() {
+        if (isMobile()) return;
+        if (isDragging && panesState[id].selectedLine)
+            StorageLayer.saveDrawings(id, layout, panesState, drawings);
+        isDragging = false;
+        st.chart.applyOptions({ handleScroll: true, handleScale: true });
+        updateCursor(els.wrapper, "default");
+    }
+    els.wrapper.addEventListener("mouseup", onUpHLine);
+}
+
+// ============================================================================
+// setTF
+// ============================================================================
+function setTF(paneId, tf) {
+    const st = panesState[paneId];
+    st.requestId++;
+    st.tfSeconds = TF_MAP[tf];
+    if (st.drawingEngine) st.drawingEngine.setTimeframe(st.tfSeconds);
+    if (st.chart) {
+        st.chart.applyOptions({ timeScale: { secondsVisible: st.tfSeconds < 60 } });
+    }
+    layout[`pane${paneId}`].tf = tf;
+    StorageLayer.autoSave(layout);
+    DrawingController.resetTool();
+
+    if (st.ws.readyState === WebSocket.OPEN) {
+        st.ws.send(JSON.stringify({ type: "set_tf", symbol: currentSymbol, tf, requestId: st.requestId }));
+    }
+}
+
+// ============================================================================
+// switchSymbol
+// ============================================================================
+function switchSymbol(symbol) {
+    currentSymbol = symbol;
+
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st) return;
+        drawings[paneId].forEach(obj => { if (obj.line) st.series.removePriceLine(obj.line); });
+        if (st.drawingEngine) { st.drawingEngine.drawings = []; st.drawingEngine.render(); }
+    });
+    drawings[1] = []; drawings[2] = [];
+
+    layout.symbol = symbol;
+    StorageLayer.autoSave(layout);
+
+    [1, 2].forEach(id => {
+        const state = panesState[id];
+        if (!state) return;
+        if (state.ws) state.ws.close();
+
+        state.ws = new WebSocket(`ws://89.107.10.204:8765`);
+        state.indicatorsLoaded = false; // force reload on next history
+
+        state.ws.onopen    = () => setTF(id, layout[`pane${id}`]?.tf || "M1");
+        state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
+
+        if (id === 1) ws1 = state.ws;
+        if (id === 2) ws2 = state.ws;
+    });
+}
+
+// ============================================================================
+// Layout / fullscreen / zoom
+// ============================================================================
+function toggleFull(id) {
+    const column1 = document.getElementById("column1");
+    const column2 = document.getElementById("column2");
+    if (layout.split === "split") {
+        if (id === 1) { column2.style.display = "none"; column1.style.flex = "1 1 100%"; layout.split = "leftFull"; }
+        else          { column1.style.display = "none"; column2.style.flex = "1 1 100%"; layout.split = "rightFull"; }
+    } else {
+        column1.style.display = ""; column2.style.display = "";
+        column1.style.flex = "1"; column2.style.flex = "1"; layout.split = "split";
+    }
+    StorageLayer.autoSave(layout);
+    requestAnimationFrame(() => {
+        document.body.offsetHeight;
+        Object.keys(panesState).forEach(k => {
+            const s = panesState[k];
+            if (!s.chart) return;
+            const div = document.getElementById(`chart${k}`);
+            if (!div) return;
+            s.chart.resize(div.clientWidth, div.clientHeight);
+            applyBarCount(parseInt(k));
+        });
+    });
+}
+
+function autoScaleChart(id) {
+    const st = panesState[id];
+    if (!st?.chart) return;
+    applyBarCount(id);
+    st.chart.priceScale("right").applyOptions({ autoScale: true });
+}
+
+function applyBarCount(id) {
+    const st = panesState[id];
+    if (!st?.chart) return;
+    const width = st.chart.timeScale().width();
+    if (!width) return;
+    st.chart.timeScale().applyOptions({ barSpacing: width / DEFAULT_BAR_COUNT });
+}
+
+function homeChart(id) {
+    const st = panesState[id];
+    if (!st?.chart) return;
+    st.chart.timeScale().scrollToRealTime();
+    st.chart.priceScale("right").applyOptions({ autoScale: true });
+}
+
+function zoomChart(id, direction) {
+    const st = panesState[id];
+    if (!st?.chart) return;
+    const ts  = st.chart.timeScale();
+    let next  = (ts.options().barSpacing || 6) + direction * 1;
+    if (next < 1) next = 1;
+    if (next > 80) next = 80;
+    ts.applyOptions({ barSpacing: next });
+}
+
+function exportLayout() {
+    const now = new Date();
+    const pad = n => String(n).padStart(2,'0');
+    const date = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+    const filename = `${currentSymbol.replace("/","")}_${layout.pane1.tf||"M1"}_${layout.pane2.tf||"M1"}_${layout.split}_${date}.json`;
+    const blob = new Blob([JSON.stringify(layout, null, 2)], { type: "application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+}
+
+document.getElementById("importFile").onchange = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { localStorage.setItem("layoutState", reader.result); location.reload(); };
+    reader.readAsText(file);
+};
+
+// ============================================================================
+// Colors
+// ============================================================================
+function applyColors() {
+    Object.values(panesState).forEach(p => {
+        if (!p.series) return;
+        p.series.applyOptions({
+            upColor: layout.colors.up, downColor: layout.colors.down,
+            wickUpColor: layout.colors.wickUp, wickDownColor: layout.colors.wickDown,
+            borderUpColor: layout.colors.up, borderDownColor: layout.colors.down
+        });
+    });
+}
+function resetColors() {
+    layout.colors = { ...DEFAULT_COLORS };
+    applyColors(); StorageLayer.autoSave(layout);
+}
+
+// ============================================================================
+// Signal panel
+// ============================================================================
+const signalAudio = new Audio("alert.mp3");
+let _lastSignalTs = 0;
+let _signalHideTimer = null;
+
+function _signalClose() {
+    const panel = document.getElementById("signalPanel");
+    if (panel) panel.style.display = "none";
+    if (_signalHideTimer) { clearTimeout(_signalHideTimer); _signalHideTimer = null; }
+    const btn = document.getElementById("signalLogBtn");
+    if (btn) { btn.style.background = ""; btn.style.color = ""; }
+}
+
+function toggleSignalPanel() {
+    const panel = document.getElementById("signalPanel");
+    if (!panel) return;
+    const btn = document.getElementById("signalLogBtn");
+    if (panel.style.display === "none" || !panel.style.display) {
+        panel.style.display = "block";
+        if (btn) { btn.style.background = "#2962FF"; btn.style.color = "#fff"; }
+        // Re-arm auto-hide only if there's actual content (panel has been populated)
+        if (panel.innerHTML.trim() && !_signalHideTimer) {
+            _signalHideTimer = setTimeout(_signalClose, 30000);
+        }
+    } else {
+        _signalClose();
+    }
+}
+
+function showSignal(data) {
+    const panel = document.getElementById("signalPanel");
+    if (!panel) return;
+    const now = Date.now();
+    if (data.direction !== "SKIP" && now - _lastSignalTs < 60000) return;
+    if (data.direction !== "SKIP") _lastSignalTs = now;
+
+    if (_signalHideTimer) { clearTimeout(_signalHideTimer); _signalHideTimer = null; }
+
+    panel.className = "";
+    panel.style.display = "block";
+    const _sigBtn = document.getElementById("signalLogBtn");
+    if (_sigBtn) { _sigBtn.style.background = "#2962FF"; _sigBtn.style.color = "#fff"; }
+
+    const closeBtn = "<span class='sig-close' onclick='_signalClose()'>✕</span>";
+
+    if (data.direction === "SKIP") {
+        panel.classList.add("skip");
+        panel.innerHTML = closeBtn +
+            "<div style='font-size:12px;font-weight:bold;color:#888'>⏸ ПРОПУСК</div>" +
+            "<div style='font-size:11px;color:#999;margin-top:4px'>" + (data.skip_reason || "") + "</div>";
+        _signalHideTimer = setTimeout(_signalClose, 15000);
+        return;
+    }
+
+    const isUp  = data.direction === "UP";
+    const color = isUp ? "#26a69a" : "#ef5350";
+    const arrow = isUp ? "▲ UP" : "▼ DOWN";
+    const sessionMap = { london:"Лондон", ny:"NY", asia:"Азия", asia_late:"Азия" };
+    const session = sessionMap[data.session] || data.session;
+    const hh = String(data.hour_utc).padStart(2,"0");
+    const mm = String(data.min_in_hour).padStart(2,"0");
+    const pct = data.display_pct || data.confidence;
+    const hasMemory = data.winrate !== null && data.samples >= 15;
+
+    const pctLine = hasMemory
+        ? "<div style='font-size:11px;color:#aaa;margin-top:3px'>📊 Винрейт: <b style='color:" + color + "'>" + data.winrate + "%</b> <span style='color:#666'>(" + data.samples + ")</span></div>"
+        : "<div style='font-size:11px;color:#666;margin-top:3px'>📊 score-based</div>";
+
+    panel.classList.add(isUp ? "up" : "down");
+    panel.innerHTML = closeBtn +
+        "<div style='font-size:17px;font-weight:bold;color:" + color + "'>" + arrow + " <span style='font-size:14px'>" + pct + "%</span></div>" +
+        pctLine +
+        "<div style='font-size:11px;color:#ccc;margin:5px 0 3px'>" + data.symbol + " | " + session + " | " + hh + ":" + mm + " UTC</div>" +
+        "<div style='font-size:11px;color:#bbb;line-height:1.6'>" + (data.reason || []).join("<br>") + "</div>";
+
+    signalAudio.currentTime = 0; signalAudio.play().catch(() => {});
+    // Auto-hide after 30 seconds
+    _signalHideTimer = setTimeout(_signalClose, 30000);
+}
+
+function updateMarketEngine(data) {
+    // Data received but panel display is intentionally disabled (engine panels removed with sub-panes)
+}
+
+// ============================================================================
+// Alert sound / popup
+// ============================================================================
+const alertAudio = new Audio("alert.mp3");
+function playAlertSound() { alertAudio.currentTime = 0; alertAudio.play().catch(()=>{}); }
+function showAlertPopup(text) {
+    const popup = document.getElementById("alertPopup");
+    popup.innerHTML = text + ' <span id="closeAlert" style="margin-left:12px;cursor:pointer;font-weight:bold;">✕</span>';
+    popup.style.display = "block";
+    document.getElementById("closeAlert").onclick = () => { popup.style.display = "none"; };
+}
+
+// ============================================================================
+// INDICATORS PANEL
+// ============================================================================
+function openIndicatorsPanel(paneId, e) {
+    e.stopPropagation();
+    indicatorPanelPane = paneId;
+
+    const panel = document.getElementById("indicatorsPanel");
+    syncIndicatorPanelToState(paneId);
+
+    const btn  = document.getElementById(`indBtn${paneId}`);
+    const rect = btn.getBoundingClientRect();
+
+    panel.style.display = "block";
+    panel.style.top  = (rect.bottom + 4) + "px";
+    panel.style.left = rect.left + "px";
+
+    // Clamp to viewport
+    const pr = panel.getBoundingClientRect();
+    if (pr.right > window.innerWidth) {
+        panel.style.left = (window.innerWidth - pr.width - 8) + "px";
+    }
+}
+
+function syncIndicatorPanelToState(paneId) {
+    const mgr = panesState[paneId]?.indicatorManager;
+    if (!mgr) return;
+
+    const types = ['sma', 'ema', 'bollinger', 'rsi', 'macd', 'stochastic'];
+    types.forEach(type => {
+        const cb = document.getElementById(`ind_${type}`);
+        if (cb) cb.checked = mgr.has(type);
+    });
+}
+
+function getIndParams(type) {
+    if (type === 'sma') return { period: parseInt(document.getElementById('ind_sma_period').value) || 20 };
+    if (type === 'ema') return { period: parseInt(document.getElementById('ind_ema_period').value) || 21 };
+    if (type === 'bollinger') return {
+        period: parseInt(document.getElementById('ind_bollinger_period').value) || 20,
+        mult:   parseFloat(document.getElementById('ind_bollinger_mult').value) || 2
+    };
+    if (type === 'rsi') return { period: parseInt(document.getElementById('ind_rsi_period').value) || 14 };
+    if (type === 'macd') return {
+        fast:   parseInt(document.getElementById('ind_macd_fast').value) || 12,
+        slow:   parseInt(document.getElementById('ind_macd_slow').value) || 26,
+        signal: parseInt(document.getElementById('ind_macd_signal').value) || 9
+    };
+    if (type === 'stochastic') return {
+        period:  parseInt(document.getElementById('ind_stochastic_period').value)  || 14,
+        smoothK: parseInt(document.getElementById('ind_stochastic_smoothK').value) || 3,
+        smoothD: parseInt(document.getElementById('ind_stochastic_smoothD').value) || 3
+    };
+    return {};
+}
+
+function getIndColor(type) {
+    const el = document.getElementById(`ind_${type}_color`);
+    return el ? el.value : null;
+}
+
+function saveIndicators(paneId) {
+    const mgr = panesState[paneId]?.indicatorManager;
+    if (!mgr) return;
+    if (!layout.indicators) layout.indicators = {};
+    layout.indicators[paneId] = mgr.serialize();
+    StorageLayer.autoSave(layout);
+}
+
+function onIndToggle(type) {
+    const paneId = indicatorPanelPane;
+    if (!paneId) return;
+    const mgr = panesState[paneId]?.indicatorManager;
+    if (!mgr) return;
+
+    const checked = document.getElementById(`ind_${type}`).checked;
+    const data    = panesState[paneId].data;
+
+    if (checked) {
+        mgr.add(type, getIndParams(type), getIndColor(type));
+        if (data?.length) mgr.recomputeAll(data);
+    } else {
+        mgr.remove(type);
+    }
+    saveIndicators(paneId);
+}
+
+function onIndParam(type) {
+    const paneId = indicatorPanelPane;
+    if (!paneId) return;
+    const mgr = panesState[paneId]?.indicatorManager;
+    if (!mgr || !mgr.has(type)) return;
+
+    const data = panesState[paneId].data;
+    mgr.update(type, getIndParams(type), null);
+    if (data?.length) mgr.recomputeAll(data);
+    saveIndicators(paneId);
+}
+
+function onIndColor(type) {
+    const paneId = indicatorPanelPane;
+    if (!paneId) return;
+    const mgr = panesState[paneId]?.indicatorManager;
+    if (!mgr || !mgr.has(type)) return;
+
+    const data = panesState[paneId].data;
+    mgr.setColor(type, getIndColor(type));
+    if (data?.length) mgr.recomputeAll(data);
+    saveIndicators(paneId);
+}
+
+// Close indicators panel on outside click
+document.addEventListener("click", e => {
+    const panel = document.getElementById("indicatorsPanel");
+    const btn1  = document.getElementById("indBtn1");
+    const btn2  = document.getElementById("indBtn2");
+    if (panel && !panel.contains(e.target) && e.target !== btn1 && e.target !== btn2) {
+        panel.style.display = "none";
+    }
+});
+
+// ============================================================================
+// Global keyboard handlers
+// ============================================================================
+document.getElementById("layoutBtn").onclick = () => {
+    const dd = document.getElementById("layoutDropdown");
+    dd.style.display = dd.style.display === "block" ? "none" : "block";
+};
+
+document.addEventListener("click", e => {
+    if (!document.getElementById("layoutMenu").contains(e.target))
+        document.getElementById("layoutDropdown").style.display = "none";
+    const contextMenu = document.getElementById("contextMenu");
+    const chartMenu   = document.getElementById("chartMenu");
+    if (contextMenu && !contextMenu.contains(e.target) && chartMenu && !chartMenu.contains(e.target))
+        contextMenu.style.display = "none";
+    if (!document.getElementById("lineMenu").contains(e.target)) hideLineMenu();
+});
+
+document.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+        DrawingController.resetTool();
+        [1, 2].forEach(id => {
+            const st = panesState[id];
+            if (st?.drawingEngine) st.drawingEngine.hideCursor();
+        });
+        ["lineOverlayBtn","hlineBtn1","rectOverlayBtn","lineOverlayBtn2","hlineBtn2","rectOverlayBtn2"].forEach(btnId => {
+            const btn = document.getElementById(btnId);
+            if (btn) { btn.style.background = ""; btn.style.color = ""; }
+        });
+        Object.values(panesState).forEach(st => {
+            if (st.drawingEngine) { st.drawingEngine.drawings.forEach(d => d.selected = false); st.drawingEngine.render(); }
+            if (st.selectedLine) st.selectedLine = null;
+        });
+    }
+
+    if (e.key === "Delete") {
+        Object.values(panesState).forEach(st => {
+            if (st.drawingEngine) {
+                const sel = st.drawingEngine.drawings.find(d => d.selected);
+                if (sel) {
+                    const paneId = sel.paneId;
+                    st.drawingEngine.drawings = st.drawingEngine.drawings.filter(d => d !== sel);
+                    st.drawingEngine.render();
+                    StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+                    return;
+                }
+            }
+            if (st.selectedLine) {
+                const paneId = st.selectedLine.paneId;
+                st.series.removePriceLine(st.selectedLine.line);
+                drawings[paneId] = drawings[paneId].filter(d => d !== st.selectedLine);
+                StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+                st.selectedLine = null;
+            }
+        });
+    }
+
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        const select = document.getElementById("symbolSelect");
+        if (!select) return;
+        let index = select.selectedIndex + (e.key === "ArrowDown" ? 1 : -1);
+        if (index < 0) index = select.options.length - 1;
+        if (index >= select.options.length) index = 0;
+        const newSymbol = select.options[index].value;
+        select.value = newSymbol;
+        switchSymbol(newSymbol);
+    }
+});
+
+function clearAllDrawings() {
+    panes.forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st) return;
+        if (st.series) {
+            drawings[paneId].forEach(obj => {
+                if (obj.type === "alert" && obj.id)
+                    panesState[paneId].ws.send(JSON.stringify({ type: "remove_alert", symbol: obj.symbol, id: obj.id }));
+                if (obj.line) st.series.removePriceLine(obj.line);
+            });
+        }
+        drawings[paneId] = [];
+        if (layout.drawings[currentSymbol]) layout.drawings[currentSymbol][paneId] = [];
+        if (st.drawingEngine) { st.drawingEngine.drawings = []; st.drawingEngine.render(); }
+        if (st.selectedLine)  st.selectedLine = null;
+    });
+    StorageLayer.autoSave(layout);
+}
+
+function toggleChartSync() {
+    syncEnabled = !syncEnabled;
+    const btn = document.getElementById("chartSyncBtn");
+    if (!btn) return;
+    btn.style.background = syncEnabled ? "#2962FF" : "";
+    btn.style.color      = syncEnabled ? "#fff"    : "";
+}
+
+// ============================================================================
+// Mobile
+// ============================================================================
+let currentMobileTab = 1;
+function isMobile() { return window.innerWidth <= 768; }
+
+function switchMobileTab(tabNum) {
+    if (!isMobile()) return;
+    currentMobileTab = tabNum;
+    const col1 = document.getElementById("column1"), col2 = document.getElementById("column2");
+    const tab1 = document.getElementById("mobTab1"),  tab2 = document.getElementById("mobTab2");
+    if (tabNum === 1) {
+        col1.classList.add("mob-active"); col2.classList.remove("mob-active");
+        tab1.classList.add("active");     tab2.classList.remove("active");
+    } else {
+        col2.classList.add("mob-active"); col1.classList.remove("mob-active");
+        tab2.classList.add("active");     tab1.classList.remove("active");
+    }
+    requestAnimationFrame(() => {
+        document.body.offsetHeight;
+        [1, 2].forEach(k => {
+            const div = document.getElementById(`chart${k}`);
+            const st  = panesState[k];
+            if (div && st?.chart) st.chart.resize(div.clientWidth, div.clientHeight);
+        });
+    });
+}
+
+function initMobileLayout() {
+    if (!isMobile()) return;
+    document.getElementById("column1").classList.add("mob-active");
+    document.getElementById("column2").classList.remove("mob-active");
+}
+
+function toggleMobileLayout(e) {
+    if (e) e.stopPropagation();
+    const dd = document.getElementById("layoutDropdown");
+    if (!dd) return;
+    if (dd.style.display === "block") { dd.style.display = "none"; }
+    else {
+        dd.style.display = "block"; dd.style.position = "fixed";
+        dd.style.bottom = "52px"; dd.style.right = "4px"; dd.style.zIndex = "99999";
+        dd.onclick = ev => ev.stopPropagation();
+    }
+}
+
+window.addEventListener("resize", () => {
+    if (isMobile()) switchMobileTab(currentMobileTab);
+});
+
+// ============================================================================
+// Initialize
+// ============================================================================
+function initialize() {
+    initCandleColorMenu();
+    initLineContextMenu();
+
+    panes.forEach(createPane);
+    applyColors();
+
+    // Sync btn initial state
+    const syncBtn = document.getElementById("chartSyncBtn");
+    if (syncBtn && syncEnabled) { syncBtn.style.background = "#2962FF"; syncBtn.style.color = "#fff"; }
+
+    // Symbol selector
+    const symbolSelect = document.getElementById("symbolSelect");
+    if (symbolSelect) {
+        symbolSelect.value = currentSymbol;
+        symbolSelect.onchange = e => switchSymbol(e.target.value);
+    }
+
+    // Restore layout split
+    if (layout.split === "leftFull")  document.getElementById("column2").classList.add("hidden");
+    if (layout.split === "rightFull") document.getElementById("column1").classList.add("hidden");
+
+    // Button handlers
+    document.getElementById("clearDrawingsBtn").onclick = clearAllDrawings;
+    document.getElementById("chartSyncBtn").onclick     = toggleChartSync;
+
+    document.getElementById("hlineBtn1").onclick = () => {
+        setTool("hline");
+        if (isMobile()) panes.forEach(id => { const st = panesState[id]; if (st?.drawingEngine) st.drawingEngine.showCursor(); });
+    };
+    document.getElementById("lineOverlayBtn").onclick = () => {
+        setTool("lineOverlay");
+        if (isMobile()) panes.forEach(id => { const st = panesState[id]; if (st?.drawingEngine) st.drawingEngine.showCursor(); });
+    };
+    document.getElementById("rectOverlayBtn").onclick = () => {
+        setTool("rectOverlay");
+        if (isMobile()) panes.forEach(id => { const st = panesState[id]; if (st?.drawingEngine) st.drawingEngine.showCursor(); });
+    };
+
+    // Pane-2 drawing buttons — same tools, mobile cursor support
+    document.getElementById("hlineBtn2").onclick = () => {
+        setTool("hline");
+        if (isMobile()) panes.forEach(id => { const st = panesState[id]; if (st?.drawingEngine) st.drawingEngine.showCursor(); });
+    };
+    document.getElementById("lineOverlayBtn2").onclick = () => {
+        setTool("lineOverlay");
+        if (isMobile()) panes.forEach(id => { const st = panesState[id]; if (st?.drawingEngine) st.drawingEngine.showCursor(); });
+    };
+    document.getElementById("rectOverlayBtn2").onclick = () => {
+        setTool("rectOverlay");
+        if (isMobile()) panes.forEach(id => { const st = panesState[id]; if (st?.drawingEngine) st.drawingEngine.showCursor(); });
+    };
+
+    initMobileLayout();
+}
+
+initialize();
+</script>
+
+<div id="alertPopup"
+    style="position:fixed;bottom:20px;right:20px;background:#ff4444;color:white;
+           padding:12px 18px;border-radius:6px;font-size:13px;display:none;
+           z-index:999999;box-shadow:0 4px 12px rgba(0,0,0,0.4);">
+</div>
+
+</body>
+</html>
