@@ -496,6 +496,7 @@ function handleMessage(id, state, msg) {
         if (msg.data?.length) {
             state.data = msg.data;
             state.series.setData(state.data);
+            refreshSignalMarkers();
             state.lastCandle = msg.data.at(-1);
 
             // Load or recompute indicators after first history
@@ -535,6 +536,7 @@ function handleMessage(id, state, msg) {
 
         state.lastCandle = msg.candle;
         state.indicatorManager?.recomputeAll(state.data);
+        if (_signalsVisible) refreshSignalMarkers();
     }
 
     if (msg.type === "analysis") updateMarketEngine(msg);
@@ -1000,6 +1002,20 @@ function setupInteractionHandlers(paneId, st, els) {
             if (ly !== null && Math.abs(ly - param.point.y) < 6) found = obj;
         });
         if (found) selectLine(found); else deselectLine();
+
+        // Signal marker click — navigate to the signal that occupies this candle bucket
+        if (_signalsVisible && typeof param.time === "number" && DrawingController.getTool() === "idle") {
+            const tf = st.tfSeconds;
+            const clickedBucket = Math.floor(param.time / tf) * tf;
+            const matchIdx = _signalLog.findLastIndex(s => {
+                const snapped = Math.floor(s.time / tf) * tf;
+                return s.symbol === currentSymbol && snapped === clickedBucket;
+            });
+            if (matchIdx !== -1) {
+                _signalPanelIndex = matchIdx;
+                renderSignalInPanel(_signalPanelIndex);
+            }
+        }
     });
 
     // Mouse move — overlay drag + hline drag
@@ -1195,6 +1211,7 @@ function switchSymbol(symbol) {
         if (id === 1) ws1 = state.ws;
         if (id === 2) ws2 = state.ws;
     });
+    refreshSignalMarkers();
 }
 
 // ============================================================================
@@ -1298,57 +1315,99 @@ function resetColors() {
 // Signal panel
 // ============================================================================
 const signalAudio = new Audio("alert.mp3");
-let _lastSignalTs = 0;
-let _signalHideTimer = null;
+const _signalLog = [];
+let _signalIdCounter = 0;
+let _signalsVisible = false;
+let _signalHideTimer = null;   // 5-min auto-hide for markers
+let _skipHideTimer   = null;   // 15-sec auto-hide for SKIP panel only
+let _signalPanelIndex = 0;
 
+// Hide the panel overlay without touching marker visibility or btn state
 function _signalClose() {
     const panel = document.getElementById("signalPanel");
     if (panel) panel.style.display = "none";
+    if (_skipHideTimer) { clearTimeout(_skipHideTimer); _skipHideTimer = null; }
+}
+
+function clearSignalHideTimer() {
     if (_signalHideTimer) { clearTimeout(_signalHideTimer); _signalHideTimer = null; }
+}
+
+function resetSignalHideTimer() {
+    clearSignalHideTimer();
+    _signalHideTimer = setTimeout(hideSignalMarkers, 5 * 60 * 1000);
+}
+
+function showSignalMarkers() {
+    _signalsVisible = true;
+    const btn = document.getElementById("signalLogBtn");
+    if (btn) { btn.style.background = "#2962FF"; btn.style.color = "#fff"; }
+    refreshSignalMarkers();
+    resetSignalHideTimer();
+}
+
+function hideSignalMarkers() {
+    _signalsVisible = false;
     const btn = document.getElementById("signalLogBtn");
     if (btn) { btn.style.background = ""; btn.style.color = ""; }
+    refreshSignalMarkers();
+    clearSignalHideTimer();
+    const panel = document.getElementById("signalPanel");
+    if (panel) panel.style.display = "none";
 }
 
 function toggleSignalPanel() {
-    const panel = document.getElementById("signalPanel");
-    if (!panel) return;
-    const btn = document.getElementById("signalLogBtn");
-    if (panel.style.display === "none" || !panel.style.display) {
-        panel.style.display = "block";
-        if (btn) { btn.style.background = "#2962FF"; btn.style.color = "#fff"; }
-        // Re-arm auto-hide only if there's actual content (panel has been populated)
-        if (panel.innerHTML.trim() && !_signalHideTimer) {
-            _signalHideTimer = setTimeout(_signalClose, 30000);
-        }
+    if (_signalsVisible) {
+        hideSignalMarkers();
     } else {
-        _signalClose();
+        if (_signalLog.length) renderSignalInPanel(_signalPanelIndex);
+        showSignalMarkers();
     }
 }
 
-function showSignal(data) {
+function getMarkersForPane(paneId) {
+    const st = panesState[paneId];
+    if (!st?.data?.length) return [];
+    const minTime = st.data[0].time;
+    const maxTime = st.data[st.data.length - 1].time;
+    const tf = st.tfSeconds;
+    return _signalLog
+        .filter(s => s.symbol === currentSymbol)
+        .map(s => {
+            const snapped = Math.floor(s.time / tf) * tf;
+            if (snapped < minTime || snapped > maxTime + tf) return null;
+            return {
+                time:     snapped,
+                position: s.direction === "UP" ? "belowBar" : "aboveBar",
+                color:    s.direction === "UP" ? "#26a69a" : "#ef5350",
+                shape:    "circle",
+                size:     1,
+                id:       String(s.id),
+            };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.time - b.time);
+}
+
+function refreshSignalMarkers() {
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st?.series) return;
+        const markers = _signalsVisible ? getMarkersForPane(paneId) : [];
+        try { st.series.setMarkers(markers); } catch(e) {}
+    });
+}
+
+function navSignal(delta) {
+    _signalPanelIndex = Math.max(0, Math.min(_signalLog.length - 1, _signalPanelIndex + delta));
+    renderSignalInPanel(_signalPanelIndex);
+}
+
+function renderSignalInPanel(index) {
     const panel = document.getElementById("signalPanel");
-    if (!panel) return;
-    const now = Date.now();
-    if (data.direction !== "SKIP" && now - _lastSignalTs < 60000) return;
-    if (data.direction !== "SKIP") _lastSignalTs = now;
-
-    if (_signalHideTimer) { clearTimeout(_signalHideTimer); _signalHideTimer = null; }
-
-    panel.className = "";
-    panel.style.display = "block";
-    const _sigBtn = document.getElementById("signalLogBtn");
-    if (_sigBtn) { _sigBtn.style.background = "#2962FF"; _sigBtn.style.color = "#fff"; }
-
-    const closeBtn = "<span class='sig-close' onclick='_signalClose()'>✕</span>";
-
-    if (data.direction === "SKIP") {
-        panel.classList.add("skip");
-        panel.innerHTML = closeBtn +
-            "<div style='font-size:12px;font-weight:bold;color:#888'>⏸ ПРОПУСК</div>" +
-            "<div style='font-size:11px;color:#999;margin-top:4px'>" + (data.skip_reason || "") + "</div>";
-        _signalHideTimer = setTimeout(_signalClose, 15000);
-        return;
-    }
+    if (!panel || !_signalLog[index]) return;
+    const entry = _signalLog[index];
+    const data  = entry.fullData;
 
     const isUp  = data.direction === "UP";
     const color = isUp ? "#26a69a" : "#ef5350";
@@ -1364,16 +1423,58 @@ function showSignal(data) {
         ? "<div style='font-size:11px;color:#aaa;margin-top:3px'>📊 Винрейт: <b style='color:" + color + "'>" + data.winrate + "%</b> <span style='color:#666'>(" + data.samples + ")</span></div>"
         : "<div style='font-size:11px;color:#666;margin-top:3px'>📊 score-based</div>";
 
+    const symbolLink = "<span style='cursor:pointer;text-decoration:underline;pointer-events:all;' onclick='switchSymbol(\"" + data.symbol + "\")'>" + data.symbol + "</span>";
+
+    const navHtml = _signalLog.length > 1
+        ? "<div style='display:flex;align-items:center;justify-content:space-between;margin-top:6px;border-top:1px solid #333;padding-top:4px;pointer-events:all;'>" +
+          "<button onclick='navSignal(-1)' style='background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;pointer-events:all;'>←</button>" +
+          "<span style='font-size:11px;color:#888;'>" + (index + 1) + " / " + _signalLog.length + "</span>" +
+          "<button onclick='navSignal(+1)' style='background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;pointer-events:all;'>→</button>" +
+          "</div>"
+        : "";
+
+    panel.className = "";
     panel.classList.add(isUp ? "up" : "down");
-    panel.innerHTML = closeBtn +
+    panel.style.display = "block";
+    panel.innerHTML =
+        "<span class='sig-close' onclick='_signalClose()'>✕</span>" +
         "<div style='font-size:17px;font-weight:bold;color:" + color + "'>" + arrow + " <span style='font-size:14px'>" + pct + "%</span></div>" +
         pctLine +
-        "<div style='font-size:11px;color:#ccc;margin:5px 0 3px'>" + data.symbol + " | " + session + " | " + hh + ":" + mm + " UTC</div>" +
-        "<div style='font-size:11px;color:#bbb;line-height:1.6'>" + (data.reason || []).join("<br>") + "</div>";
+        "<div style='font-size:11px;color:#ccc;margin:5px 0 3px'>" + symbolLink + " | " + session + " | " + hh + ":" + mm + " UTC</div>" +
+        "<div style='font-size:11px;color:#bbb;line-height:1.6'>" + (data.reason || []).join("<br>") + "</div>" +
+        navHtml;
+}
 
+function addSignalToLog(data) {
+    if (data.direction === "SKIP") return;
+    _signalLog.push({
+        id:        ++_signalIdCounter,
+        time:      Math.floor(Date.now() / 1000),
+        direction: data.direction,
+        symbol:    data.symbol,
+        fullData:  data,
+    });
+    _signalPanelIndex = _signalLog.length - 1;
+    showSignalMarkers();
+    renderSignalInPanel(_signalPanelIndex);
+}
+
+function showSignal(data) {
+    if (data.direction === "SKIP") {
+        const panel = document.getElementById("signalPanel");
+        if (!panel) return;
+        if (_skipHideTimer) { clearTimeout(_skipHideTimer); _skipHideTimer = null; }
+        panel.className = "skip";
+        panel.style.display = "block";
+        panel.innerHTML =
+            "<span class='sig-close' onclick='_signalClose()'>✕</span>" +
+            "<div style='font-size:12px;font-weight:bold;color:#888'>⏸ ПРОПУСК</div>" +
+            "<div style='font-size:11px;color:#999;margin-top:4px'>" + (data.skip_reason || "") + "</div>";
+        _skipHideTimer = setTimeout(_signalClose, 15000);
+        return;
+    }
     signalAudio.currentTime = 0; signalAudio.play().catch(() => {});
-    // Auto-hide after 30 seconds
-    _signalHideTimer = setTimeout(_signalClose, 30000);
+    addSignalToLog(data);
 }
 
 function updateMarketEngine(data) {
@@ -1431,7 +1532,7 @@ function renderIndicatorList(paneId) {
         return `<div class="ind-row">
             <span class="ind-swatch" style="background:${inst.color};"></span>
             <span class="ind-name">${label}${paramStr}</span>
-            <button class="ind-settings-btn" onclick="openIndSettings('${inst.id}',${paneId},this)">⚙</button>
+            <button class="ind-settings-btn" onclick="openIndSettings('${inst.id}',${paneId},this,event)">⚙</button>
             <button class="ind-del-btn" onclick="removeIndicator('${inst.id}',${paneId})">✕</button>
         </div>`;
     }).join('');
@@ -1479,7 +1580,8 @@ function removeIndicator(id, paneId) {
     saveIndicators(paneId);
 }
 
-function openIndSettings(instanceId, paneId, btnEl) {
+function openIndSettings(instanceId, paneId, btnEl, e) {
+    if (e) e.stopPropagation();
     const mgr  = panesState[paneId]?.indicatorManager;
     if (!mgr) return;
     const inst = mgr.getInstances().find(i => i.id === instanceId);
