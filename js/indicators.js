@@ -163,9 +163,9 @@ class IndicatorManager {
         this.candleSeries = candleSeries;
         this.chartDiv     = chartDiv;
 
-        this._overlays    = {}; // type -> { series, params, color, ... }
-        this._oscillators = []; // ordered: { type, params, color, _series, ... }
-        this._oscPanes    = [];
+        this._instances  = []; // flat: { id, type, params, color, lineWidth, ...seriesRefs }
+        this._idCounter  = 0;
+        this._oscPanes   = [];
 
         // Legend div — sits in top-left of chartDiv, pointer-events none
         this._legendEl = this._createLegend(chartDiv);
@@ -190,7 +190,6 @@ class IndicatorManager {
     _onCrosshair(param) {
         const lines = [];
 
-        // Helper: get value for a series from the crosshair param
         const val = (series) => {
             if (!series || !param.seriesData) return null;
             const d = param.seriesData.get(series);
@@ -200,34 +199,30 @@ class IndicatorManager {
 
         const fmt = (v, dec) => (v === null || v === undefined) ? '—' : v.toFixed(dec);
 
-        // Overlays
-        if (this._overlays.sma) {
-            const v = val(this._overlays.sma.series);
-            lines.push(`<span style="color:${this._overlays.sma.color}">SMA(${this._overlays.sma.params.period}) ${fmt(v, 5)}</span>`);
-        }
-        if (this._overlays.ema) {
-            const v = val(this._overlays.ema.series);
-            lines.push(`<span style="color:${this._overlays.ema.color}">EMA(${this._overlays.ema.params.period}) ${fmt(v, 5)}</span>`);
-        }
-        if (this._overlays.bollinger) {
-            const bb = this._overlays.bollinger;
-            const u = val(bb.upper), b = val(bb.basis), l = val(bb.lower);
-            lines.push(`<span style="color:${bb.color}">BB(${bb.params.period},${bb.params.mult}) U:${fmt(u,5)} M:${fmt(b,5)} L:${fmt(l,5)}</span>`);
-        }
-
-        // Oscillators
-        for (const osc of this._oscillators) {
-            if (osc.type === 'rsi' && osc._series) {
-                const v = val(osc._series);
-                lines.push(`<span style="color:${osc.color||'#e91e63'}">RSI(${osc.params.period}) ${fmt(v,2)}</span>`);
+        for (const inst of this._instances) {
+            if (inst.type === 'sma') {
+                const v = val(inst.series);
+                lines.push(`<span style="color:${inst.color}">SMA(${inst.params.period}) ${fmt(v, 5)}</span>`);
             }
-            if (osc.type === 'macd' && osc._macdSeries) {
-                const m = val(osc._macdSeries), s = val(osc._signalSeries), h = val(osc._histSeries);
+            if (inst.type === 'ema') {
+                const v = val(inst.series);
+                lines.push(`<span style="color:${inst.color}">EMA(${inst.params.period}) ${fmt(v, 5)}</span>`);
+            }
+            if (inst.type === 'bollinger') {
+                const u = val(inst.upper), b = val(inst.basis), l = val(inst.lower);
+                lines.push(`<span style="color:${inst.color}">BB(${inst.params.period},${inst.params.mult}) U:${fmt(u,5)} M:${fmt(b,5)} L:${fmt(l,5)}</span>`);
+            }
+            if (inst.type === 'rsi' && inst._series) {
+                const v = val(inst._series);
+                lines.push(`<span style="color:${inst.color}">RSI(${inst.params.period}) ${fmt(v,2)}</span>`);
+            }
+            if (inst.type === 'macd' && inst._macdSeries) {
+                const m = val(inst._macdSeries), s = val(inst._signalSeries), h = val(inst._histSeries);
                 lines.push(`<span style="color:#2962FF">MACD ${fmt(m,5)}</span> <span style="color:#ff9800">Sig ${fmt(s,5)}</span> <span style="color:#888">H ${fmt(h,5)}</span>`);
             }
-            if (osc.type === 'stochastic' && osc._kSeries) {
-                const k = val(osc._kSeries), d = val(osc._dSeries);
-                lines.push(`<span style="color:${osc.color||'#2962FF'}">Stoch(${osc.params.period},${osc.params.smoothK},${osc.params.smoothD}) K:${fmt(k,2)} D:${fmt(d,2)}</span>`);
+            if (inst.type === 'stochastic' && inst._kSeries) {
+                const k = val(inst._kSeries), d = val(inst._dSeries);
+                lines.push(`<span style="color:${inst.color}">Stoch(${inst.params.period},${inst.params.smoothK},${inst.params.smoothD}) K:${fmt(k,2)} D:${fmt(d,2)}</span>`);
             }
         }
 
@@ -235,159 +230,185 @@ class IndicatorManager {
     }
 
     has(type) {
-        return !!(this._overlays[type] || this._oscillators.find(o => o.type === type));
+        return this._instances.some(i => i.type === type);
     }
 
-    add(type, params, color) {
-        if (this.has(type)) return;
+    getInstances() {
+        return this._instances;
+    }
+
+    add(type, params, color, lineWidth) {
+        const defaults = { sma: '#2962FF', ema: '#ff9800', bollinger: '#9c27b0', rsi: '#e91e63', macd: '#2962FF', stochastic: '#2962FF' };
+        const id = `${type}_${++this._idCounter}`;
+        const inst = {
+            id,
+            type,
+            params: params || {},
+            color: color || defaults[type] || '#2962FF',
+            lineWidth: (lineWidth === undefined || lineWidth === null) ? 2 : lineWidth
+        };
+        this._instances.push(inst);
+
         if (this._isOverlay(type)) {
-            this._addOverlay(type, params, color);
+            this._addInstanceSeries(inst);
         } else {
-            this._oscillators.push({ type, params, color });
             this._rebuildOscillators();
         }
+        return id;
     }
 
-    remove(type) {
-        if (this._isOverlay(type)) {
-            this._removeOverlay(type);
+    remove(id) {
+        const inst = this._instances.find(i => i.id === id);
+        if (!inst) return;
+        if (this._isOverlay(inst.type)) {
+            this._destroyInstanceSeries(inst);
+            this._instances = this._instances.filter(i => i.id !== id);
         } else {
             this._teardownAllOscillatorSeries();
-            this._oscillators = this._oscillators.filter(o => o.type !== type);
+            this._instances = this._instances.filter(i => i.id !== id);
             this._rebuildOscillators();
         }
     }
 
-    update(type, params, color) {
-        if (this._isOverlay(type)) {
-            if (this._overlays[type]) {
-                if (params) this._overlays[type].params = params;
-                if (color)  this._overlays[type].color  = color;
+    update(id, params, color, lineWidth) {
+        const inst = this._instances.find(i => i.id === id);
+        if (!inst) return;
+        if (this._isOverlay(inst.type)) {
+            if (params) inst.params = params;
+            if (color)  inst.color  = color;
+            if (lineWidth !== undefined && lineWidth !== null) inst.lineWidth = lineWidth;
+            if (inst.type === 'bollinger') {
+                const opts = { color: inst.color, lineWidth: inst.lineWidth };
+                try { inst.basis.applyOptions(opts); } catch(e) {}
+                try { inst.upper.applyOptions(opts); } catch(e) {}
+                try { inst.lower.applyOptions(opts); } catch(e) {}
+            } else {
+                try { inst.series.applyOptions({ color: inst.color, lineWidth: inst.lineWidth }); } catch(e) {}
             }
         } else {
-            const osc = this._oscillators.find(o => o.type === type);
-            if (osc) {
-                this._teardownAllOscillatorSeries();
-                if (params) osc.params = params;
-                if (color)  osc.color  = color;
-                this._rebuildOscillators();
-            }
+            this._teardownAllOscillatorSeries();
+            if (params) inst.params = params;
+            if (color)  inst.color  = color;
+            if (lineWidth !== undefined && lineWidth !== null) inst.lineWidth = lineWidth;
+            this._rebuildOscillators();
         }
     }
-
-    setColor(type, color) { this.update(type, null, color); }
 
     recomputeAll(data) {
         if (!data || data.length < 2) return;
 
-        if (this._overlays.sma) {
-            const { params, color } = this._overlays.sma;
-            this._setFilteredData(this._overlays.sma.series, IndicatorMath.sma(data, params.period));
-            this._overlays.sma.series.applyOptions({ color });
-        }
-        if (this._overlays.ema) {
-            const { params, color } = this._overlays.ema;
-            this._setFilteredData(this._overlays.ema.series, IndicatorMath.ema(data, params.period));
-            this._overlays.ema.series.applyOptions({ color });
-        }
-        if (this._overlays.bollinger) {
-            const { params, color } = this._overlays.bollinger;
-            const bands = IndicatorMath.bollinger(data, params.period, params.mult);
-            const c = color || '#9c27b0';
-            this._setFilteredData(this._overlays.bollinger.basis, bands.basis);
-            this._setFilteredData(this._overlays.bollinger.upper, bands.upper);
-            this._setFilteredData(this._overlays.bollinger.lower, bands.lower);
-            this._overlays.bollinger.basis.applyOptions({ color: c });
-            this._overlays.bollinger.upper.applyOptions({ color: c });
-            this._overlays.bollinger.lower.applyOptions({ color: c });
-        }
-
-        for (const osc of this._oscillators) {
-            if (osc.type === 'rsi' && osc._series) {
-                this._setFilteredData(osc._series, IndicatorMath.rsi(data, osc.params.period));
+        for (const inst of this._instances) {
+            if (inst.type === 'sma' && inst.series) {
+                this._setFilteredData(inst.series, IndicatorMath.sma(data, inst.params.period));
+                inst.series.applyOptions({ color: inst.color });
             }
-            if (osc.type === 'macd' && osc._macdSeries) {
-                const r = IndicatorMath.macd(data, osc.params.fast, osc.params.slow, osc.params.signal);
-                this._setFilteredData(osc._macdSeries,   r.macd);
-                this._setFilteredData(osc._signalSeries, r.signal);
-                this._setFilteredData(osc._histSeries,   r.hist);
+            if (inst.type === 'ema' && inst.series) {
+                this._setFilteredData(inst.series, IndicatorMath.ema(data, inst.params.period));
+                inst.series.applyOptions({ color: inst.color });
             }
-            if (osc.type === 'stochastic' && osc._kSeries) {
-                const r = IndicatorMath.stochastic(data, osc.params.period, osc.params.smoothK, osc.params.smoothD);
-                this._setFilteredData(osc._kSeries, r.k);
-                this._setFilteredData(osc._dSeries, r.d);
+            if (inst.type === 'bollinger' && inst.basis) {
+                const bands = IndicatorMath.bollinger(data, inst.params.period, inst.params.mult);
+                const c = inst.color || '#9c27b0';
+                this._setFilteredData(inst.basis, bands.basis);
+                this._setFilteredData(inst.upper, bands.upper);
+                this._setFilteredData(inst.lower, bands.lower);
+                inst.basis.applyOptions({ color: c });
+                inst.upper.applyOptions({ color: c });
+                inst.lower.applyOptions({ color: c });
+            }
+            if (inst.type === 'rsi' && inst._series) {
+                this._setFilteredData(inst._series, IndicatorMath.rsi(data, inst.params.period));
+            }
+            if (inst.type === 'macd' && inst._macdSeries) {
+                const r = IndicatorMath.macd(data, inst.params.fast, inst.params.slow, inst.params.signal);
+                this._setFilteredData(inst._macdSeries,   r.macd);
+                this._setFilteredData(inst._signalSeries, r.signal);
+                this._setFilteredData(inst._histSeries,   r.hist);
+            }
+            if (inst.type === 'stochastic' && inst._kSeries) {
+                const r = IndicatorMath.stochastic(data, inst.params.period, inst.params.smoothK, inst.params.smoothD);
+                this._setFilteredData(inst._kSeries, r.k);
+                this._setFilteredData(inst._dSeries, r.d);
             }
         }
     }
 
     serialize() {
-        const result = [];
-        for (const [type, entry] of Object.entries(this._overlays))
-            result.push({ type, params: entry.params, color: entry.color, visible: true });
-        for (const osc of this._oscillators)
-            result.push({ type: osc.type, params: osc.params, color: osc.color || null, visible: true });
-        return result;
+        return this._instances.map(i => ({
+            id: i.id, type: i.type, params: i.params,
+            color: i.color, lineWidth: i.lineWidth, visible: true
+        }));
     }
 
     loadFrom(configArray, data) {
         if (!configArray || !configArray.length) return;
-        for (const cfg of configArray)
-            if (cfg.visible !== false) this.add(cfg.type, cfg.params, cfg.color);
+        for (const cfg of configArray) {
+            if (cfg.visible === false) continue;
+            const newId = this.add(cfg.type, cfg.params, cfg.color, cfg.lineWidth ?? 2);
+            if (cfg.id) {
+                const inst = this._instances.find(i => i.id === newId);
+                if (inst) inst.id = cfg.id;
+            }
+        }
+        // Advance the counter past any restored id suffix so freshly added
+        // instances can never collide with a restored one (e.g. restored "sma_3"
+        // while counter sits at 1).
+        for (const inst of this._instances) {
+            const n = parseInt(String(inst.id).split('_').pop(), 10);
+            if (Number.isFinite(n) && n > this._idCounter) this._idCounter = n;
+        }
         if (data && data.length) this.recomputeAll(data);
     }
 
     destroyAll() {
-        for (const type of Object.keys(this._overlays)) this._removeOverlay(type);
-        this._oscillators = [];
-        this._rebuildOscillators();
+        for (const inst of this._instances)
+            if (this._isOverlay(inst.type)) this._destroyInstanceSeries(inst);
+        this._teardownAllOscillatorSeries();
+        this._instances = [];
         this._legendEl.innerHTML = '';
     }
 
     // ---- Internal ----
 
-    _isOverlay(type) { return type === 'sma' || type === 'ema' || type === 'bollinger'; }
+    _isOverlay(type)    { return type === 'sma' || type === 'ema' || type === 'bollinger'; }
+    _isOscillator(type) { return type === 'rsi' || type === 'macd' || type === 'stochastic'; }
 
-    _addOverlay(type, params, color) {
+    _addInstanceSeries(inst) {
         const LWC = window.LightweightCharts;
         const base = { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+        const lw = inst.lineWidth;
 
-        if (type === 'sma') {
-            const c = color || '#2962FF';
-            const series = this.chart.addSeries(LWC.LineSeries, { ...base, color: c, lineWidth: 2 }, 0);
-            this._overlays.sma = { series, params: params || { period: 20 }, color: c };
+        if (inst.type === 'sma') {
+            inst.series = this.chart.addSeries(LWC.LineSeries, { ...base, color: inst.color, lineWidth: lw }, 0);
         }
-        if (type === 'ema') {
-            const c = color || '#ff9800';
-            const series = this.chart.addSeries(LWC.LineSeries, { ...base, color: c, lineWidth: 2 }, 0);
-            this._overlays.ema = { series, params: params || { period: 21 }, color: c };
+        if (inst.type === 'ema') {
+            inst.series = this.chart.addSeries(LWC.LineSeries, { ...base, color: inst.color, lineWidth: lw }, 0);
         }
-        if (type === 'bollinger') {
-            const c = color || '#9c27b0';
-            const basis = this.chart.addSeries(LWC.LineSeries, { ...base, color: c, lineWidth: 1, lineStyle: LWC.LineStyle.Dashed }, 0);
-            const upper = this.chart.addSeries(LWC.LineSeries, { ...base, color: c, lineWidth: 1 }, 0);
-            const lower = this.chart.addSeries(LWC.LineSeries, { ...base, color: c, lineWidth: 1 }, 0);
-            this._overlays.bollinger = { basis, upper, lower, params: params || { period: 20, mult: 2 }, color: c };
+        if (inst.type === 'bollinger') {
+            inst.basis = this.chart.addSeries(LWC.LineSeries, { ...base, color: inst.color, lineWidth: lw, lineStyle: LWC.LineStyle.Dashed }, 0);
+            inst.upper = this.chart.addSeries(LWC.LineSeries, { ...base, color: inst.color, lineWidth: lw }, 0);
+            inst.lower = this.chart.addSeries(LWC.LineSeries, { ...base, color: inst.color, lineWidth: lw }, 0);
         }
     }
 
-    _removeOverlay(type) {
-        const entry = this._overlays[type];
-        if (!entry) return;
-        if (type === 'bollinger') {
-            try { this.chart.removeSeries(entry.basis); } catch(e) {}
-            try { this.chart.removeSeries(entry.upper); } catch(e) {}
-            try { this.chart.removeSeries(entry.lower); } catch(e) {}
+    _destroyInstanceSeries(inst) {
+        if (inst.type === 'bollinger') {
+            try { this.chart.removeSeries(inst.basis); } catch(e) {}
+            try { this.chart.removeSeries(inst.upper); } catch(e) {}
+            try { this.chart.removeSeries(inst.lower); } catch(e) {}
+            inst.basis = inst.upper = inst.lower = null;
         } else {
-            try { this.chart.removeSeries(entry.series); } catch(e) {}
+            try { this.chart.removeSeries(inst.series); } catch(e) {}
+            inst.series = null;
         }
-        delete this._overlays[type];
     }
 
     _teardownAllOscillatorSeries() {
-        for (const osc of this._oscillators) {
+        for (const inst of this._instances) {
+            if (!this._isOscillator(inst.type)) continue;
             const keys = ['_series', '_kSeries', '_dSeries', '_macdSeries', '_signalSeries', '_histSeries'];
             for (const k of keys) {
-                if (osc[k]) { try { this.chart.removeSeries(osc[k]); } catch(e) {} osc[k] = null; }
+                if (inst[k]) { try { this.chart.removeSeries(inst[k]); } catch(e) {} inst[k] = null; }
             }
         }
         const panes = this.chart.panes();
@@ -404,60 +425,65 @@ class IndicatorManager {
         const paneH = Math.round(chartHeight * 0.22);
         const fixedScale = (lo, hi) => () => ({ priceRange: { minValue: lo, maxValue: hi } });
 
-        this._oscillators.forEach((osc, idx) => {
+        const oscInstances = this._instances.filter(i => this._isOscillator(i.type));
+        const oscOrder = [...new Set(oscInstances.map(i => i.type))];
+
+        oscOrder.forEach((type, idx) => {
             const paneIndex = idx + 1;
+            const ofType = oscInstances.filter(i => i.type === type);
 
-            if (osc.type === 'rsi') {
-                const series = this.chart.addSeries(LWC.LineSeries, {
-                    color: osc.color || '#e91e63', lineWidth: 2,
-                    priceLineVisible: false, lastValueVisible: true,
-                    autoscaleInfoProvider: fixedScale(0, 100)
-                }, paneIndex);
-                series.createPriceLine({ price: 80, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                series.createPriceLine({ price: 20, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                series.createPriceLine({ price: 50, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
-                osc._series = series;
-                const panes2 = this.chart.panes();
-                if (panes2[paneIndex]) try { panes2[paneIndex].setHeight(paneH); } catch(e) {}
-            }
+            ofType.forEach((inst, k) => {
+                const isFirst = k === 0;
 
-            if (osc.type === 'macd') {
-                const macdSeries   = this.chart.addSeries(LWC.LineSeries,      { color: '#2962FF', lineWidth: 2, priceLineVisible: false, lastValueVisible: true  }, paneIndex);
-                const signalSeries = this.chart.addSeries(LWC.LineSeries,      { color: '#ff9800', lineWidth: 2, priceLineVisible: false, lastValueVisible: true  }, paneIndex);
-                const histSeries   = this.chart.addSeries(LWC.HistogramSeries, {                                 priceLineVisible: false, lastValueVisible: false }, paneIndex);
-                macdSeries.createPriceLine({ price: 0, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: false });
-                osc._macdSeries = macdSeries; osc._signalSeries = signalSeries; osc._histSeries = histSeries;
-                const panes2 = this.chart.panes();
-                if (panes2[paneIndex]) try { panes2[paneIndex].setHeight(paneH); } catch(e) {}
-            }
+                if (type === 'rsi') {
+                    const series = this.chart.addSeries(LWC.LineSeries, {
+                        color: inst.color, lineWidth: inst.lineWidth,
+                        priceLineVisible: false, lastValueVisible: true,
+                        autoscaleInfoProvider: fixedScale(0, 100)
+                    }, paneIndex);
+                    if (isFirst) {
+                        series.createPriceLine({ price: 80, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        series.createPriceLine({ price: 20, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        series.createPriceLine({ price: 50, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
+                    }
+                    inst._series = series;
+                }
 
-            if (osc.type === 'stochastic') {
-                const p = osc.params || { period: 14, smoothK: 3, smoothD: 3 };
-                const kColor = osc.color || '#2962FF';
-                const dColor = '#ff9800';
+                if (type === 'macd') {
+                    const macdSeries   = this.chart.addSeries(LWC.LineSeries,      { color: '#2962FF', lineWidth: inst.lineWidth, priceLineVisible: false, lastValueVisible: true  }, paneIndex);
+                    const signalSeries = this.chart.addSeries(LWC.LineSeries,      { color: '#ff9800', lineWidth: inst.lineWidth, priceLineVisible: false, lastValueVisible: true  }, paneIndex);
+                    const histSeries   = this.chart.addSeries(LWC.HistogramSeries, {                                              priceLineVisible: false, lastValueVisible: false }, paneIndex);
+                    if (isFirst) {
+                        macdSeries.createPriceLine({ price: 0, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: false });
+                    }
+                    inst._macdSeries = macdSeries; inst._signalSeries = signalSeries; inst._histSeries = histSeries;
+                }
 
-                const kSeries = this.chart.addSeries(LWC.LineSeries, {
-                    color: kColor, lineWidth: 2,
-                    priceLineVisible: false, lastValueVisible: true,
-                    autoscaleInfoProvider: fixedScale(0, 100)
-                }, paneIndex);
-                const dSeries = this.chart.addSeries(LWC.LineSeries, {
-                    color: dColor, lineWidth: 2,
-                    priceLineVisible: false, lastValueVisible: true,
-                    autoscaleInfoProvider: fixedScale(0, 100)
-                }, paneIndex);
+                if (type === 'stochastic') {
+                    const kColor = inst.color;
+                    const dColor = '#ff9800';
+                    const kSeries = this.chart.addSeries(LWC.LineSeries, {
+                        color: kColor, lineWidth: inst.lineWidth,
+                        priceLineVisible: false, lastValueVisible: true,
+                        autoscaleInfoProvider: fixedScale(0, 100)
+                    }, paneIndex);
+                    const dSeries = this.chart.addSeries(LWC.LineSeries, {
+                        color: dColor, lineWidth: inst.lineWidth,
+                        priceLineVisible: false, lastValueVisible: true,
+                        autoscaleInfoProvider: fixedScale(0, 100)
+                    }, paneIndex);
+                    if (isFirst) {
+                        kSeries.createPriceLine({ price: 80, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        kSeries.createPriceLine({ price: 20, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        kSeries.createPriceLine({ price: 50, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
+                    }
+                    inst._kSeries = kSeries;
+                    inst._dSeries = dSeries;
+                }
+            });
 
-                // 80/20 reference lines
-                kSeries.createPriceLine({ price: 80, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                kSeries.createPriceLine({ price: 20, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                kSeries.createPriceLine({ price: 50, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
-
-                osc._kSeries = kSeries;
-                osc._dSeries = dSeries;
-
-                const panes2 = this.chart.panes();
-                if (panes2[paneIndex]) try { panes2[paneIndex].setHeight(paneH); } catch(e) {}
-            }
+            const panes2 = this.chart.panes();
+            if (panes2[paneIndex]) try { panes2[paneIndex].setHeight(paneH); } catch(e) {}
         });
     }
 

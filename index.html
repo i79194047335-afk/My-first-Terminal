@@ -108,23 +108,30 @@
         min-width: 280px;
         box-shadow: 0 4px 16px rgba(0,0,0,0.18);
     }
-    #indicatorsPanel .ind-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 5px 0;
-        border-bottom: 1px solid #f0f0f0;
-        flex-wrap: wrap;
+    #addIndBtn {
+        font-size: 12px; padding: 3px 8px; cursor: pointer;
+        background: #f5f5f5; border: 1px solid #ccc; border-radius: 3px;
     }
-    #indicatorsPanel .ind-row:last-child { border-bottom: none; }
-    #indicatorsPanel .ind-label { font-weight: bold; min-width: 70px; }
-    #indicatorsPanel .ind-param { width: 44px; padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px; }
-    #indicatorsPanel .ind-color { width: 28px; height: 22px; padding: 0; border: 1px solid #ccc; border-radius: 3px; cursor: pointer; }
-    #indicatorsPanel .ind-section-title {
-        font-weight: bold; font-size: 11px; color: #888;
-        text-transform: uppercase; letter-spacing: 0.5px;
-        padding: 8px 0 3px; display: block;
+    #addIndBtn:hover { background: #e8e8e8; }
+    #addIndDropdown button {
+        display: block; width: 100%; text-align: left;
+        padding: 6px 12px; background: none; border: none;
+        cursor: pointer; font-size: 12px;
     }
+    #addIndDropdown button:hover { background: #f0f0f0; }
+    #indList .ind-row {
+        display: flex; align-items: center; gap: 6px; padding: 4px 0;
+        border-bottom: 1px solid #f0f0f0; font-size: 12px;
+    }
+    #indList .ind-row:last-child { border-bottom: none; }
+    .ind-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+    .ind-name   { flex: 1; }
+    .ind-settings-btn, .ind-del-btn {
+        background: none; border: 1px solid #ddd; border-radius: 3px;
+        cursor: pointer; font-size: 11px; padding: 1px 5px;
+    }
+    .ind-settings-btn:hover { background: #f0f0f0; }
+    .ind-del-btn:hover { background: #ffeaea; }
 
     /* ============================================================
        MOBILE TAB BAR
@@ -225,74 +232,44 @@
     <div style="padding:6px 14px;cursor:pointer;" onclick="event.stopPropagation(); openChartSettings();">Настройки графика</div>
 </div>
 
+<!-- ====== INDICATOR SETTINGS MENU ====== -->
+<div id="indSettingsMenu"
+     style="position:fixed; display:none; background:#fff; border:1px solid #aaa;
+            border-radius:4px; padding:10px 14px; z-index:8500; font-size:12px;
+            min-width:200px; box-shadow:0 4px 16px rgba(0,0,0,0.18);">
+  <div style="margin-bottom:6px; font-weight:bold;" id="indSM_title">Settings</div>
+  <div id="indSM_colorRow" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+    <span>Color</span>
+    <input type="color" id="indSM_color" style="width:32px; height:24px; padding:0; border:1px solid #ccc;">
+  </div>
+  <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+    <span>Width</span>
+    <div id="indSM_widthBtns" style="display:flex; gap:3px;">
+      <button data-w="1" style="padding:1px 6px; border:1px solid #ddd; border-radius:3px; cursor:pointer; background:none;">1</button>
+      <button data-w="2" style="padding:1px 6px; border:1px solid #ddd; border-radius:3px; cursor:pointer; background:none;">2</button>
+      <button data-w="3" style="padding:1px 6px; border:1px solid #ddd; border-radius:3px; cursor:pointer; background:none;">3</button>
+      <button data-w="4" style="padding:1px 6px; border:1px solid #ddd; border-radius:3px; cursor:pointer; background:none;">4</button>
+    </div>
+  </div>
+  <div id="indSM_params"></div>
+  <div style="margin-top:10px; display:flex; justify-content:flex-end; gap:6px;">
+    <button onclick="closeIndSettings()">Cancel</button>
+    <button onclick="applyIndSettings()" style="background:#2962FF; color:#fff; border:none; border-radius:3px; padding:3px 10px; cursor:pointer;">Apply</button>
+  </div>
+</div>
+
 <!-- ====== INDICATORS PANEL ====== -->
 <div id="indicatorsPanel">
-    <span class="ind-section-title">Overlay (на графике)</span>
-
-    <!-- SMA -->
-    <div class="ind-row">
-        <input type="checkbox" id="ind_sma" onchange="onIndToggle('sma')">
-        <span class="ind-label">SMA</span>
-        <span>Period</span>
-        <input type="number" class="ind-param" id="ind_sma_period" value="20" min="2" max="500" onchange="onIndParam('sma')">
-        <input type="color" class="ind-color" id="ind_sma_color" value="#2962FF" onchange="onIndColor('sma')">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+    <span style="font-weight:bold; font-size:13px;">Indicators</span>
+    <div style="position:relative;">
+      <button id="addIndBtn" onclick="toggleAddIndDropdown(event)">＋ Add ▾</button>
+      <div id="addIndDropdown" style="display:none; position:absolute; right:0; top:100%; background:#fff; border:1px solid #ccc; border-radius:4px; min-width:140px; z-index:8000; box-shadow:0 2px 8px rgba(0,0,0,0.15);">
+      </div>
     </div>
-
-    <!-- EMA -->
-    <div class="ind-row">
-        <input type="checkbox" id="ind_ema" onchange="onIndToggle('ema')">
-        <span class="ind-label">EMA</span>
-        <span>Period</span>
-        <input type="number" class="ind-param" id="ind_ema_period" value="21" min="2" max="500" onchange="onIndParam('ema')">
-        <input type="color" class="ind-color" id="ind_ema_color" value="#ff9800" onchange="onIndColor('ema')">
-    </div>
-
-    <!-- Bollinger -->
-    <div class="ind-row">
-        <input type="checkbox" id="ind_bollinger" onchange="onIndToggle('bollinger')">
-        <span class="ind-label">Bollinger</span>
-        <span>P</span>
-        <input type="number" class="ind-param" id="ind_bollinger_period" value="20" min="2" max="500" onchange="onIndParam('bollinger')">
-        <span>×</span>
-        <input type="number" class="ind-param" id="ind_bollinger_mult" value="2" min="0.1" max="10" step="0.1" onchange="onIndParam('bollinger')">
-        <input type="color" class="ind-color" id="ind_bollinger_color" value="#9c27b0" onchange="onIndColor('bollinger')">
-    </div>
-
-    <span class="ind-section-title">Oscillators (отдельная панель)</span>
-
-    <!-- RSI -->
-    <div class="ind-row">
-        <input type="checkbox" id="ind_rsi" onchange="onIndToggle('rsi')">
-        <span class="ind-label">RSI</span>
-        <span>Period</span>
-        <input type="number" class="ind-param" id="ind_rsi_period" value="14" min="2" max="200" onchange="onIndParam('rsi')">
-        <input type="color" class="ind-color" id="ind_rsi_color" value="#e91e63" onchange="onIndColor('rsi')">
-    </div>
-
-    <!-- MACD -->
-    <div class="ind-row">
-        <input type="checkbox" id="ind_macd" onchange="onIndToggle('macd')">
-        <span class="ind-label">MACD</span>
-        <span>F</span>
-        <input type="number" class="ind-param" id="ind_macd_fast" value="12" min="2" max="200" onchange="onIndParam('macd')">
-        <span>S</span>
-        <input type="number" class="ind-param" id="ind_macd_slow" value="26" min="2" max="200" onchange="onIndParam('macd')">
-        <span>Sig</span>
-        <input type="number" class="ind-param" id="ind_macd_signal" value="9" min="2" max="200" onchange="onIndParam('macd')">
-    </div>
-
-    <!-- Stochastic -->
-    <div class="ind-row">
-        <input type="checkbox" id="ind_stochastic" onchange="onIndToggle('stochastic')">
-        <span class="ind-label">Stoch</span>
-        <span>K</span>
-        <input type="number" class="ind-param" id="ind_stochastic_period" value="14" min="2" max="200" onchange="onIndParam('stochastic')">
-        <span>Sm</span>
-        <input type="number" class="ind-param" id="ind_stochastic_smoothK" value="3" min="1" max="20" onchange="onIndParam('stochastic')">
-        <span>D</span>
-        <input type="number" class="ind-param" id="ind_stochastic_smoothD" value="3" min="1" max="20" onchange="onIndParam('stochastic')">
-        <input type="color" class="ind-color" id="ind_stochastic_color" value="#2962FF" onchange="onIndColor('stochastic')">
-    </div>
+  </div>
+  <div id="indList">
+  </div>
 </div>
 
 <input type="file" id="importFile" style="display:none" accept=".json">
@@ -1418,12 +1395,224 @@ function showAlertPopup(text) {
 // ============================================================================
 // INDICATORS PANEL
 // ============================================================================
+
+const IND_DEFAULTS = {
+    sma:        { params: { period: 20 },                          color: '#2962FF' },
+    ema:        { params: { period: 21 },                          color: '#ff9800' },
+    bollinger:  { params: { period: 20, mult: 2 },                 color: '#9c27b0' },
+    rsi:        { params: { period: 14 },                          color: '#e91e63' },
+    macd:       { params: { fast: 12, slow: 26, signal: 9 },       color: '#2962FF' },
+    stochastic: { params: { period: 14, smoothK: 3, smoothD: 3 },  color: '#2962FF' },
+};
+const IND_LABELS = { sma: 'SMA', ema: 'EMA', bollinger: 'Bollinger', rsi: 'RSI', macd: 'MACD', stochastic: 'Stoch' };
+
+let _indSettingsTarget = null; // { paneId, instanceId }
+let _indSettingsLineWidth = 2;
+
+function saveIndicators(paneId) {
+    const mgr = panesState[paneId]?.indicatorManager;
+    if (!mgr) return;
+    if (!layout.indicators) layout.indicators = {};
+    layout.indicators[paneId] = mgr.serialize();
+    StorageLayer.autoSave(layout);
+}
+
+function renderIndicatorList(paneId) {
+    const mgr = panesState[paneId]?.indicatorManager;
+    const list = document.getElementById('indList');
+    if (!list) return;
+    if (!mgr || !mgr.getInstances().length) {
+        list.innerHTML = '<div style="color:#aaa;font-size:11px;padding:4px 0;">No indicators added</div>';
+        return;
+    }
+    list.innerHTML = mgr.getInstances().map(inst => {
+        const label = IND_LABELS[inst.type] || inst.type;
+        const paramStr = _instParamStr(inst);
+        return `<div class="ind-row">
+            <span class="ind-swatch" style="background:${inst.color};"></span>
+            <span class="ind-name">${label}${paramStr}</span>
+            <button class="ind-settings-btn" onclick="openIndSettings('${inst.id}',${paneId},this)">⚙</button>
+            <button class="ind-del-btn" onclick="removeIndicator('${inst.id}',${paneId})">✕</button>
+        </div>`;
+    }).join('');
+}
+
+function _instParamStr(inst) {
+    const p = inst.params;
+    if (inst.type === 'sma' || inst.type === 'ema') return `(${p.period})`;
+    if (inst.type === 'bollinger') return `(${p.period},${p.mult})`;
+    if (inst.type === 'rsi') return `(${p.period})`;
+    if (inst.type === 'macd') return `(${p.fast},${p.slow},${p.signal})`;
+    if (inst.type === 'stochastic') return `(${p.period},${p.smoothK},${p.smoothD})`;
+    return '';
+}
+
+function toggleAddIndDropdown(e) {
+    e.stopPropagation();
+    const dd = document.getElementById('addIndDropdown');
+    if (dd.style.display === 'block') { dd.style.display = 'none'; return; }
+    dd.innerHTML = Object.keys(IND_DEFAULTS).map(type =>
+        `<button onclick="addIndicator('${type}',${indicatorPanelPane})">${IND_LABELS[type]}</button>`
+    ).join('');
+    dd.style.display = 'block';
+}
+
+function addIndicator(type, paneId) {
+    document.getElementById('addIndDropdown').style.display = 'none';
+    const mgr  = panesState[paneId]?.indicatorManager;
+    const data = panesState[paneId]?.data;
+    if (!mgr) return;
+    const def = IND_DEFAULTS[type];
+    mgr.add(type, { ...def.params }, def.color, 2);
+    if (data?.length) mgr.recomputeAll(data);
+    renderIndicatorList(paneId);
+    saveIndicators(paneId);
+}
+
+function removeIndicator(id, paneId) {
+    const mgr  = panesState[paneId]?.indicatorManager;
+    const data = panesState[paneId]?.data;
+    if (!mgr) return;
+    mgr.remove(id);
+    if (data?.length) mgr.recomputeAll(data);
+    renderIndicatorList(paneId);
+    saveIndicators(paneId);
+}
+
+function openIndSettings(instanceId, paneId, btnEl) {
+    const mgr  = panesState[paneId]?.indicatorManager;
+    if (!mgr) return;
+    const inst = mgr.getInstances().find(i => i.id === instanceId);
+    if (!inst) return;
+
+    _indSettingsTarget     = { paneId, instanceId };
+    _indSettingsLineWidth  = inst.lineWidth;
+
+    const label = IND_LABELS[inst.type] || inst.type;
+    document.getElementById('indSM_title').textContent = label + _instParamStr(inst);
+    document.getElementById('indSM_color').value = inst.color;
+
+    // MACD uses fixed line colors (blue MACD / orange signal), so its color
+    // picker is meaningless — hide it.
+    document.getElementById('indSM_colorRow').style.display = inst.type === 'macd' ? 'none' : 'flex';
+
+    // Highlight active width button
+    document.querySelectorAll('#indSM_widthBtns button').forEach(btn => {
+        btn.style.borderColor = parseInt(btn.dataset.w) === inst.lineWidth ? '#2962FF' : '#ddd';
+        btn.style.color       = parseInt(btn.dataset.w) === inst.lineWidth ? '#2962FF' : '';
+    });
+
+    // Inject type-specific param inputs
+    const p = inst.params;
+    let paramsHtml = '';
+    if (inst.type === 'sma' || inst.type === 'ema') {
+        paramsHtml = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span>Period</span>
+            <input type="number" id="indSM_p_period" value="${p.period}" min="2" max="500"
+                   style="width:52px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+        </div>`;
+    } else if (inst.type === 'bollinger') {
+        paramsHtml = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span>Period</span>
+            <input type="number" id="indSM_p_period" value="${p.period}" min="2" max="500"
+                   style="width:52px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+            <span>×</span>
+            <input type="number" id="indSM_p_mult" value="${p.mult}" min="0.1" max="10" step="0.1"
+                   style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+        </div>`;
+    } else if (inst.type === 'rsi') {
+        paramsHtml = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span>Period</span>
+            <input type="number" id="indSM_p_period" value="${p.period}" min="2" max="200"
+                   style="width:52px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+        </div>`;
+    } else if (inst.type === 'macd') {
+        paramsHtml = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span>F</span>
+            <input type="number" id="indSM_p_fast" value="${p.fast}" min="2" max="200"
+                   style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+            <span>S</span>
+            <input type="number" id="indSM_p_slow" value="${p.slow}" min="2" max="200"
+                   style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+            <span>Sig</span>
+            <input type="number" id="indSM_p_signal" value="${p.signal}" min="2" max="200"
+                   style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+        </div>`;
+    } else if (inst.type === 'stochastic') {
+        paramsHtml = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span>K</span>
+            <input type="number" id="indSM_p_period" value="${p.period}" min="2" max="200"
+                   style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+            <span>Sm</span>
+            <input type="number" id="indSM_p_smoothK" value="${p.smoothK}" min="1" max="20"
+                   style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+            <span>D</span>
+            <input type="number" id="indSM_p_smoothD" value="${p.smoothD}" min="1" max="20"
+                   style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+        </div>`;
+    }
+    document.getElementById('indSM_params').innerHTML = paramsHtml;
+
+    // Position near the ⚙ button
+    const menu = document.getElementById('indSettingsMenu');
+    menu.style.display = 'block';
+    const br = btnEl.getBoundingClientRect();
+    menu.style.top  = br.bottom + 4 + 'px';
+    menu.style.left = br.left + 'px';
+    const mr = menu.getBoundingClientRect();
+    if (mr.right > window.innerWidth)  menu.style.left = (window.innerWidth - mr.width - 8) + 'px';
+    if (mr.bottom > window.innerHeight) menu.style.top = (br.top - mr.height - 4) + 'px';
+}
+
+function applyIndSettings() {
+    if (!_indSettingsTarget) return;
+    const { paneId, instanceId } = _indSettingsTarget;
+    const mgr  = panesState[paneId]?.indicatorManager;
+    const data = panesState[paneId]?.data;
+    if (!mgr) return;
+    const inst = mgr.getInstances().find(i => i.id === instanceId);
+    if (!inst) return;
+
+    // MACD has no color control — keep its existing color untouched.
+    const color     = inst.type === 'macd' ? inst.color : document.getElementById('indSM_color').value;
+    const lineWidth = _indSettingsLineWidth;
+
+    // Read updated params from injected inputs
+    let params = { ...inst.params };
+    const gv = id => { const el = document.getElementById(id); return el ? el.value : null; };
+    if (inst.type === 'sma' || inst.type === 'ema' || inst.type === 'rsi') {
+        params = { ...params, period: parseInt(gv('indSM_p_period')) || inst.params.period };
+    } else if (inst.type === 'bollinger') {
+        params = { period: parseInt(gv('indSM_p_period')) || inst.params.period,
+                   mult:   parseFloat(gv('indSM_p_mult'))  || inst.params.mult };
+    } else if (inst.type === 'macd') {
+        params = { fast:   parseInt(gv('indSM_p_fast'))   || inst.params.fast,
+                   slow:   parseInt(gv('indSM_p_slow'))   || inst.params.slow,
+                   signal: parseInt(gv('indSM_p_signal')) || inst.params.signal };
+    } else if (inst.type === 'stochastic') {
+        params = { period:  parseInt(gv('indSM_p_period'))  || inst.params.period,
+                   smoothK: parseInt(gv('indSM_p_smoothK')) || inst.params.smoothK,
+                   smoothD: parseInt(gv('indSM_p_smoothD')) || inst.params.smoothD };
+    }
+
+    mgr.update(instanceId, params, color, lineWidth);
+    if (data?.length) mgr.recomputeAll(data);
+    renderIndicatorList(paneId);
+    saveIndicators(paneId);
+    closeIndSettings();
+}
+
+function closeIndSettings() {
+    document.getElementById('indSettingsMenu').style.display = 'none';
+    _indSettingsTarget = null;
+}
+
 function openIndicatorsPanel(paneId, e) {
     e.stopPropagation();
     indicatorPanelPane = paneId;
 
     const panel = document.getElementById("indicatorsPanel");
-    syncIndicatorPanelToState(paneId);
+    renderIndicatorList(paneId);
 
     const btn  = document.getElementById(`indBtn${paneId}`);
     const rect = btn.getBoundingClientRect();
@@ -1440,99 +1629,32 @@ function openIndicatorsPanel(paneId, e) {
 }
 
 function syncIndicatorPanelToState(paneId) {
-    const mgr = panesState[paneId]?.indicatorManager;
-    if (!mgr) return;
+    renderIndicatorList(paneId);
+}
 
-    const types = ['sma', 'ema', 'bollinger', 'rsi', 'macd', 'stochastic'];
-    types.forEach(type => {
-        const cb = document.getElementById(`ind_${type}`);
-        if (cb) cb.checked = mgr.has(type);
+// Width button selection in settings menu
+document.getElementById('indSM_widthBtns').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-w]');
+    if (!btn) return;
+    _indSettingsLineWidth = parseInt(btn.dataset.w);
+    document.querySelectorAll('#indSM_widthBtns button').forEach(b => {
+        b.style.borderColor = parseInt(b.dataset.w) === _indSettingsLineWidth ? '#2962FF' : '#ddd';
+        b.style.color       = parseInt(b.dataset.w) === _indSettingsLineWidth ? '#2962FF' : '';
     });
-}
+});
 
-function getIndParams(type) {
-    if (type === 'sma') return { period: parseInt(document.getElementById('ind_sma_period').value) || 20 };
-    if (type === 'ema') return { period: parseInt(document.getElementById('ind_ema_period').value) || 21 };
-    if (type === 'bollinger') return {
-        period: parseInt(document.getElementById('ind_bollinger_period').value) || 20,
-        mult:   parseFloat(document.getElementById('ind_bollinger_mult').value) || 2
-    };
-    if (type === 'rsi') return { period: parseInt(document.getElementById('ind_rsi_period').value) || 14 };
-    if (type === 'macd') return {
-        fast:   parseInt(document.getElementById('ind_macd_fast').value) || 12,
-        slow:   parseInt(document.getElementById('ind_macd_slow').value) || 26,
-        signal: parseInt(document.getElementById('ind_macd_signal').value) || 9
-    };
-    if (type === 'stochastic') return {
-        period:  parseInt(document.getElementById('ind_stochastic_period').value)  || 14,
-        smoothK: parseInt(document.getElementById('ind_stochastic_smoothK').value) || 3,
-        smoothD: parseInt(document.getElementById('ind_stochastic_smoothD').value) || 3
-    };
-    return {};
-}
-
-function getIndColor(type) {
-    const el = document.getElementById(`ind_${type}_color`);
-    return el ? el.value : null;
-}
-
-function saveIndicators(paneId) {
-    const mgr = panesState[paneId]?.indicatorManager;
-    if (!mgr) return;
-    if (!layout.indicators) layout.indicators = {};
-    layout.indicators[paneId] = mgr.serialize();
-    StorageLayer.autoSave(layout);
-}
-
-function onIndToggle(type) {
-    const paneId = indicatorPanelPane;
-    if (!paneId) return;
-    const mgr = panesState[paneId]?.indicatorManager;
-    if (!mgr) return;
-
-    const checked = document.getElementById(`ind_${type}`).checked;
-    const data    = panesState[paneId].data;
-
-    if (checked) {
-        mgr.add(type, getIndParams(type), getIndColor(type));
-        if (data?.length) mgr.recomputeAll(data);
-    } else {
-        mgr.remove(type);
-    }
-    saveIndicators(paneId);
-}
-
-function onIndParam(type) {
-    const paneId = indicatorPanelPane;
-    if (!paneId) return;
-    const mgr = panesState[paneId]?.indicatorManager;
-    if (!mgr || !mgr.has(type)) return;
-
-    const data = panesState[paneId].data;
-    mgr.update(type, getIndParams(type), null);
-    if (data?.length) mgr.recomputeAll(data);
-    saveIndicators(paneId);
-}
-
-function onIndColor(type) {
-    const paneId = indicatorPanelPane;
-    if (!paneId) return;
-    const mgr = panesState[paneId]?.indicatorManager;
-    if (!mgr || !mgr.has(type)) return;
-
-    const data = panesState[paneId].data;
-    mgr.setColor(type, getIndColor(type));
-    if (data?.length) mgr.recomputeAll(data);
-    saveIndicators(paneId);
-}
-
-// Close indicators panel on outside click
+// Close indicators panel and settings menu on outside click
 document.addEventListener("click", e => {
     const panel = document.getElementById("indicatorsPanel");
     const btn1  = document.getElementById("indBtn1");
     const btn2  = document.getElementById("indBtn2");
     if (panel && !panel.contains(e.target) && e.target !== btn1 && e.target !== btn2) {
         panel.style.display = "none";
+        document.getElementById('addIndDropdown').style.display = 'none';
+    }
+    const sm = document.getElementById('indSettingsMenu');
+    if (sm && sm.style.display === 'block' && !sm.contains(e.target)) {
+        closeIndSettings();
     }
 });
 
