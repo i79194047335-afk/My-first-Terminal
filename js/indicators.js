@@ -438,7 +438,7 @@ class IndicatorManager {
                 if (type === 'rsi') {
                     const series = this.chart.addSeries(LWC.LineSeries, {
                         color: inst.color, lineWidth: inst.lineWidth,
-                        priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+                        priceLineVisible: false, lastValueVisible: true,
                         autoscaleInfoProvider: fixedScale(0, 100)
                     }, paneIndex);
                     if (isFirst) {
@@ -452,9 +452,9 @@ class IndicatorManager {
                 }
 
                 if (type === 'macd') {
-                    const macdSeries   = this.chart.addSeries(LWC.LineSeries,      { color: '#2962FF', lineWidth: inst.lineWidth, priceLineVisible: false, lastValueVisible: true,  crosshairMarkerVisible: false }, paneIndex);
-                    const signalSeries = this.chart.addSeries(LWC.LineSeries,      { color: '#ff9800', lineWidth: inst.lineWidth, priceLineVisible: false, lastValueVisible: true,  crosshairMarkerVisible: false }, paneIndex);
-                    const histSeries   = this.chart.addSeries(LWC.HistogramSeries, {                                              priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }, paneIndex);
+                    const macdSeries   = this.chart.addSeries(LWC.LineSeries,      { color: '#2962FF', lineWidth: inst.lineWidth, priceLineVisible: false, lastValueVisible: true  }, paneIndex);
+                    const signalSeries = this.chart.addSeries(LWC.LineSeries,      { color: '#ff9800', lineWidth: inst.lineWidth, priceLineVisible: false, lastValueVisible: true  }, paneIndex);
+                    const histSeries   = this.chart.addSeries(LWC.HistogramSeries, {                                              priceLineVisible: false, lastValueVisible: false }, paneIndex);
                     if (isFirst) {
                         macdSeries.createPriceLine({ price: 0, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: false });
                     }
@@ -466,12 +466,12 @@ class IndicatorManager {
                     const dColor = '#ff9800';
                     const kSeries = this.chart.addSeries(LWC.LineSeries, {
                         color: kColor, lineWidth: inst.lineWidth,
-                        priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+                        priceLineVisible: false, lastValueVisible: true,
                         autoscaleInfoProvider: fixedScale(0, 100)
                     }, paneIndex);
                     const dSeries = this.chart.addSeries(LWC.LineSeries, {
                         color: dColor, lineWidth: inst.lineWidth,
-                        priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+                        priceLineVisible: false, lastValueVisible: true,
                         autoscaleInfoProvider: fixedScale(0, 100)
                     }, paneIndex);
                     if (isFirst) {
