@@ -26,9 +26,13 @@ SIGNAL_STATS_FILE = "signal_stats.json"
 # Через сколько секунд считаем результат
 EXPIRY_SECONDS = 240
 
-# Минимальное движение в пипсах чтобы считать результат значимым
-# (меньше — считаем нейтральным, не WIN и не LOSS)
-MIN_PIPS_RESULT = 1.0
+# Пороги исхода — СИММЕТРИЧНЫЕ, бинарный опцион (выбор пользователя 2026-06-12):
+#   WIN  — цена прошла >= 1 пипетту (0.1 пипса) В СТОРОНУ прогноза
+#   LOSS — цена ушла  >= 1 пипетту (0.1 пипса) ПРОТИВ прогноза
+#   NEUTRAL (возврат) — ровно 0 (точное равенство цены)
+# 1 пипетта = минимальный шаг котировки (5-й знак), т.е. решает любой тик.
+WIN_THRESHOLD_PIPS  = 0.1   # 1 пипетта в сторону прогноза
+LOSS_THRESHOLD_PIPS = 0.1   # 1 пипетта против прогноза
 
 PIP_SIZE = {
     "EUR/USD": 0.0001,
@@ -154,15 +158,22 @@ def resolve_signals(symbol, current_price, ts):
         if ts - sig["ts"] >= EXPIRY_SECONDS:
 
             move      = current_price - sig["price"]
-            move_pips = round(abs(move) / pip, 1)
+            move_pips = round(abs(move) / pip, 1)   # модуль хода — для статистики/avg_move
 
-            # Определяем результат
-            if move_pips < MIN_PIPS_RESULT:
+            # Знаковый ход В СТОРОНУ прогноза: + благоприятно, − против
+            fav      = move if sig["direction"] == "UP" else -move
+            fav_pips = round(fav / pip, 1)
+
+            # Симметричные пороги (бинарный опцион):
+            #   WIN  — >= 1 пипетта в сторону прогноза
+            #   LOSS — >= 1 пипетта против прогноза
+            #   NEUTRAL (возврат) — ровно 0
+            if fav_pips >= WIN_THRESHOLD_PIPS:
+                result = "WIN"
+            elif fav_pips <= -LOSS_THRESHOLD_PIPS:
+                result = "LOSS"
+            else:
                 result = "NEUTRAL"
-            elif sig["direction"] == "UP":
-                result = "WIN" if move > 0 else "LOSS"
-            else:  # DOWN
-                result = "WIN" if move < 0 else "LOSS"
 
             sig["result"]     = result
             sig["exit_price"] = round(current_price, 5)
@@ -285,7 +296,7 @@ def print_stats():
     print(f"  WIN:             {wins}  ({wr}%)")
     print(f"  LOSS:            {losses}  ({round(100-wr,1)}%)")
     neutral = sum(1 for s in _signal_log if s.get("result") == "NEUTRAL")
-    print(f"  NEUTRAL (<1п):   {neutral}")
+    print(f"  NEUTRAL (возврат): {neutral}")
 
     # По парам
     by_symbol = defaultdict(lambda: {"win": 0, "loss": 0})
