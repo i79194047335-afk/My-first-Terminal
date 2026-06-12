@@ -93,6 +93,10 @@ DOWN_BIAS_SYMBOLS = set()
 # Минимум паттернов для показа реального винрейта
 MIN_MEMORY_SAMPLES = 15
 
+# Фильтр новостей: не торговать в окне −15/+30 мин вокруг high-impact события
+# по валюте пары. Календарь грузит data_loaders/fetch_news.py (cron).
+NEWS_FILTER_ENABLED = True
+
 # Файл памяти
 MEMORY_FILE = "market_memory.json"
 
@@ -339,6 +343,17 @@ def evaluate_signal(
             direction="SKIP", confidence=0, winrate=None, samples=0, reason=[],
             skip_reason=f"⛔ Аномальная волатильность x{vol_ratio:.1f} — возможна новость"
         )
+
+    # High-impact новость по валюте пары в окне −15/+30 мин — не торгуем.
+    # Календарь (data_loaders/news_calendar.csv) обновляется cron-скриптом
+    # fetch_news.py. Ленивый импорт: pattern_memory уже загружен в server.py.
+    if NEWS_FILTER_ENABLED:
+        from pattern_memory import is_news_window
+        if is_news_window(ts, symbol):
+            return SignalResult(
+                direction="SKIP", confidence=0, winrate=None, samples=0, reason=[],
+                skip_reason="⛔ Высокоимпактная новость рядом (−15/+30 мин) — пропуск"
+            )
 
     # ----------------------------------------------------------
     # БЛОК 2 — НАКОПЛЕНИЕ ФАКТОРОВ

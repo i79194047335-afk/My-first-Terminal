@@ -50,18 +50,33 @@ _unsaved_count  = 0
 # ЗАГРУЗКА НОВОСТЕЙ
 # ============================================================
 
-_news_cache = None  # [(ts_utc, currency, impact, event), ...]
+_news_cache = None   # [(ts_utc, currency), ...]
+_news_mtime = 0      # mtime файла на момент последней загрузки
 
 def load_news():
-    global _news_cache
-    if _news_cache is not None:
+    """
+    Загружает high-impact новости из NEWS_FILE с кешем по mtime.
+
+    Перечитывает файл, если он изменился (недельный cron fetch_news.py),
+    поэтому сервер подхватывает свежий календарь без перезапуска.
+
+    Returns:
+        list[tuple]: [(ts_utc:int, currency:str), ...] только high-impact.
+    """
+    global _news_cache, _news_mtime
+
+    if not os.path.exists(NEWS_FILE):
+        if _news_cache is None:
+            print(f"[memory] Новостной календарь не найден: {NEWS_FILE}")
+        _news_cache = []
+        return _news_cache
+
+    mtime = os.path.getmtime(NEWS_FILE)
+    if _news_cache is not None and mtime <= _news_mtime:
         return _news_cache
 
     _news_cache = []
-
-    if not os.path.exists(NEWS_FILE):
-        print(f"[memory] Новостной календарь не найден: {NEWS_FILE}")
-        return _news_cache
+    _news_mtime = mtime
 
     import csv
     try:
