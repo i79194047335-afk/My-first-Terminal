@@ -442,9 +442,11 @@ class IndicatorManager {
                         autoscaleInfoProvider: fixedScale(0, 100)
                     }, paneIndex);
                     if (isFirst) {
-                        series.createPriceLine({ price: 80, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                        series.createPriceLine({ price: 20, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                        series.createPriceLine({ price: 50, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
+                        series.createPriceLine({ price: 100, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true });
+                        series.createPriceLine({ price: 80,  color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        series.createPriceLine({ price: 50,  color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
+                        series.createPriceLine({ price: 20,  color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        series.createPriceLine({ price: 0,   color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true });
                     }
                     inst._series = series;
                 }
@@ -473,9 +475,11 @@ class IndicatorManager {
                         autoscaleInfoProvider: fixedScale(0, 100)
                     }, paneIndex);
                     if (isFirst) {
-                        kSeries.createPriceLine({ price: 80, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                        kSeries.createPriceLine({ price: 20, color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                        kSeries.createPriceLine({ price: 50, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
+                        kSeries.createPriceLine({ price: 100, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true });
+                        kSeries.createPriceLine({ price: 80,  color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        kSeries.createPriceLine({ price: 50,  color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
+                        kSeries.createPriceLine({ price: 20,  color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        kSeries.createPriceLine({ price: 0,   color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true });
                     }
                     inst._kSeries = kSeries;
                     inst._dSeries = dSeries;
