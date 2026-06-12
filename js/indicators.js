@@ -201,28 +201,24 @@ class IndicatorManager {
 
         for (const inst of this._instances) {
             if (inst.type === 'sma') {
-                const v = val(inst.series);
-                lines.push(`<span style="color:${inst.color}">SMA(${inst.params.period}) ${fmt(v, 5)}</span>`);
+                lines.push(`<span style="color:${inst.color}">SMA(${inst.params.period})</span>`);
             }
             if (inst.type === 'ema') {
-                const v = val(inst.series);
-                lines.push(`<span style="color:${inst.color}">EMA(${inst.params.period}) ${fmt(v, 5)}</span>`);
+                lines.push(`<span style="color:${inst.color}">EMA(${inst.params.period})</span>`);
             }
             if (inst.type === 'bollinger') {
-                const u = val(inst.upper), b = val(inst.basis), l = val(inst.lower);
-                lines.push(`<span style="color:${inst.color}">BB(${inst.params.period},${inst.params.mult}) U:${fmt(u,5)} M:${fmt(b,5)} L:${fmt(l,5)}</span>`);
+                lines.push(`<span style="color:${inst.color}">BB(${inst.params.period},${inst.params.mult})</span>`);
             }
             if (inst.type === 'rsi' && inst._series) {
-                const v = val(inst._series);
-                lines.push(`<span style="color:${inst.color}">RSI(${inst.params.period}) ${fmt(v,2)}</span>`);
+                lines.push(`<span style="color:${inst.color}">RSI(${inst.params.period})</span>`);
             }
             if (inst.type === 'macd' && inst._macdSeries) {
-                const m = val(inst._macdSeries), s = val(inst._signalSeries), h = val(inst._histSeries);
-                lines.push(`<span style="color:#2962FF">MACD ${fmt(m,5)}</span> <span style="color:#ff9800">Sig ${fmt(s,5)}</span> <span style="color:#888">H ${fmt(h,5)}</span>`);
+                const p = inst.params;
+                lines.push(`<span style="color:#2962FF">MACD(${p.fast},${p.slow},${p.signal})</span>`);
             }
             if (inst.type === 'stochastic' && inst._kSeries) {
-                const k = val(inst._kSeries), d = val(inst._dSeries);
-                lines.push(`<span style="color:${inst.color}">Stoch(${inst.params.period},${inst.params.smoothK},${inst.params.smoothD}) K:${fmt(k,2)} D:${fmt(d,2)}</span>`);
+                const p = inst.params;
+                lines.push(`<span style="color:${inst.color}">Stoch(${p.period},${p.smoothK},${p.smoothD})</span>`);
             }
         }
 
