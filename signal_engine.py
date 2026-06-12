@@ -17,18 +17,22 @@ signal_engine.py  (parallel index.html — переработанная верс
   - near_high + slow → DOWN (F2)    → 155 паттернов, 51.6%   → вес 3→1
   - символьный DOWN-перевес (F4)    → dir-hit 51.5%          → УДАЛЁН
 
-ПОРОГ: MIN_SCORE поднят 3→4.
-  Реплей: score>=3 → 53.7% | score>=4 → 54.5% (закрывает payout 85-90%).
+РЕДИЗАЙН 2026-06-12 (OOS-анализ 11928 реализованных сделок, ничья=возврат):
+  1. ПАМЯТЬ УБРАНА ИЗ ОЧКОВ. Оказалась некалиброванной (обещала 91% → факт
+     54.5%; 82% → 49%) и при равной структурной силе ухудшала результат
+     (sscore=5: с памятью 57% vs без 67%). Раньше давала +2 и гейтила 99%
+     сделок → поток уходил в EV-отрицательную зону. Теперь только справочно.
+  2. АСИММЕТРИЧНЫЕ ПОРОГИ. UP реализ. 57.5% (прибыльнее) → порог ≥4.
+     DOWN реализ. 52.0% → порог ≥5. EV (payout 85%): UP≥4 +8%, DOWN≥5 +7%.
+  3. ФАКТОР СКОРОСТИ ДЛЯ UP. Раньше velocity edge был только у near_high,
+     из-за чего UP не дотягивал до порога. Добавлен зеркальный near_low.
+  Breakeven при ничья=возврат: 54% (payout 85%), 52.6% (90%).
 
-ВАЖНО: последний квартал данных (06-02..06-11) показал просадку edge —
-паттерны со временем затухают, требуется мониторинг на свежих данных.
+ВАЖНО: edge затухает — мониторить signal_stats.json на свежих данных,
+перепроверять пороги ежемесячно.
 
-MATCHING ПАТТЕРНОВ:
-  - Основной поиск: символ + сессия + зона + час±1 + velocity_bin + micro_trend
-  - Fallback (если < MIN_MEMORY_SAMPLES): убираем micro_trend
-  - Fallback-2 (если всё ещё мало): убираем velocity_bin
-  Так сохраняем edge при достаточном числе паттернов, но не теряем сигнал
-  при малой базе.
+MATCHING ПАТТЕРНОВ (используется только для справочного винрейта на экране):
+  - символ + сессия + зона + час±1 + velocity_bin + micro_trend, с фолбэками.
 
 ФИКС:
   - ts всегда приводится к float корректно (FXCM даёт float, Dukascopy теперь тоже)
@@ -66,10 +70,16 @@ PIP_SIZE = {
     "USD/JPY": 0.01
 }
 
-# MIN_SCORE поднят 3→4 после реплея signal_log.json:
-#   score>=3 → WIN 53.7% | score>=4 → WIN 54.5% (закрывает payout 85-90%)
-MIN_SCORE = 4
-MAX_SCORE = 9
+# Пороги пересмотрены после OOS-анализа реализованных исходов (11928 сделок,
+# 70/30 time-split). Память оказалась НЕкалиброванной (обещала 91% → факт 54%)
+# и дилютивной — убрана из расчёта очков (см. Блок 3).
+# По чистым структурным факторам реализованный винрейт (ничья=возврат, breakeven 54%):
+#   UP   sscore>=4 → 58.5%  (EV+8% @85% payout)
+#   DOWN sscore>=5 → 57.9%  (EV+7%);  DOWN<=4 → EV-отрицательный, отсечён
+# Пороги асимметричны: UP — прибыльное направление, пускаем легче.
+MIN_SCORE_UP   = 4
+MIN_SCORE_DOWN = 5
+MAX_SCORE = 5   # реальный максимум структурного счёта (F1+F2+F5+F6+F7)
 
 # Часовой bias — УДАЛЁН.
 # Реплей 11677 живых сигналов: UP-часы 49.2%, DOWN-часы 50.9% (live edge ~0).
@@ -345,22 +355,33 @@ def evaluate_signal(
         score_up += 1
         reason.append(f"📍 Нижняя граница (pos={range_pos:.2f})")
 
-    # --- Фактор 2: velocity edge (только для near_high) ---
-    # near_high + slow → DOWN 63.9% (Δ-13.4 — сильный)
-    # near_high + fast → UP  53.1% (Δ+3.6  — слабый)
+    # --- Фактор 2: velocity edge ---
+    # Медленный/стоячий подход к краю → истощение импульса → разворот.
+    # Раньше работал только для near_high, из-за чего UP не дотягивал до порога
+    # (структурный потолок UP был 3). Теперь зеркально и для near_low,
+    # чтобы прибыльное UP-направление (реализ. 57.5%) могло набрать порог.
     if near_high:
         if vbin == "slow":
-            # вес понижен 3→1: на live всего 155 паттернов, dir-hit 51.6% (переобучение)
             score_down += 1
-            reason.append(f"🐢 Медленный подход к сопротивлению [{vbin}] → DOWN (слабый)")
-        elif vbin == "fast":
-            # fast→UP УДАЛЁН: на live dir-hit 48.6% (отрицательный edge). Вклад 0.
-            reason.append(f"⚡ Быстрый импульс к сопротивлению [{vbin}] (нейтрально)")
+            reason.append(f"🐢 Медленный подход к сопротивлению [{vbin}] → DOWN")
         elif vbin == "flat":
             score_down += 1
             reason.append(f"😴 Цена стоит у сопротивления [{vbin}] → вероятен разворот")
+        elif vbin == "fast":
+            reason.append(f"⚡ Быстрый импульс к сопротивлению [{vbin}] (нейтрально)")
         else:  # medium
             reason.append(f"➡️ Средняя скорость у сопротивления [{vbin}]")
+    if near_low:
+        if vbin == "slow":
+            score_up += 1
+            reason.append(f"🐢 Медленный подход к поддержке [{vbin}] → UP")
+        elif vbin == "flat":
+            score_up += 1
+            reason.append(f"😴 Цена стоит у поддержки [{vbin}] → вероятен разворот")
+        elif vbin == "fast":
+            reason.append(f"⚡ Быстрый импульс к поддержке [{vbin}] (нейтрально)")
+        else:  # medium
+            reason.append(f"➡️ Средняя скорость у поддержки [{vbin}]")
 
     # --- Фактор 3: часовой bias ---
     if hour in HOUR_BIAS:
@@ -405,9 +426,14 @@ def evaluate_signal(
             reason.append("🏙️ Лондон — усиление UP")
 
     # ----------------------------------------------------------
-    # БЛОК 3 — РЕАЛЬНЫЙ ВИНРЕЙТ ИЗ ПАМЯТИ
-    # Передаём velocity и micro для точного matching
+    # БЛОК 3 — ПАМЯТЬ (ТОЛЬКО СПРАВОЧНО, В ОЧКИ НЕ ВХОДИТ)
     # ----------------------------------------------------------
+    # OOS-проверка по реализованным исходам: память НЕкалибрована
+    # (обещала 91% → факт 54.5%; 82% → 49%; 73% → 49%) и при равной
+    # структурной силе сигналы С памятью проигрывали сигналам БЕЗ неё
+    # (sscore=5: 57% vs 67%). Раньше давала +2 и гейтила 99% сделок,
+    # затягивая поток в EV-отрицательную зону. Теперь считается только
+    # для отображения на экране и НЕ влияет на score_up / score_down.
 
     memory_wr, memory_n = get_memory_winrate(
         symbol, ts, near_high, near_low,
@@ -417,35 +443,9 @@ def evaluate_signal(
     )
 
     if memory_wr is not None and memory_n >= MIN_MEMORY_SAMPLES:
-        memory_direction = "UP" if memory_wr > 0.5 else "DOWN"
-        memory_edge      = abs(memory_wr - 0.5)
-
-        if memory_edge > 0.1:   # >10% от нейтрали — сильный сигнал
-            if memory_direction == "UP":
-                score_up += 2
-                reason.append(
-                    f"🧠 Память [{memory_n} пат., vbin={vbin}, micro={micro}]: "
-                    f"UP {round(memory_wr * 100, 1)}%"
-                )
-            else:
-                score_down += 2
-                reason.append(
-                    f"🧠 Память [{memory_n} пат., vbin={vbin}, micro={micro}]: "
-                    f"DOWN {round((1 - memory_wr) * 100, 1)}%"
-                )
-        elif memory_edge > 0.05:  # 5-10% — слабый сигнал
-            if memory_direction == "UP":
-                score_up += 1
-                reason.append(
-                    f"🧠 Память [{memory_n} пат., vbin={vbin}]: "
-                    f"UP {round(memory_wr * 100, 1)}% (слабый)"
-                )
-            else:
-                score_down += 1
-                reason.append(
-                    f"🧠 Память [{memory_n} пат., vbin={vbin}]: "
-                    f"DOWN {round((1 - memory_wr) * 100, 1)}% (слабый)"
-                )
+        mem_dir = "UP" if memory_wr > 0.5 else "DOWN"
+        mem_pct = round((memory_wr if mem_dir == "UP" else 1 - memory_wr) * 100, 1)
+        reason.append(f"🧠 Память [{memory_n} пат.]: {mem_dir} {mem_pct}% (справочно)")
 
     # ----------------------------------------------------------
     # БЛОК 4 — РЕШЕНИЕ
@@ -464,15 +464,20 @@ def evaluate_signal(
             skip_reason=f"⚠️ Равный счёт UP={score_up} DOWN={score_down}"
         )
 
-    if winning_score < MIN_SCORE:
+    # Асимметричный порог: UP прибыльнее (реализ. 57.5%) → пускаем при ≥4;
+    # DOWN (52%) требует более сильного подтверждения → только ≥5.
+    threshold = MIN_SCORE_UP if direction == "UP" else MIN_SCORE_DOWN
+    if winning_score < threshold:
         return SignalResult(
             direction="SKIP", confidence=0, winrate=memory_wr,
             samples=memory_n, reason=reason,
-            skip_reason=f"⚠️ Мало подтверждений (score={winning_score}, нужно ≥{MIN_SCORE})"
+            skip_reason=f"⚠️ Мало подтверждений (score={winning_score}, нужно ≥{threshold} для {direction})"
         )
 
-    confidence = int(55 + (winning_score - MIN_SCORE) / (MAX_SCORE - MIN_SCORE) * 37)
-    confidence = max(55, min(confidence, 92))
+    # Уверенность отражает реализованный винрейт (~57% на пороге, +4пп за очко),
+    # а не раздутую память. Держим в честном диапазоне 57-75%.
+    confidence = 57 + (winning_score - threshold) * 4
+    confidence = max(55, min(confidence, 75))
 
     return SignalResult(
         direction=direction,
@@ -508,12 +513,10 @@ def format_signal(symbol: str, price: float, ts, result: SignalResult) -> dict:
             "session":     session
         }
 
-    display_pct = None
-    if result.winrate is not None and result.samples >= MIN_MEMORY_SAMPLES:
-        wr = result.winrate if result.direction == "UP" else (1 - result.winrate)
-        display_pct = round(wr * 100, 1)
-    else:
-        display_pct = result.confidence
+    # Заголовок % = честная score-based уверенность.
+    # Память НЕ используется как заголовок (она некалибрована) — она уходит
+    # в поле winrate только для справочного отображения в панели.
+    display_pct = result.confidence
 
     return {
         "type":        "signal",
