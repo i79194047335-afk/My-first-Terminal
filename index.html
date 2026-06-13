@@ -239,7 +239,7 @@
             min-width:200px; box-shadow:0 4px 16px rgba(0,0,0,0.18);">
   <div style="margin-bottom:6px; font-weight:bold;" id="indSM_title">Settings</div>
   <div id="indSM_colorRow" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-    <span>Color</span>
+    <span id="indSM_colorLabel">Color</span>
     <input type="color" id="indSM_color" style="width:32px; height:24px; padding:0; border:1px solid #ccc;">
   </div>
   <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
@@ -502,6 +502,11 @@ function handleMessage(id, state, msg) {
             // Load or recompute indicators after first history
             if (!state.indicatorsLoaded) {
                 state.indicatorsLoaded = true;
+                // Clear any existing instances first — switchSymbol resets
+                // indicatorsLoaded to force a reload, and without this the old
+                // instances survive and loadFrom re-adds copies with colliding
+                // ids (so a gear button would open the wrong instance's settings).
+                state.indicatorManager.destroyAll();
                 state.indicatorManager.loadFrom(
                     layout.indicators[id] || [],
                     state.data
@@ -1394,7 +1399,17 @@ function refreshSignalMarkers() {
         const st = panesState[paneId];
         if (!st?.series) return;
         const markers = _signalsVisible ? getMarkersForPane(paneId) : [];
-        try { st.series.setMarkers(markers); } catch(e) {}
+        // LightweightCharts v5 removed ISeriesApi.setMarkers — markers are now a
+        // plugin created once per series via createSeriesMarkers(), then updated
+        // through its own setMarkers(). The series persists across symbol switches
+        // (only its data is replaced), so the primitive is created lazily and reused.
+        try {
+            if (!st.signalMarkers) {
+                st.signalMarkers = LightweightCharts.createSeriesMarkers(st.series, markers);
+            } else {
+                st.signalMarkers.setMarkers(markers);
+            }
+        } catch (e) { console.error("signal markers failed:", e); }
     });
 }
 
@@ -1597,6 +1612,9 @@ function openIndSettings(instanceId, paneId, btnEl, e) {
     // MACD uses fixed line colors (blue MACD / orange signal), so its color
     // picker is meaningless — hide it.
     document.getElementById('indSM_colorRow').style.display = inst.type === 'macd' ? 'none' : 'flex';
+    // For stochastic the top picker controls the %K line specifically (%D has
+    // its own picker injected below); everything else just calls it "Color".
+    document.getElementById('indSM_colorLabel').textContent = inst.type === 'stochastic' ? '%K color' : 'Color';
 
     // Highlight active width button
     document.querySelectorAll('#indSM_widthBtns button').forEach(btn => {
@@ -1641,6 +1659,9 @@ function openIndSettings(instanceId, paneId, btnEl, e) {
                    style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
         </div>`;
     } else if (inst.type === 'stochastic') {
+        const showK = p.showK !== false;
+        const showD = p.showD !== false;
+        const dColor = p.dColor || '#ff9800';
         paramsHtml = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
             <span>K</span>
             <input type="number" id="indSM_p_period" value="${p.period}" min="2" max="200"
@@ -1651,6 +1672,21 @@ function openIndSettings(instanceId, paneId, btnEl, e) {
             <span>D</span>
             <input type="number" id="indSM_p_smoothD" value="${p.smoothD}" min="1" max="20"
                    style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+        </div>
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:6px;">
+            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                <input type="checkbox" id="indSM_p_showK" ${showK ? 'checked' : ''}>
+                <span style="color:${inst.color};">%K</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                <input type="checkbox" id="indSM_p_showD" ${showD ? 'checked' : ''}>
+                <span>%D</span>
+            </label>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <span>%D color</span>
+            <input type="color" id="indSM_p_dColor" value="${dColor}"
+                   style="width:32px; height:24px; padding:0; border:1px solid #ccc;">
         </div>`;
     }
     document.getElementById('indSM_params').innerHTML = paramsHtml;
@@ -1692,9 +1728,14 @@ function applyIndSettings() {
                    slow:   parseInt(gv('indSM_p_slow'))   || inst.params.slow,
                    signal: parseInt(gv('indSM_p_signal')) || inst.params.signal };
     } else if (inst.type === 'stochastic') {
+        const ck = document.getElementById('indSM_p_showK');
+        const cd = document.getElementById('indSM_p_showD');
         params = { period:  parseInt(gv('indSM_p_period'))  || inst.params.period,
                    smoothK: parseInt(gv('indSM_p_smoothK')) || inst.params.smoothK,
-                   smoothD: parseInt(gv('indSM_p_smoothD')) || inst.params.smoothD };
+                   smoothD: parseInt(gv('indSM_p_smoothD')) || inst.params.smoothD,
+                   showK:   ck ? ck.checked : (inst.params.showK !== false),
+                   showD:   cd ? cd.checked : (inst.params.showD !== false),
+                   dColor:  gv('indSM_p_dColor') || inst.params.dColor || '#ff9800' };
     }
 
     mgr.update(instanceId, params, color, lineWidth);

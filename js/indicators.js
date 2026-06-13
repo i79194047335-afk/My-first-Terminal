@@ -341,7 +341,9 @@ class IndicatorManager {
         for (const cfg of configArray) {
             if (cfg.visible === false) continue;
             const newId = this.add(cfg.type, cfg.params, cfg.color, cfg.lineWidth ?? 2);
-            if (cfg.id) {
+            // Adopt the saved id only if it is not already taken — otherwise keep
+            // the freshly generated one so two instances can never share an id.
+            if (cfg.id && !this._instances.some(i => i.id === cfg.id)) {
                 const inst = this._instances.find(i => i.id === newId);
                 if (inst) inst.id = cfg.id;
             }
@@ -458,24 +460,29 @@ class IndicatorManager {
                 }
 
                 if (type === 'stochastic') {
+                    const showK = inst.params.showK !== false;
+                    const showD = inst.params.showD !== false;
                     const kColor = inst.color;
-                    const dColor = '#ff9800';
+                    const dColor = inst.params.dColor || '#ff9800';
                     const kSeries = this.chart.addSeries(LWC.LineSeries, {
-                        color: kColor, lineWidth: inst.lineWidth,
-                        priceLineVisible: false, lastValueVisible: true,
+                        color: kColor, lineWidth: inst.lineWidth, visible: showK,
+                        priceLineVisible: false, lastValueVisible: showK,
                         autoscaleInfoProvider: fixedScale(0, 100)
                     }, paneIndex);
                     const dSeries = this.chart.addSeries(LWC.LineSeries, {
-                        color: dColor, lineWidth: inst.lineWidth,
-                        priceLineVisible: false, lastValueVisible: true,
+                        color: dColor, lineWidth: inst.lineWidth, visible: showD,
+                        priceLineVisible: false, lastValueVisible: showD,
                         autoscaleInfoProvider: fixedScale(0, 100)
                     }, paneIndex);
                     if (isFirst) {
-                        kSeries.createPriceLine({ price: 100, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true });
-                        kSeries.createPriceLine({ price: 80,  color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                        kSeries.createPriceLine({ price: 50,  color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
-                        kSeries.createPriceLine({ price: 20,  color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
-                        kSeries.createPriceLine({ price: 0,   color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true });
+                        // A hidden series hides its price lines too, so anchor the
+                        // 0/20/50/80/100 reference levels to whichever line is visible.
+                        const refSeries = showK ? kSeries : (showD ? dSeries : kSeries);
+                        refSeries.createPriceLine({ price: 100, color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true });
+                        refSeries.createPriceLine({ price: 80,  color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        refSeries.createPriceLine({ price: 50,  color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: false });
+                        refSeries.createPriceLine({ price: 20,  color: '#888', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true });
+                        refSeries.createPriceLine({ price: 0,   color: '#555', lineWidth: 1, lineStyle: LWC.LineStyle.Solid, axisLabelVisible: true });
                     }
                     inst._kSeries = kSeries;
                     inst._dSeries = dSeries;
