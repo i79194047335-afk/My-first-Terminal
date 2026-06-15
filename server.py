@@ -10,10 +10,11 @@ import os
 import csv
 from market_engine import MarketEngine
 from structure_engine import StructureEngine, detect_event
-from signal_engine import evaluate_signal, format_signal
+from signal_engine import evaluate_signal, format_signal, get_hour_utc, minutes_in_hour, get_session
 from pattern_memory import store_pattern, resolve_patterns
 from signal_tracker import store_signal, resolve_signals as tracker_resolve, print_stats as tracker_print_stats
 import queue
+from collections import deque
 
 
 
@@ -63,6 +64,12 @@ market_structures = {}
 # Cooldown сигналов — не более 1 сигнала в 30 сек на пару
 SIGNAL_COOLDOWN   = 30
 last_signal_time  = {}
+
+# Реплей сигналов: кольцевой буфер последних боевых сигналов в памяти.
+# Отдаётся новому клиенту по запросу get_signals, чтобы стрелки сигналов
+# переживали перезагрузку страницы в течение сессии.
+RECENT_SIGNALS_MAX = 1500
+recent_signals     = deque(maxlen=RECENT_SIGNALS_MAX)
 
 stream_listener   = None
 
@@ -409,6 +416,9 @@ def process_tick(symbol, price, ts):
                 signal_data = format_signal(symbol, price, ts, signal)
                 send_signal(symbol, signal_data)
 
+                # Реплей — кладём боевой сигнал в кольцевой буфер
+                recent_signals.append(_signal_entry(ts, symbol, signal_data))
+
 
                 # Трекер — записываем сигнал для отслеживания результата
                 store_signal(
@@ -510,6 +520,74 @@ def send_analysis(symbol, data):
             clients.pop(ws, None)
 
 
+
+
+def _signal_entry(ts, symbol, signal_data):
+    """
+    Построить запись реплея, зеркалящую живое сообщение 'signal'.
+
+    Args:
+        ts: unix timestamp сигнала.
+        symbol: торговая пара.
+        signal_data: dict из format_signal (боевой, не SKIP).
+
+    Returns:
+        dict: {"time", "symbol", "direction", "data"} для буфера recent_signals.
+    """
+    return {
+        "time":      int(ts),
+        "symbol":    symbol,
+        "direction": signal_data["direction"],
+        "data":      signal_data,
+    }
+
+
+def seed_recent_signals():
+    """
+    Посеять буфер recent_signals последними сигналами из signal_log.json.
+
+    Берёт сигналы за последние 24 часа и нормализует их к форме живого
+    сообщения 'signal' (до-вычисляет session/hour_utc/min_in_hour из ts),
+    чтобы панель сигнала на фронте рендерилась идентично живым. Best-effort:
+    любые ошибки чтения/парсинга не должны мешать старту сервера.
+
+    Args:
+        None.
+
+    Returns:
+        None. Наполняет глобальный recent_signals.
+    """
+    try:
+        with open("signal_log.json", encoding="utf-8") as f:
+            log = json.load(f)
+    except Exception as e:
+        print("[signals] seed skipped:", e)
+        return
+
+    cutoff = time.time() - 24 * 3600
+    recent = [s for s in log
+              if isinstance(s.get("ts"), (int, float)) and s["ts"] >= cutoff]
+    recent.sort(key=lambda s: s["ts"])
+
+    for s in recent:
+        ts = s["ts"]
+        data = {
+            "type":        "signal",
+            "symbol":      s.get("symbol"),
+            "price":       s.get("price"),
+            "direction":   s.get("direction"),
+            "confidence":  s.get("confidence"),
+            "winrate":     s.get("winrate"),
+            "display_pct": s.get("confidence"),
+            "samples":     s.get("samples", 0),
+            "reason":      s.get("reason", []),
+            "hour_utc":    get_hour_utc(ts),
+            "min_in_hour": minutes_in_hour(ts),
+            "session":     get_session(ts),
+        }
+        recent_signals.append(_signal_entry(ts, s.get("symbol"), data))
+
+    print(f"[signals] seeded {len(recent_signals)} recent signals (<=24h)")
 
 
 def send_signal(symbol, data):
@@ -653,6 +731,12 @@ async def handler(ws):
                 }))
 
 
+            if data["type"] == "get_signals":
+                await ws.send(json.dumps({
+                    "type": "signals_history",
+                    "data": list(recent_signals),
+                }))
+
             if data["type"] == "add_alert":
                 global alert_id_counter
                 symbol = data["symbol"]
@@ -716,6 +800,8 @@ async def main():
 
 
     load_history()
+
+    seed_recent_signals()
 
 
     threading.Thread(target=tick_writer, daemon=True).start()

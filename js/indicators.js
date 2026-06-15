@@ -329,6 +329,82 @@ class IndicatorManager {
         }
     }
 
+    // ------------------------------------------------------------------
+    // updateLast — incremental "TradingView-style" tick update.
+    //
+    // Instead of recomputing every indicator over the whole candle array on
+    // every tick (O(n) per tick → freezes on long M1 history), this recomputes
+    // each indicator only over a short trailing window and pushes a single point
+    // via series.update() (which the chart appends-or-updates without re-indexing
+    // the full series). All these indicators are causal: a past bar's value never
+    // depends on future bars, so updating only the last point is exact for the
+    // windowed indicators (SMA/Bollinger/Stochastic) and float-exact for the
+    // recursive ones (EMA/RSI/MACD) given a long-enough warmup tail.
+    //
+    // Args:
+    //     data: full candle array (chronological, OHLC objects with .time).
+    // Returns:
+    //     None. Updates each instance's series in place.
+    updateLast(data) {
+        if (!data || data.length < 2) return;
+
+        for (const inst of this._instances) {
+            const win   = this._tailLen(inst);
+            const slice = data.length > win ? data.slice(data.length - win) : data;
+
+            if (inst.type === 'sma' && inst.series) {
+                this._updLast(inst.series, IndicatorMath.sma(slice, inst.params.period));
+            }
+            if (inst.type === 'ema' && inst.series) {
+                this._updLast(inst.series, IndicatorMath.ema(slice, inst.params.period));
+            }
+            if (inst.type === 'bollinger' && inst.basis) {
+                const b = IndicatorMath.bollinger(slice, inst.params.period, inst.params.mult);
+                this._updLast(inst.basis, b.basis);
+                this._updLast(inst.upper, b.upper);
+                this._updLast(inst.lower, b.lower);
+            }
+            if (inst.type === 'rsi' && inst._series) {
+                this._updLast(inst._series, IndicatorMath.rsi(slice, inst.params.period));
+            }
+            if (inst.type === 'macd' && inst._macdSeries) {
+                const r = IndicatorMath.macd(slice, inst.params.fast, inst.params.slow, inst.params.signal);
+                this._updLast(inst._macdSeries,   r.macd);
+                this._updLast(inst._signalSeries, r.signal);
+                this._updLast(inst._histSeries,   r.hist);
+            }
+            if (inst.type === 'stochastic' && inst._kSeries) {
+                const r = IndicatorMath.stochastic(slice, inst.params.period, inst.params.smoothK, inst.params.smoothD);
+                this._updLast(inst._kSeries, r.k);
+                this._updLast(inst._dSeries, r.d);
+            }
+        }
+    }
+
+    // _updLast — push the last non-null point of a computed series via update().
+    _updLast(series, points) {
+        if (!series || !points || !points.length) return;
+        const p = points[points.length - 1];
+        if (!p || p.value === null || p.value === undefined || Number.isNaN(p.value)) return;
+        try { series.update(p); } catch (e) {}
+    }
+
+    // _tailLen — trailing-window length sufficient for an exact (windowed) or
+    // float-exact (recursive, warmup-decayed) last value. Always O(constant)
+    // regardless of total history length.
+    _tailLen(inst) {
+        const p = inst.params || {};
+        switch (inst.type) {
+            case 'sma':        return (p.period || 20) + 2;
+            case 'bollinger':  return (p.period || 20) + 2;
+            case 'stochastic': return (p.period || 14) + (p.smoothK || 1) + (p.smoothD || 3) + 5;
+            case 'ema':        return Math.max(300, (p.period || 20) * 5);
+            case 'rsi':        return Math.max(300, (p.period || 14) * 6);
+            case 'macd':       return Math.max(400, (p.slow || 26) * 5 + (p.signal || 9) * 5);
+            default:           return 500;
+        }
+    }
+
     serialize() {
         return this._instances.map(i => ({
             id: i.id, type: i.type, params: i.params,

@@ -487,6 +487,7 @@ function handleMessage(id, state, msg) {
         msg.type !== "alert_created" &&
         msg.type !== "analysis" &&
         msg.type !== "signal" &&
+        msg.type !== "signals_history" &&
         msg.requestId !== state.requestId
     ) return;
 
@@ -532,20 +533,32 @@ function handleMessage(id, state, msg) {
         state.series.update(msg.candle);
 
         const last = state.data[state.data.length - 1];
+        let isNewBar = false;
         if (last && last.time === msg.candle.time) {
             state.data[state.data.length - 1] = msg.candle;
         } else {
             state.data.push(msg.candle);
             if (state.data.length > 30000) state.data.shift();
+            isNewBar = true;
         }
 
         state.lastCandle = msg.candle;
-        state.indicatorManager?.recomputeAll(state.data);
-        if (_signalsVisible) refreshSignalMarkers();
+        // TradingView-style incremental update: recompute indicators only over a
+        // short trailing window and push the last point via series.update(), so
+        // cost is O(constant) per tick instead of O(history). A full recompute is
+        // unnecessary here because every indicator is causal (past values never
+        // change); history load / param change still call recomputeAll().
+        state.indicatorManager?.updateLast(state.data);
+        // Signal markers are keyed to fixed signal timestamps and only change when
+        // a new signal arrives (addSignalToLog → refreshSignalMarkers). Refreshing
+        // on every tick re-scans the whole growing _signalLog for nothing; do it
+        // at most once per bar (on bar close) to catch markers scrolling in/out.
+        if (_signalsVisible && isNewBar) refreshSignalMarkers();
     }
 
     if (msg.type === "analysis") updateMarketEngine(msg);
     if (msg.type === "signal")   showSignal(msg);
+    if (msg.type === "signals_history") applySignalsHistory(msg.data);
 
     if (msg.type === "alert" && msg.symbol === currentSymbol) {
         playAlertSound();
@@ -607,7 +620,12 @@ function createPane(id) {
     });
     els.tfSelect.value = layout[`pane${id}`]?.tf || "M1";
 
-    state.ws.onopen    = () => setTF(id, els.tfSelect.value);
+    state.ws.onopen    = () => {
+        setTF(id, els.tfSelect.value);
+        // Подтянуть недавние сигналы сессии, чтобы стрелки переживали
+        // перезагрузку страницы. Запрос один (из панели 1) — _signalLog общий.
+        if (id === 1) state.ws.send(JSON.stringify({ type: "get_signals" }));
+    };
     state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
 
     els.tfSelect.onchange = () => setTF(id, els.tfSelect.value);
@@ -1205,16 +1223,26 @@ function switchSymbol(symbol) {
     [1, 2].forEach(id => {
         const state = panesState[id];
         if (!state) return;
-        if (state.ws) state.ws.close();
-
-        state.ws = new WebSocket(`ws://89.107.10.204:8765`);
         state.indicatorsLoaded = false; // force reload on next history
+        const tf = layout[`pane${id}`]?.tf || "M1";
+        const rs = state.ws && state.ws.readyState;
 
-        state.ws.onopen    = () => setTF(id, layout[`pane${id}`]?.tf || "M1");
-        state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
-
-        if (id === 1) ws1 = state.ws;
-        if (id === 2) ws2 = state.ws;
+        if (rs === WebSocket.OPEN) {
+            // Переиспользуем открытый сокет: set_tf несёт новый currentSymbol,
+            // сервер обновляет привязку символа. Без teardown — нет предупреждения
+            // "closed before connection established" и реконнект-шторма.
+            setTF(id, tf);
+        } else if (rs === WebSocket.CONNECTING) {
+            // Сокет ещё открывается — его onopen сам запросит уже обновлённый
+            // currentSymbol, пересоздавать не нужно.
+        } else {
+            // Только если сокет закрыт/закрывается — создаём заново.
+            state.ws = new WebSocket(`ws://89.107.10.204:8765`);
+            state.ws.onopen    = () => setTF(id, layout[`pane${id}`]?.tf || "M1");
+            state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
+            if (id === 1) ws1 = state.ws;
+            if (id === 2) ws2 = state.ws;
+        }
     });
     refreshSignalMarkers();
 }
@@ -1373,14 +1401,18 @@ function toggleSignalPanel() {
 function getMarkersForPane(paneId) {
     const st = panesState[paneId];
     if (!st?.data?.length) return [];
-    const minTime = st.data[0].time;
-    const maxTime = st.data[st.data.length - 1].time;
     const tf = st.tfSeconds;
+    // Маркер ОБЯЗАН стоять на реально существующем баре: LightweightCharts при
+    // раскладке маркеров зовёт timeToCoordinate(marker.time) и оборачивает его
+    // в ensureNotNull — для отсутствующего времени это бросает "Value is null".
+    // Такое бывает при дырах по выходным и когда снэп уходит на бар дальше
+    // последнего загруженного (особенно после смены ТФ на старший).
+    const barTimes = new Set(st.data.map(c => c.time));
     return _signalLog
         .filter(s => s.symbol === currentSymbol)
         .map(s => {
             const snapped = Math.floor(s.time / tf) * tf;
-            if (snapped < minTime || snapped > maxTime + tf) return null;
+            if (!barTimes.has(snapped)) return null;
             return {
                 time:     snapped,
                 position: s.direction === "UP" ? "belowBar" : "aboveBar",
@@ -1458,6 +1490,30 @@ function renderSignalInPanel(index) {
         "<div style='font-size:11px;color:#ccc;margin:5px 0 3px'>" + symbolLink + " | " + session + " | " + hh + ":" + mm + " UTC</div>" +
         "<div style='font-size:11px;color:#bbb;line-height:1.6'>" + (data.reason || []).join("<br>") + "</div>" +
         navHtml;
+}
+
+// Восстановить _signalLog из серверного реплея (type: "signals_history").
+// Идемпотентно: дедупликация по time|symbol|direction, поэтому повторный
+// запрос/гонка с живым сигналом не плодят дубликаты стрелок.
+function applySignalsHistory(list) {
+    if (!Array.isArray(list) || !list.length) return;
+    const seen = new Set(_signalLog.map(s => s.time + "|" + s.symbol + "|" + s.direction));
+    for (const s of list) {
+        if (!s || s.direction === "SKIP") continue;
+        const key = s.time + "|" + s.symbol + "|" + s.direction;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        _signalLog.push({
+            id:        ++_signalIdCounter,
+            time:      s.time,
+            direction: s.direction,
+            symbol:    s.symbol,
+            fullData:  s.data,
+        });
+    }
+    _signalLog.sort((a, b) => a.time - b.time);
+    _signalPanelIndex = _signalLog.length - 1;
+    if (_signalsVisible) refreshSignalMarkers();
 }
 
 function addSignalToLog(data) {
