@@ -386,6 +386,15 @@ class IndicatorManager {
         if (!series || !points || !points.length) return;
         const p = points[points.length - 1];
         if (!p || p.value === null || p.value === undefined || Number.isNaN(p.value)) return;
+        // Guard: never feed an indicator series a point whose time isn't on the
+        // chart's time scale. LightweightCharts paints line series by calling
+        // timeToCoordinate(point.time) wrapped in ensureNotNull, so an off-scale
+        // time throws "Value is null" during the next paint (seen on sub-pane
+        // oscillators when a tick is processed mid-TF-switch, before the new
+        // history rebuilt the scale). recomputeAll() repaints correctly afterwards.
+        try {
+            if (this.chart.timeScale().timeToCoordinate(p.time) === null) return;
+        } catch (e) { return; }
         try { series.update(p); } catch (e) {}
     }
 

@@ -495,6 +495,9 @@ function handleMessage(id, state, msg) {
         if (!state.chart) createChartInternal(id, state.tfSeconds);
 
         if (msg.data?.length) {
+            // Сброс перекрестия перед самой подменой данных — на случай, если
+            // курсор успел «залочить» точку, пока грузилась история (см. setTF).
+            try { state.chart.clearCrosshairPosition(); } catch (e) {}
             state.data = msg.data;
             state.series.setData(state.data);
             refreshSignalMarkers();
@@ -1192,6 +1195,10 @@ function setTF(paneId, tf) {
     st.tfSeconds = TF_MAP[tf];
     if (st.drawingEngine) st.drawingEngine.setTimeframe(st.tfSeconds);
     if (st.chart) {
+        // Сбросить перекрестие перед сменой ТФ: иначе при подмене данных на ТФ с
+        // меньшим числом баров LWC дёргает устаревший логический индекс курсора
+        // во время рассинхрона и бросает "Value is null" на каждое движение мыши.
+        try { st.chart.clearCrosshairPosition(); } catch (e) {}
         st.chart.applyOptions({ timeScale: { secondsVisible: st.tfSeconds < 60 } });
     }
     layout[`pane${paneId}`].tf = tf;
@@ -1400,19 +1407,21 @@ function toggleSignalPanel() {
 
 function getMarkersForPane(paneId) {
     const st = panesState[paneId];
-    if (!st?.data?.length) return [];
+    if (!st?.data?.length || !st.chart) return [];
     const tf = st.tfSeconds;
-    // Маркер ОБЯЗАН стоять на реально существующем баре: LightweightCharts при
-    // раскладке маркеров зовёт timeToCoordinate(marker.time) и оборачивает его
-    // в ensureNotNull — для отсутствующего времени это бросает "Value is null".
-    // Такое бывает при дырах по выходным и когда снэп уходит на бар дальше
-    // последнего загруженного (особенно после смены ТФ на старший).
-    const barTimes = new Set(st.data.map(c => c.time));
+    // Маркер ОБЯЗАН ложиться на точку шкалы: LightweightCharts при раскладке
+    // маркеров зовёт timeToCoordinate(marker.time) и оборачивает результат в
+    // ensureNotNull — для времени, которого нет на шкале, это бросает "Value is
+    // null" (будущий бар, дыра по выходным, либо рассинхрон state.data и шкалы
+    // после смены ТФ). Спрашиваем саму шкалу — это та же проверка, что внутри LWC.
+    const tscale = st.chart.timeScale();
     return _signalLog
         .filter(s => s.symbol === currentSymbol)
         .map(s => {
             const snapped = Math.floor(s.time / tf) * tf;
-            if (!barTimes.has(snapped)) return null;
+            let coord = null;
+            try { coord = tscale.timeToCoordinate(snapped); } catch (e) { coord = null; }
+            if (coord === null) return null;
             return {
                 time:     snapped,
                 position: s.direction === "UP" ? "belowBar" : "aboveBar",
