@@ -1288,6 +1288,10 @@ function toggleFull(id) {
             const div = document.getElementById(`chart${k}`);
             if (!div) return;
             s.chart.resize(div.clientWidth, div.clientHeight);
+            // Канвас-оверлей рисования ресайзится только по window.resize, которого
+            // при развороте нет — без этого канвас остаётся прежней ширины и режет
+            // рисунки «невидимой стеной» по середине экрана.
+            s.drawingEngine?.resize();
             applyBarCount(parseInt(k));
         });
     });
