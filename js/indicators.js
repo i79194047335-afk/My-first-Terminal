@@ -157,7 +157,7 @@ window.IndicatorMath = IndicatorMath;
 
 class IndicatorManager {
 
-    constructor(paneId, chart, candleSeries, chartDiv) {
+    constructor(paneId, chart, candleSeries, chartDiv, stretchHooks = {}) {
         this.paneId       = paneId;
         this.chart        = chart;
         this.candleSeries = candleSeries;
@@ -166,6 +166,14 @@ class IndicatorManager {
         this._instances  = []; // flat: { id, type, params, color, lineWidth, ...seriesRefs }
         this._idCounter  = 0;
         this._oscPanes   = [];
+
+        // Persistence of user-set oscillator pane heights (LWC "stretch factors",
+        // resolution-independent). load() -> saved {main, rsi, macd, stochastic} or
+        // null; save(map) persists it. Keyed by oscillator type so it survives TF
+        // switches, rebuilds and reloads.
+        this._stretchLoad    = stretchHooks.load || null;
+        this._stretchSave    = stretchHooks.save || null;
+        this._lastStretchJSON = null;
 
         // Legend div — sits in top-left of chartDiv, pointer-events none
         this._legendEl = this._createLegend(chartDiv);
@@ -577,6 +585,48 @@ class IndicatorManager {
             const panes2 = this.chart.panes();
             if (panes2[paneIndex]) try { panes2[paneIndex].setHeight(paneH); } catch(e) {}
         });
+
+        // Override the default heights above with any user-saved sizes.
+        this.applyStretch();
+    }
+
+    // _oscOrder — distinct oscillator types in pane order (pane index = idx + 1).
+    _oscOrder() {
+        return [...new Set(this._instances.filter(i => this._isOscillator(i.type)).map(i => i.type))];
+    }
+
+    // applyStretch — restore saved pane heights (stretch factors). Sets the main
+    // pane (index 0) and each oscillator pane by type; types without a saved value
+    // keep the default height set in _rebuildOscillators. No-op if nothing saved.
+    applyStretch() {
+        const saved = (this._stretchLoad && this._stretchLoad()) || null;
+        if (!saved) return;
+        const panes = this.chart.panes();
+        if (saved.main > 0 && panes[0]) { try { panes[0].setStretchFactor(saved.main); } catch (e) {} }
+        this._oscOrder().forEach((type, idx) => {
+            const pane = panes[idx + 1];
+            if (pane && saved[type] > 0) { try { pane.setStretchFactor(saved[type]); } catch (e) {} }
+        });
+    }
+
+    // captureStretch — read current pane stretch factors and persist them if they
+    // changed (called on a poll, so it picks up the user dragging a pane divider).
+    captureStretch() {
+        if (!this._stretchSave) return;
+        const order = this._oscOrder();
+        if (!order.length) return;
+        const panes = this.chart.panes();
+        const map = {};
+        try { const m = panes[0]?.getStretchFactor?.(); if (m > 0) map.main = m; } catch (e) {}
+        order.forEach((type, idx) => {
+            const pane = panes[idx + 1];
+            if (!pane) return;
+            try { const f = pane.getStretchFactor(); if (f > 0) map[type] = f; } catch (e) {}
+        });
+        const json = JSON.stringify(map);
+        if (json === this._lastStretchJSON) return;
+        this._lastStretchJSON = json;
+        this._stretchSave(map);
     }
 
     _setFilteredData(series, points) {

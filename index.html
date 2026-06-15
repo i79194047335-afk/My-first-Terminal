@@ -527,6 +527,8 @@ function handleMessage(id, state, msg) {
             state.chart.resize(els.chartDiv.clientWidth, els.chartDiv.clientHeight);
             applyBarCount(id);
             state.chart.timeScale().scrollToRealTime();
+            // resize() can redistribute pane heights — restore the user's sizes.
+            state.indicatorManager?.applyStretch();
         }, 120);
 
         state.drawingEngine?.render();
@@ -633,6 +635,8 @@ function createPane(id) {
 
     els.tfSelect.onchange = () => setTF(id, els.tfSelect.value);
     setInterval(() => updateCountdown(id), 250);
+    // Pick up user-dragged oscillator pane heights (LWC has no pane-resize event).
+    setInterval(() => panesState[id]?.indicatorManager?.captureStretch(), 1500);
 
     // ────────────────────────────────────────────────────────────
     function createChartInternal(paneId, tfSec) {
@@ -681,8 +685,16 @@ function createPane(id) {
             0
         );
 
-        // Indicator manager — created here, loaded later in handleMessage
-        st.indicatorManager = new IndicatorManager(paneId, st.chart, st.series, chartDiv);
+        // Indicator manager — created here, loaded later in handleMessage.
+        // stretch hooks persist user-set oscillator pane heights in layout.
+        st.indicatorManager = new IndicatorManager(paneId, st.chart, st.series, chartDiv, {
+            load: () => layout.paneStretch?.[paneId] || null,
+            save: (map) => {
+                layout.paneStretch = layout.paneStretch || {};
+                layout.paneStretch[paneId] = map;
+                StorageLayer.autoSave(layout);
+            }
+        });
 
         // Drawing overlay
         st.drawingEngine = new DrawingEngine(paneId, st.chart, st.series, chartDiv);
