@@ -46,7 +46,19 @@ TF_SECONDS = {
     "M3": 180,
     "M5": 300,
     "M15": 900,
-    "H1": 3600
+    "H1": 3600,
+    "H4": 14400,
+    "D1": 86400
+}
+
+# Таймфреймы, которые грузятся напрямую у брокера (а не агрегацией из M1).
+# D1: из 10000 M1-баров (~7 дней) получилось бы всего ~7 дневных свечей.
+# H4: из тех же ~7 дней вышло бы лишь ~41 бар — тоже слишком коротко.
+# Поэтому оба тянем отдельными запросами.
+# Ключ = наше имя TF, значение = (строка TF ForexConnect, глубина истории в днях).
+DIRECT_LOAD_TF = {
+    "H4": ("H4", 90),
+    "D1": ("D1", 400),
 }
 
 
@@ -225,6 +237,24 @@ def load_history():
 
             build_higher_history(symbol)
 
+            # ---- TF с прямой загрузкой (H4, D1): из M1 вышло бы слишком коротко ----
+            for tf, (fx_tf, days) in DIRECT_LOAD_TF.items():
+                start_tf = end - timedelta(days=days)
+                hist     = fx.get_history(symbol, fx_tf, start_tf, end)
+                tf_data[tf] = []
+                for row in hist:
+                    tf_data[tf].append({
+                        "time":  to_timestamp(row["Date"]),
+                        "open":  float(row["BidOpen"]),
+                        "high":  float(row["BidHigh"]),
+                        "low":   float(row["BidLow"]),
+                        "close": float(row["BidClose"])
+                    })
+                # Последняя свеча — текущий незакрытый бар; live достроит её сам.
+                if tf_data[tf]:
+                    tf_data[tf].pop()
+                tf_data[tf].sort(key=lambda x: x["time"])
+
 
     print("История загружена.")
 
@@ -265,7 +295,7 @@ def build_higher_history(symbol):
 
 
     for tf, sec in TF_SECONDS.items():
-        if sec >= 60 and tf != "M1":
+        if sec >= 60 and tf != "M1" and tf not in DIRECT_LOAD_TF:
             tf_data[tf] = aggregate(tf_data["M1"], sec)
             if tf_data[tf]:
                 tf_data[tf].pop()
