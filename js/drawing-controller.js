@@ -16,6 +16,31 @@ class DrawingControllerClass {
         this.dragStartTime = null;
         this.dragStartPrice = null;
         this.draggedPointIndex = null;
+
+        // ---- Position drag state ----
+        this.posHandle = null;
+        this.posOrig = null;
+        this.posDragStartPrice = null;
+        this.posDragStartTime = null;
+    }
+
+    // ---- Position drag ----
+    startPosDrag(obj, handle) {
+        this.isDraggingOverlay = true;
+        this.draggedLine = obj;
+        this.posHandle = handle;
+        this.draggedPointIndex = null;
+        this.posOrig = {
+            entry: obj.entry,
+            stop: obj.stop,
+            target: obj.target,
+            t1: obj.t1,
+            barsWidth: obj.barsWidth
+        };
+    }
+
+    getPosHandle() {
+        return this.posHandle;
     }
 
     // ---- Tool ----
@@ -77,6 +102,10 @@ class DrawingControllerClass {
         this.dragStartTime = null;
         this.dragStartPrice = null;
         this.draggedPointIndex = null;
+        this.posHandle = null;
+        this.posOrig = null;
+        this.posDragStartPrice = null;
+        this.posDragStartTime = null;
     }
 
     isDragging() {

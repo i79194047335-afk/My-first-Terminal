@@ -217,6 +217,31 @@
     <div class="menu-item" onclick="deleteSelectedLine()">Удалить</div>
 </div>
 
+<!-- Position tool dropdown (Long / Short) -->
+<div id="positionToolDropdown"
+     style="position:fixed;display:none;background:#1e1e1e;color:#eee;border:1px solid #444;
+            border-radius:6px;padding:4px 0;font-size:13px;z-index:999999;min-width:120px;">
+    <div class="menu-item" style="cursor:pointer;padding:6px 14px;color:#26a69a;"
+         onclick="pickPositionTool('long')">▲ Long</div>
+    <div class="menu-item" style="cursor:pointer;padding:6px 14px;color:#ef5350;"
+         onclick="pickPositionTool('short')">▼ Short</div>
+</div>
+
+<!-- Position context menu -->
+<div id="positionMenu"
+     style="position:fixed;display:none;background:#1e1e1e;color:#eee;border:1px solid #444;
+            border-radius:6px;padding:10px 12px;font-size:13px;z-index:999999;min-width:170px;">
+    <div style="margin-bottom:4px;">Депозит, $</div>
+    <input type="number" id="posDeposit" step="100" min="0"
+           style="width:100%;box-sizing:border-box;margin-bottom:8px;">
+    <div style="margin-bottom:4px;">Риск, %</div>
+    <input type="number" id="posRisk" step="0.1" min="0"
+           style="width:100%;box-sizing:border-box;margin-bottom:8px;">
+    <div style="border-top:1px solid #444;margin:6px 0;"></div>
+    <div class="menu-item" style="cursor:pointer;padding:4px 0;" onclick="flipPosition()">Long ⇄ Short</div>
+    <div class="menu-item" style="cursor:pointer;padding:4px 0;color:#f23645;" onclick="deletePosition()">Удалить</div>
+</div>
+
 <!-- Alert context menu -->
 <div id="alertMenu"
     style="position:fixed;display:none;background:#1e1e1e;color:white;border:1px solid #444;
@@ -290,6 +315,7 @@
             <button id="hlineBtn1" onclick="setTool('hline')">Линия</button>
             <button id="lineOverlayBtn" onclick="setTool('lineOverlay')">Луч</button>
             <button id="rectOverlayBtn" onclick="setTool('rectOverlay')">Зона</button>
+            <button id="posBtn1" onclick="togglePositionDropdown(1, event)">Позиция ▾</button>
             <button id="clearDrawingsBtn">Удалить всё</button>
             <button id="chartSyncBtn">Sync</button>
             <button id="indBtn1" onclick="openIndicatorsPanel(1, event)">Indicators ▾</button>
@@ -316,6 +342,7 @@
             <button id="hlineBtn2"       onclick="setTool('hline')">Линия</button>
             <button id="lineOverlayBtn2" onclick="setTool('lineOverlay')">Луч</button>
             <button id="rectOverlayBtn2" onclick="setTool('rectOverlay')">Зона</button>
+            <button id="posBtn2"         onclick="togglePositionDropdown(2, event)">Позиция ▾</button>
             <button id="signalLogBtn"    onclick="toggleSignalPanel()">Сигналы</button>
             <button id="indBtn2"         onclick="openIndicatorsPanel(2, event)">Indicators ▾</button>
         </div>
@@ -339,6 +366,7 @@
 <script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
 <script src="js/time-mapper.js"></script>
 <script src="js/drawing-engine.js"></script>
+<script src="js/position-tool.js"></script>
 <script src="js/indicators.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/drawing-controller.js"></script>
@@ -355,14 +383,15 @@
     const _orig = window.setTool;
     window.setTool = function setTool(tool) {
         _orig(tool);
-        const ids2 = { lineOverlay: "lineOverlayBtn2", rectOverlay: "rectOverlayBtn2", hline: "hlineBtn2" };
-        ["lineOverlayBtn2", "hlineBtn2", "rectOverlayBtn2"].forEach(id => {
+        const ids2 = { lineOverlay: "lineOverlayBtn2", rectOverlay: "rectOverlayBtn2", hline: "hlineBtn2", posLong: "posBtn2", posShort: "posBtn2" };
+        const colors2 = { posLong: "#089981", posShort: "#f23645" };
+        ["lineOverlayBtn2", "hlineBtn2", "rectOverlayBtn2", "posBtn2"].forEach(id => {
             const b = document.getElementById(id);
             if (b) { b.style.background = ""; b.style.color = ""; }
         });
         if (ids2[tool]) {
             const b = document.getElementById(ids2[tool]);
-            if (b) { b.style.background = "#2962FF"; b.style.color = "#fff"; }
+            if (b) { b.style.background = colors2[tool] || "#2962FF"; b.style.color = "#fff"; }
         }
     };
 
@@ -408,6 +437,7 @@ let isDragging         = false;
 let contextLinePane    = null;
 let contextLineObject  = null;
 let syncEnabled        = true;
+let _crosshairSyncing  = false;   // защита от рекурсии при синхронизации курсоров
 
 // Indicators panel state
 let indicatorPanelPane = null; // which pane the panel is showing for
@@ -698,6 +728,32 @@ function createPane(id) {
 
         // Drawing overlay
         st.drawingEngine = new DrawingEngine(paneId, st.chart, st.series, chartDiv);
+
+        // Синхронное отображение курсоров на обеих панелях.
+        // Движение мыши по одному графику отражается крестиком на другом
+        // (по цене и времени курсора). _crosshairSyncing гасит обратный вызов,
+        // т.к. setCrosshairPosition сам триггерит subscribeCrosshairMove.
+        st.chart.subscribeCrosshairMove(param => {
+            if (_crosshairSyncing || !syncEnabled) return;
+            const otherId = paneId === 1 ? 2 : 1;
+            const other   = panesState[otherId];
+            if (!other || !other.chart || !other.series) return;
+
+            _crosshairSyncing = true;
+            try {
+                if (!param.point || typeof param.time !== "number") {
+                    other.chart.clearCrosshairPosition();
+                } else {
+                    const price = st.series.coordinateToPrice(param.point.y);
+                    if (price !== null) {
+                        other.chart.setCrosshairPosition(price, param.time, other.series);
+                    } else {
+                        other.chart.clearCrosshairPosition();
+                    }
+                }
+            } catch (e) {}
+            _crosshairSyncing = false;
+        });
 
         applyColors();
         setupInteractionHandlers(paneId, st, els);
@@ -1017,6 +1073,27 @@ function setupInteractionHandlers(paneId, st, els) {
             return;
         }
 
+        if (DrawingController.getTool() === "posLong" || DrawingController.getTool() === "posShort") {
+            const pprice = st.series.coordinateToPrice(param.point.y);
+            if (pprice === null) return;
+            let rawTime = param.time;
+            if (!rawTime) return;
+            const time = typeof rawTime === "object" ? rawTime.timestamp : rawTime;
+            if (typeof time !== "number") return;
+            const side = DrawingController.getTool() === "posLong" ? "long" : "short";
+            st.drawingEngine.drawings.forEach(d => d.selected = false);
+            const pos = PositionCalc.createPosition(side, id, time, pprice, currentSymbol);
+            pos.selected = true;
+            st.drawingEngine.addDrawing(pos);
+            DrawingController.resetTool();
+            StorageLayer.saveDrawings(id, layout, panesState, drawings);
+            ["posBtn1","posBtn2"].forEach(bid => {
+                const b = document.getElementById(bid);
+                if (b) { b.style.background = ""; b.style.color = ""; }
+            });
+            return;
+        }
+
         const price = st.series.coordinateToPrice(param.point.y);
         if (price === null) return;
 
@@ -1063,6 +1140,42 @@ function setupInteractionHandlers(paneId, st, els) {
             const draggedLine = DrawingController.getDraggedLine();
             const rect  = els.wrapper.getBoundingClientRect();
             const x = coords.clientX - rect.left, y = coords.clientY - rect.top;
+
+            // ---- POSITION drag ----
+            if (draggedLine && draggedLine.type === "position") {
+                const handle = DrawingController.getPosHandle();
+                const price  = st.series.coordinateToPrice(y);
+
+                if (handle === "width") {
+                    const xL = st.drawingEngine.timeMapper.getX(draggedLine.t1);
+                    if (xL !== null) {
+                        const barSpacing = st.chart.timeScale().options().barSpacing || 6;
+                        let bars = Math.round((x - xL) / barSpacing);
+                        if (bars < 3) bars = 3;
+                        draggedLine.barsWidth = bars;
+                    }
+                } else if (handle === "body") {
+                    if (price !== null && DrawingController.posDragStartPrice !== null) {
+                        const dPrice = price - DrawingController.posDragStartPrice;
+                        draggedLine.entry  = DrawingController.posOrig.entry  + dPrice;
+                        draggedLine.stop   = DrawingController.posOrig.stop   + dPrice;
+                        draggedLine.target = DrawingController.posOrig.target + dPrice;
+                        const rawT = st.chart.timeScale().coordinateToTime(x);
+                        if (rawT && DrawingController.posDragStartTime !== null) {
+                            const t = typeof rawT === "object" ? rawT.timestamp : rawT;
+                            if (typeof t === "number") {
+                                draggedLine.t1 = DrawingController.posOrig.t1 + (t - DrawingController.posDragStartTime);
+                            }
+                        }
+                    }
+                } else if (price !== null) {
+                    // entry / stop / target — двигаем только цену уровня
+                    draggedLine[handle] = price;
+                }
+                st.drawingEngine.render();
+                return;
+            }
+
             let rawTime = st.chart.timeScale().coordinateToTime(x);
             const price = st.series.coordinateToPrice(y);
             if (!rawTime || price === null) return;
@@ -1118,7 +1231,12 @@ function setupInteractionHandlers(paneId, st, els) {
         if (overlayHit) {
             st.drawingEngine.drawings.forEach(d => d.selected = false);
             overlayHit.selected = true; st.drawingEngine.render();
-            showOverlayMenu(e.pageX, e.pageY, id, overlayHit); return;
+            if (overlayHit.type === "position") {
+                showPositionMenu(e.pageX, e.pageY, id, overlayHit);
+            } else {
+                showOverlayMenu(e.pageX, e.pageY, id, overlayHit);
+            }
+            return;
         }
         let found = null;
         drawings[id].forEach(obj => {
@@ -1159,12 +1277,36 @@ function setupInteractionHandlers(paneId, st, els) {
         const coords = getEventCoords(e);
         const rect   = els.wrapper.getBoundingClientRect();
         const x = coords.clientX - rect.left, y = coords.clientY - rect.top;
+
+        // ---- Position: хэндлы уровней / ширины ----
+        const posHit = st.drawingEngine.hitTestPositionHandle(x, y);
+        if (posHit) {
+            st.drawingEngine.drawings.forEach(d => d.selected = false);
+            posHit.obj.selected = true;
+            DrawingController.startPosDrag(posHit.obj, posHit.handle);
+            st.chart.applyOptions({ handleScroll: false, handleScale: false });
+            st.drawingEngine.render();
+            return;
+        }
+
         const pointHit = st.drawingEngine.hitTestPoint(x, y);
         if (pointHit) {
             DrawingController.startDrag(pointHit.obj, null, null, pointHit.pointIndex);
             st.chart.applyOptions({ handleScroll: false, handleScale: false }); return;
         }
         const found = st.drawingEngine.hitTestLine(x, y);
+        if (found && found.type === "position") {
+            // перенос всей позиции целиком
+            st.drawingEngine.drawings.forEach(d => d.selected = false);
+            found.selected = true;
+            DrawingController.startPosDrag(found, "body");
+            DrawingController.posDragStartPrice = st.series.coordinateToPrice(y);
+            const rawT = st.chart.timeScale().coordinateToTime(x);
+            DrawingController.posDragStartTime = rawT ? (typeof rawT === "object" ? rawT.timestamp : rawT) : null;
+            st.chart.applyOptions({ handleScroll: false, handleScale: false });
+            st.drawingEngine.render();
+            return;
+        }
         if (!found) return;
         const projection = st.drawingEngine.getProjectionOnLine(found, x, y);
         if (!projection) return;
@@ -1856,6 +1998,39 @@ function syncIndicatorPanelToState(paneId) {
     renderIndicatorList(paneId);
 }
 
+// ============================================================================
+// Position tool dropdown (Long / Short под одной кнопкой)
+// ============================================================================
+function togglePositionDropdown(paneId, e) {
+    e.stopPropagation();
+    const dd  = document.getElementById("positionToolDropdown");
+    const btn = document.getElementById(`posBtn${paneId}`);
+    if (!dd || !btn) return;
+
+    // повторный клик по той же кнопке — закрыть
+    if (dd.style.display === "block" && dd.dataset.pane === String(paneId)) {
+        dd.style.display = "none";
+        return;
+    }
+
+    dd.dataset.pane = String(paneId);
+    const rect = btn.getBoundingClientRect();
+    dd.style.display = "block";
+    dd.style.top  = (rect.bottom + 4) + "px";
+    dd.style.left = rect.left + "px";
+
+    const pr = dd.getBoundingClientRect();
+    if (pr.right > window.innerWidth) {
+        dd.style.left = (window.innerWidth - pr.width - 8) + "px";
+    }
+}
+
+function pickPositionTool(side) {
+    const dd = document.getElementById("positionToolDropdown");
+    if (dd) dd.style.display = "none";
+    setTool(side === "long" ? "posLong" : "posShort");
+}
+
 // Width button selection in settings menu
 document.getElementById('indSM_widthBtns').addEventListener('click', e => {
     const btn = e.target.closest('button[data-w]');
@@ -1879,6 +2054,14 @@ document.addEventListener("click", e => {
     const sm = document.getElementById('indSettingsMenu');
     if (sm && sm.style.display === 'block' && !sm.contains(e.target)) {
         closeIndSettings();
+    }
+
+    const posDd   = document.getElementById("positionToolDropdown");
+    const posBtn1 = document.getElementById("posBtn1");
+    const posBtn2 = document.getElementById("posBtn2");
+    if (posDd && posDd.style.display === "block" &&
+        !posDd.contains(e.target) && e.target !== posBtn1 && e.target !== posBtn2) {
+        posDd.style.display = "none";
     }
 });
 

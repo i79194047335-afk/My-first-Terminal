@@ -282,8 +282,114 @@ if (obj.type === "rect") {
     ctx.restore();   // ✅ В САМОМ КОНЦЕ
 }
 
+// ================= POSITION =================
+if (obj.type === "position") {
 
-		
+    const sym = (typeof currentSymbol !== "undefined") ? currentSymbol : "";
+
+    const xL = this.timeMapper.getX(obj.t1);
+    if (xL === null) continue;
+
+    const barSpacing = this.chart.timeScale().options().barSpacing || 6;
+    const paneWidth  = this.chart.timeScale().width();
+
+    let xR = xL + (obj.barsWidth || 40) * barSpacing;
+    if (xR > paneWidth) xR = paneWidth;
+
+    const left  = Math.min(xL, xR);
+    const right = Math.max(xL, xR);
+
+    const yE = this.series.priceToCoordinate(obj.entry);
+    const yS = this.series.priceToCoordinate(obj.stop);
+    const yT = this.series.priceToCoordinate(obj.target);
+    if (yE === null || yS === null || yT === null) continue;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, paneWidth, this.canvas.height);
+    ctx.clip();
+
+    // ---- Зона прибыли (entry → target), зелёная ----
+    ctx.fillStyle = "rgba(8,153,129,0.18)";
+    ctx.fillRect(left, Math.min(yE, yT), right - left, Math.abs(yT - yE));
+
+    // ---- Зона риска (entry → stop), красная ----
+    ctx.fillStyle = "rgba(242,54,69,0.18)";
+    ctx.fillRect(left, Math.min(yE, yS), right - left, Math.abs(yS - yE));
+
+    // ---- Уровни ----
+    const drawLevel = (y, color) => {
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = obj.selected ? 2 : 1;
+        ctx.moveTo(left, y);
+        ctx.lineTo(right, y);
+        ctx.stroke();
+    };
+    drawLevel(yT, "#089981");
+    drawLevel(yE, obj.selected ? "#2962FF" : "#787b86");
+    drawLevel(yS, "#f23645");
+
+    // ---- Хэндлы при выделении ----
+    if (obj.selected) {
+        const r = 4;
+        ctx.fillStyle = "#2962FF";
+        [yT, yE, yS].forEach(y => {
+            ctx.beginPath();
+            ctx.arc(right, y, r, 0, Math.PI * 2);
+            ctx.fill();
+        });
+        ctx.beginPath();
+        ctx.arc(left, yE, r, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.restore();
+
+    // ---- Плашка с расчётом ----
+    const m = (window.PositionCalc) ? window.PositionCalc.compute(obj, sym) : null;
+    if (m) {
+        const rows = [
+            (obj.side === "long" ? "LONG" : "SHORT"),
+            "R:R   " + m.rr.toFixed(2),
+            "Risk  " + m.riskPips.toFixed(1) + "p  −$" + m.riskUSD.toFixed(0),
+            "Prof  " + m.rewardPips.toFixed(1) + "p  +$" + m.rewardUSD.toFixed(0),
+            "Size  " + m.lots.toFixed(2) + " lot"
+        ];
+
+        ctx.font = "11px sans-serif";
+        let boxW = 0;
+        rows.forEach(t => { boxW = Math.max(boxW, ctx.measureText(t).width); });
+        boxW += 14;
+
+        const lineH = 15;
+        const boxH  = rows.length * lineH + 8;
+
+        let bx = left + 6;
+        let by = Math.min(yE, yT, yS) - boxH - 6;
+        if (by < 2) by = Math.max(yE, yT, yS) + 6;
+        if (bx + boxW > paneWidth) bx = paneWidth - boxW - 4;
+        if (bx < 2) bx = 2;
+
+        ctx.fillStyle = "rgba(20,22,28,0.85)";
+        ctx.fillRect(bx, by, boxW, boxH);
+        ctx.strokeStyle = obj.side === "long" ? "#089981" : "#f23645";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bx, by, boxW, boxH);
+
+        ctx.textBaseline = "top";
+        rows.forEach((t, i) => {
+            ctx.fillStyle = i === 0
+                ? (obj.side === "long" ? "#089981" : "#f23645")
+                : "#e6e6e6";
+            ctx.fillText(t, bx + 7, by + 5 + i * lineH);
+        });
+        ctx.textBaseline = "alphabetic";
+    }
+}
+
+
+
 		}
 
         this.renderPending = false;
@@ -298,7 +404,35 @@ if (obj.type === "rect") {
     const threshold = 6;
 
     for (let obj of this.drawings) {
-		
+
+        // ===== POSITION HIT TEST (тело) =====
+        if (obj.type === "position") {
+
+            const xL = this.timeMapper.getX(obj.t1);
+            if (xL === null) continue;
+
+            const barSpacing = this.chart.timeScale().options().barSpacing || 6;
+            const paneWidth  = this.chart.timeScale().width();
+            let xR = xL + (obj.barsWidth || 40) * barSpacing;
+            if (xR > paneWidth) xR = paneWidth;
+
+            const left  = Math.min(xL, xR);
+            const right = Math.max(xL, xR);
+
+            const yE = this.series.priceToCoordinate(obj.entry);
+            const yS = this.series.priceToCoordinate(obj.stop);
+            const yT = this.series.priceToCoordinate(obj.target);
+            if (yE === null || yS === null || yT === null) continue;
+
+            const top    = Math.min(yE, yS, yT);
+            const bottom = Math.max(yE, yS, yT);
+
+            if (x >= left && x <= right && y >= top - 4 && y <= bottom + 4) {
+                return obj;
+            }
+            continue;
+        }
+
 		  // ===== RECT HIT TEST =====
 if (obj.type === "rect") {
 
@@ -414,6 +548,52 @@ if (obj.type === "rect") {
 
     return null;
 }
+
+    hitTestPositionHandle(x, y) {
+
+        const threshold = 8;
+
+        for (let obj of this.drawings) {
+
+            if (obj.type !== "position") continue;
+
+            const xL = this.timeMapper.getX(obj.t1);
+            if (xL === null) continue;
+
+            const barSpacing = this.chart.timeScale().options().barSpacing || 6;
+            const paneWidth  = this.chart.timeScale().width();
+            let xR = xL + (obj.barsWidth || 40) * barSpacing;
+            if (xR > paneWidth) xR = paneWidth;
+
+            const left  = Math.min(xL, xR);
+            const right = Math.max(xL, xR);
+
+            const yE = this.series.priceToCoordinate(obj.entry);
+            const yS = this.series.priceToCoordinate(obj.stop);
+            const yT = this.series.priceToCoordinate(obj.target);
+            if (yE === null || yS === null || yT === null) continue;
+
+            // правый край: уровневые хэндлы имеют приоритет
+            if (Math.abs(x - right) < threshold) {
+                if (Math.abs(y - yT) < threshold) return { obj, handle: "target" };
+                if (Math.abs(y - yE) < threshold) return { obj, handle: "entry"  };
+                if (Math.abs(y - yS) < threshold) return { obj, handle: "stop"   };
+
+                const top    = Math.min(yE, yS, yT);
+                const bottom = Math.max(yE, yS, yT);
+                if (y > top && y < bottom) return { obj, handle: "width" };
+            }
+
+            // уровневые линии в любом месте бара
+            if (x >= left && x <= right) {
+                if (Math.abs(y - yT) < threshold) return { obj, handle: "target" };
+                if (Math.abs(y - yE) < threshold) return { obj, handle: "entry"  };
+                if (Math.abs(y - yS) < threshold) return { obj, handle: "stop"   };
+            }
+        }
+
+        return null;
+    }
 
     hitTestPoint(x, y) {
 

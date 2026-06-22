@@ -94,6 +94,18 @@ if (st.drawingEngine) {
     });
 }
 
+        if (d.type === "position") {
+            filtered.push({
+                type: "position",
+                side: d.side,
+                t1: d.t1,
+                entry: d.entry,
+                stop: d.stop,
+                target: d.target,
+                barsWidth: d.barsWidth
+            });
+        }
+
     });
 }
 
@@ -217,6 +229,20 @@ if (d.type === "alert") {
         midColor: d.midColor || "#000000",
         midWidth: d.midWidth || 1,
 		extendRight: d.extendRight ?? false,
+        selected: false
+    });
+}
+		if (d.type === "position" && st.drawingEngine) {
+
+    st.drawingEngine.drawings.push({
+        type: "position",
+        paneId: paneId,
+        side: d.side || "long",
+        t1: d.t1,
+        entry: d.entry,
+        stop: d.stop,
+        target: d.target,
+        barsWidth: d.barsWidth || 40,
         selected: false
     });
 }

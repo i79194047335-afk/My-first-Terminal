@@ -9,6 +9,7 @@ function setTool(tool) {
     const overlayBtn = document.getElementById("lineOverlayBtn");
     const hlineBtn   = document.getElementById("hlineBtn1");
     const rectBtn    = document.getElementById("rectOverlayBtn");
+    const posBtn     = document.getElementById("posBtn1");
 
     if (overlayBtn) {
         overlayBtn.style.background = "";
@@ -23,6 +24,20 @@ function setTool(tool) {
     if (hlineBtn) {
         hlineBtn.style.background = "";
         hlineBtn.style.color = "";
+    }
+
+    if (posBtn) { posBtn.style.background = ""; posBtn.style.color = ""; }
+
+    if (tool === "posLong") {
+        DrawingController.clearPreview();
+        if (posBtn) { posBtn.style.background = "#089981"; posBtn.style.color = "#fff"; }
+        return;
+    }
+
+    if (tool === "posShort") {
+        DrawingController.clearPreview();
+        if (posBtn) { posBtn.style.background = "#f23645"; posBtn.style.color = "#fff"; }
+        return;
     }
 
     if (tool === "lineOverlay") {

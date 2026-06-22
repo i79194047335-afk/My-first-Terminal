@@ -377,6 +377,108 @@ if (source.type === "rect" || source.type === "line") {
 }
 
 // ============================================================================
+// Position Context Menu
+// ============================================================================
+
+/**
+ * Показать меню позиции (депозит, риск, флип, удаление).
+ *
+ * Args:
+ *   x, y (number): экранные координаты.
+ *   paneId (number): id панели.
+ *   obj (Object): объект позиции.
+ */
+function showPositionMenu(x, y, paneId, obj) {
+
+    contextLinePane = paneId;
+    contextLineObject = obj;
+
+    const menu = document.getElementById("positionMenu");
+    if (!menu) return;
+
+    const settings = PositionCalc.getSettings();
+    const depInput  = document.getElementById("posDeposit");
+    const riskInput = document.getElementById("posRisk");
+    if (depInput)  depInput.value  = settings.deposit;
+    if (riskInput) riskInput.value = settings.riskPct;
+
+    // обработчики ввода — глобальные настройки + перерисовка
+    if (depInput) {
+        depInput.oninput = () => {
+            const s = PositionCalc.getSettings();
+            const v = parseFloat(depInput.value);
+            if (!isNaN(v)) { s.deposit = v; PositionCalc.saveSettings(s); rerenderPositions(); }
+        };
+    }
+    if (riskInput) {
+        riskInput.oninput = () => {
+            const s = PositionCalc.getSettings();
+            const v = parseFloat(riskInput.value);
+            if (!isNaN(v)) { s.riskPct = v; PositionCalc.saveSettings(s); rerenderPositions(); }
+        };
+    }
+
+    menu.style.display = "block";
+
+    const menuRect = menu.getBoundingClientRect();
+    let posX = x, posY = y;
+    if (x + menuRect.width  > window.innerWidth)  posX = window.innerWidth  - menuRect.width  - 5;
+    if (y + menuRect.height > window.innerHeight) posY = window.innerHeight - menuRect.height - 5;
+    menu.style.left = posX + "px";
+    menu.style.top  = posY + "px";
+}
+
+/**
+ * Перерисовать все панели (после смены глобальных настроек депозита/риска).
+ */
+function rerenderPositions() {
+    Object.values(panesState).forEach(p => {
+        if (p.drawingEngine) p.drawingEngine.render();
+    });
+}
+
+/**
+ * Поменять направление позиции (long ⇄ short), зеркалируя stop/target.
+ */
+function flipPosition() {
+    if (!contextLineObject || contextLineObject.type !== "position") return;
+    const obj = contextLineObject;
+    obj.side = obj.side === "long" ? "short" : "long";
+    // зеркалируем stop/target относительно entry
+    const newStop   = 2 * obj.entry - obj.stop;
+    const newTarget = 2 * obj.entry - obj.target;
+    obj.stop   = newStop;
+    obj.target = newTarget;
+    panesState[obj.paneId].drawingEngine.render();
+    StorageLayer.saveDrawings(obj.paneId, layout, panesState, drawings);
+    hidePositionMenu();
+}
+
+/**
+ * Удалить позицию из overlay и сохранить.
+ */
+function deletePosition() {
+    if (!contextLinePane || !contextLineObject) return;
+    const id = contextLinePane;
+    const st = panesState[id];
+    if (st.drawingEngine) {
+        st.drawingEngine.drawings = st.drawingEngine.drawings.filter(o => o !== contextLineObject);
+        st.drawingEngine.render();
+    }
+    StorageLayer.saveDrawings(id, layout, panesState, drawings);
+    hidePositionMenu();
+}
+
+/**
+ * Скрыть меню позиции.
+ */
+function hidePositionMenu() {
+    const menu = document.getElementById("positionMenu");
+    if (menu) menu.style.display = "none";
+    contextLineObject = null;
+}
+
+// ============================================================================
 // Alert Context Menu
 // ============================================================================
 
@@ -453,6 +555,11 @@ document.addEventListener("click", e => {
     const alertMenu = document.getElementById("alertMenu");
     const chartMenu = document.getElementById("chartMenu");
     const candleMenu = document.getElementById("contextMenu");
+    const positionMenu = document.getElementById("positionMenu");
+
+    if (positionMenu && !positionMenu.contains(e.target)) {
+        positionMenu.style.display = "none";
+    }
 
     if (lineMenu && !lineMenu.contains(e.target)) {
         lineMenu.style.display = "none";
