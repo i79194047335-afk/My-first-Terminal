@@ -102,6 +102,14 @@ Note: port 8080 is occupied by `code-server` (not the frontend). The frontend us
 - Python 3.7 compiled `.pyc` files in `__pycache__/` — do not upgrade Python without checking `forexconnect` compatibility
 - Port 8080 is taken by `code-server`, not the frontend — the frontend HTTP server runs on **8082**
 
+## In-progress: intrade.bar trading bot
+
+See [intrade_bot_plan.md](intrade_bot_plan.md) for full plan.
+
+**Status:** Step 1 — waiting for cURL of trade-open request from intrade.bar (Ivan to capture via Chrome DevTools F12 → Network). Next session picks up from there.
+
+Summary: bot listens to our WebSocket signals (Asia∩TIGHT) and opens binary option trades on intrade.bar via HTTP requests (no official API — reverse-engineered from browser traffic).
+
 ## Downtime window (safe to edit)
 
 - 21:00–23:00 UTC daily
