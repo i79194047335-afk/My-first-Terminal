@@ -97,6 +97,15 @@ MIN_MEMORY_SAMPLES = 15
 # по валюте пары. Календарь грузит data_loaders/fetch_news.py (cron).
 NEWS_FILTER_ENABLED = True
 
+# Фильтр Asia ∩ TIGHT (pos ≤ 0.05):
+#   Форвард 18 дней (2026-06-15 – 2026-07-03, n=177): WR 63.8% CI[56.5–70.6].
+#   Весь лог (n=1651): WR 60.1%. CSCV PBO=0.009, deflated z=3.52.
+#   MID зона (0.05–0.15) — 52.4%, TIGHT вне Азии — 52.9% (breakeven).
+#   Эдж живёт ТОЛЬКО в пересечении азиатской сессии с самой кромкой диапазона.
+#   ~11 сигналов/день (против ~150 без фильтра).
+#   Откат: поставить False → вернуться к старому поведению без рестарта.
+ASIA_TIGHT_ONLY = True
+
 # Файл памяти
 MEMORY_FILE = "market_memory.json"
 
@@ -488,6 +497,36 @@ def evaluate_signal(
             samples=memory_n, reason=reason,
             skip_reason=f"⚠️ Мало подтверждений (score={winning_score}, нужно ≥{threshold} для {direction})"
         )
+
+    # ----------------------------------------------------------
+    # БЛОК 4.5 — ФИЛЬТР Asia ∩ TIGHT (pos ≤ 0.05)
+    # ----------------------------------------------------------
+    # Пропускает только сигналы в азиатскую сессию (0-8 UTC) И у самой
+    # кромки диапазона (≤5%). Всё остальное — SKIP.
+    #
+    # Логика: edge_dist = расстояние до своего края.
+    #   UP   стоит у нижней границы → dist = range_pos
+    #   DOWN стоит у верхней границы  → dist = 1 - range_pos
+    # TIGHT: dist ≤ 0.05.  MID: 0.05 < dist ≤ 0.15.
+    #
+    # Без фильтра: MID 52.4% (n=7945), TIGHT вне Азии 52.9% — breakeven.
+    # С фильтром: ~11 сигналов/день, WR 60.1% (лог) / 63.8% (форвард).
+    if ASIA_TIGHT_ONLY:
+        edge_dist = range_pos if near_low else (1.0 - range_pos)
+        is_tight = edge_dist <= 0.05
+        is_asia_session = (0 <= hour < 8)
+
+        if not (is_tight and is_asia_session):
+            zone_name = "TIGHT" if is_tight else ("MID" if edge_dist <= 0.15 else "OUT")
+            time_name = "Asia" if is_asia_session else session
+            return SignalResult(
+                direction="SKIP", confidence=0, winrate=memory_wr,
+                samples=memory_n, reason=reason,
+                skip_reason=(
+                    f"🔍 Фильтр Asia∩TIGHT: {time_name} ∩ {zone_name} "
+                    f"(dist={edge_dist:.3f}) — вне целевой зоны"
+                )
+            )
 
     # Уверенность отражает реализованный винрейт (~57% на пороге, +4пп за очко),
     # а не раздутую память. Держим в честном диапазоне 57-75%.

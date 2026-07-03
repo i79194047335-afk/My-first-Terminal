@@ -77,6 +77,56 @@ market_structures = {}
 SIGNAL_COOLDOWN   = 30
 last_signal_time  = {}
 
+# ── ФОРВАРД-ТЕСТ: фильтр «последнего сигнала блока» через N-секундную тишину ──
+# Гипотеза (см. memory: signal-block-position-test): из блока сигналов у края
+# (post-cooldown, идут с паузой >=30с) реальный эдж несёт ПОСЛЕДНЕЕ касание
+# перед разворотом. Приближаем «последний» так: сигнал не отправляется сразу,
+# а буферизуется; если за BLOCK_FILTER_N секунд не пришёл новый post-cooldown
+# сигнал по той же паре — буферизованный считается последним и отправляется
+# СЕЙЧАС (вход с задержкой ~N сек, по текущей цене). Иначе старый буфер
+# вытесняется новым (блок продолжился).
+#   BLOCK_FILTER_N = 0  → фильтр ВЫКЛЮЧЕН, поведение ровно как раньше.
+#   > 0 (напр. 60)      → включён; кулдаун 30с при этом НЕ трогается.
+# Отправленные с задержкой сигналы помечаются тегом в reason — block_watcher.py
+# меряет по ним форвард-винрейт (baseline-механика как у pos_watcher).
+BLOCK_FILTER_N        = 0
+_pending_block_signal = {}   # symbol → {"price","ts","signal"} ждущий подтверждения тишины
+
+
+def _fire_signal(symbol, price, ts, signal, delay=0):
+    """Единая точка выхода боевого сигнала: терминал + реплей-буфер + трекер.
+
+    Используется и для немедленной отправки, и для отложенной block-фильтром.
+
+    Args:
+        symbol: пара.
+        price:  цена входа на момент отправки.
+        ts:     время входа (для отложенного — момент подтверждения тишины).
+        signal: SignalResult из signal_engine.evaluate_signal.
+        delay:  если >0 — сигнал отправлен block-фильтром с задержкой delay сек,
+                в reason добавляется тег "⏳block_filter N=…" для block_watcher.py.
+    Returns:
+        None.
+    """
+    signal_data = format_signal(symbol, price, ts, signal)
+    send_signal(symbol, signal_data)
+    recent_signals.append(_signal_entry(ts, symbol, signal_data))
+
+    reason = list(signal.reason or [])
+    if delay > 0:
+        reason.append(f"⏳block_filter N={delay}")
+
+    store_signal(
+        symbol    = symbol,
+        direction = signal.direction,
+        confidence= signal.confidence,
+        winrate   = signal.winrate,
+        samples   = signal.samples,
+        price     = price,
+        ts        = ts,
+        reason    = reason
+    )
+
 # Реплей сигналов: кольцевой буфер последних боевых сигналов в памяти.
 # Отдаётся новому клиенту по запросу get_signals, чтобы стрелки сигналов
 # переживали перезагрузку страницы в течение сессии.
@@ -124,6 +174,7 @@ def init_symbol(symbol):
     market_engines[symbol]    = MarketEngine()
     market_structures[symbol] = StructureEngine()
     last_signal_time[symbol]  = 0
+    _pending_block_signal[symbol] = None
 
 
 
@@ -430,6 +481,15 @@ def process_tick(symbol, price, ts):
     structure = market_structures[symbol].update(price, ts)
 
 
+    # ---- block-фильтр: если тишина >= N, буферизованный сигнал признаётся
+    #      «последним в блоке» и отправляется СЕЙЧАС (вход с задержкой ~N сек) ----
+    if BLOCK_FILTER_N > 0:
+        pend = _pending_block_signal.get(symbol)
+        if pend and ts - pend["ts"] >= BLOCK_FILTER_N:
+            _fire_signal(symbol, price, ts, pend["signal"], delay=BLOCK_FILTER_N)
+            _pending_block_signal[symbol] = None
+
+
     # ---- Signal — только если цена у края диапазона ----
     near_high = structure.get("near_high", False) if structure else False
     near_low  = structure.get("near_low",  False) if structure else False
@@ -443,31 +503,23 @@ def process_tick(symbol, price, ts):
             # cooldown — не чаще раза в 30 сек на пару
             if ts - last_signal_time[symbol] >= SIGNAL_COOLDOWN:
                 last_signal_time[symbol] = ts
-                signal_data = format_signal(symbol, price, ts, signal)
-                send_signal(symbol, signal_data)
-
-                # Реплей — кладём боевой сигнал в кольцевой буфер
-                recent_signals.append(_signal_entry(ts, symbol, signal_data))
-
-
-                # Трекер — записываем сигнал для отслеживания результата
-                store_signal(
-                    symbol    = symbol,
-                    direction = signal.direction,
-                    confidence= signal.confidence,
-                    winrate   = signal.winrate,
-                    samples   = signal.samples,
-                    price     = price,
-                    ts        = ts,
-                    reason    = signal.reason
-                )
+                if BLOCK_FILTER_N > 0:
+                    # буферизуем кандидата в «последний сигнал блока»;
+                    # прежний невыстреливший буфер вытесняется (блок продолжился)
+                    _pending_block_signal[symbol] = {
+                        "price": price, "ts": ts, "signal": signal
+                    }
+                else:
+                    _fire_signal(symbol, price, ts, signal)
 
 
-        elif signal and signal.skip_reason:
-            # SKIP сигналы тоже отправляем — терминал покажет причину
-            if ts - last_signal_time[symbol] >= SIGNAL_COOLDOWN:
-                last_signal_time[symbol] = ts
-                send_signal(symbol, format_signal(symbol, price, ts, signal))
+        # SKIP-сигналы во фронт НЕ отправляем — только боевые (Asia∩TIGHT).
+        # Причина: фильтр отсекает ~90% сигналов, поток SKIP'ов бесполезен.
+        # Раскомментировать ниже для отладки.
+        # elif signal and signal.skip_reason:
+        #     if ts - last_signal_time[symbol] >= SIGNAL_COOLDOWN:
+        #         last_signal_time[symbol] = ts
+        #         send_signal(symbol, format_signal(symbol, price, ts, signal))
 
 
     # ---- Трекер — закрываем истёкшие сигналы ----
