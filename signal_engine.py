@@ -109,6 +109,13 @@ ASIA_TIGHT_ONLY = True
 # Файл памяти
 MEMORY_FILE = "market_memory.json"
 
+# Файл с сессионным bias от pre_asia_brief.py
+SESSION_BIAS_FILE = "session_bias.json"
+
+# Фильтр по сессионному bias: если True и bias задан — сигналы против bias
+# отправляются в SKIP. NEUTRAL bias пропускает оба направления.
+SESSION_BIAS_FILTER = True
+
 
 # ============================================================
 # Загрузка памяти (кешируется, перезагружается при изменении файла)
@@ -116,6 +123,34 @@ MEMORY_FILE = "market_memory.json"
 
 _memory_cache = None
 _memory_mtime = 0
+
+
+def load_session_bias():
+    """
+    Загружает сессионный bias из pre_asia_brief.py.
+
+    Returns:
+        dict или None: {"usdjpy_bias": "UP"/"DOWN"/"NEUTRAL", ...}
+        None если файл не найден, устарел (>12 часов), или bias NEUTRAL.
+    """
+    if not os.path.exists(SESSION_BIAS_FILE):
+        return None
+
+    try:
+        with open(SESSION_BIAS_FILE, "r") as f:
+            bias = json.load(f)
+    except Exception:
+        return None
+
+    generated_ts = bias.get("generated_ts", 0)
+    now = __import__("time").time()
+    if now - generated_ts > 43200:  # 12 часов
+        return None
+
+    if bias.get("usdjpy_bias") == "NEUTRAL":
+        return None
+
+    return bias
 
 
 def load_memory():
@@ -527,6 +562,37 @@ def evaluate_signal(
                     f"(dist={edge_dist:.3f}) — вне целевой зоны"
                 )
             )
+
+    # ----------------------------------------------------------
+    # БЛОК 4.6 — СЕССИОННЫЙ BIAS (pre_asia_brief.py)
+    # ----------------------------------------------------------
+    # Если перед сессией задан направленный bias на USD/JPY,
+    # сигналы против bias уходят в SKIP.
+    # NEUTRAL bias или отсутствие файла — пропускаем оба направления.
+    if SESSION_BIAS_FILTER:
+        session_bias = load_session_bias()
+        if session_bias:
+            bias_dir = session_bias.get("usdjpy_bias")
+            bias_conf = session_bias.get("usdjpy_confidence", 0)
+
+            if bias_dir == "UP" and direction == "DOWN":
+                return SignalResult(
+                    direction="SKIP", confidence=0, winrate=memory_wr,
+                    samples=memory_n, reason=reason,
+                    skip_reason=(
+                        f"🧠 Session bias: USD/JPY UP (conf={bias_conf}) — "
+                        f"DOWN сигнал заблокирован. {session_bias.get('usdjpy_reasoning', '')[:100]}"
+                    )
+                )
+            elif bias_dir == "DOWN" and direction == "UP":
+                return SignalResult(
+                    direction="SKIP", confidence=0, winrate=memory_wr,
+                    samples=memory_n, reason=reason,
+                    skip_reason=(
+                        f"🧠 Session bias: USD/JPY DOWN (conf={bias_conf}) — "
+                        f"UP сигнал заблокирован. {session_bias.get('usdjpy_reasoning', '')[:100]}"
+                    )
+                )
 
     # Уверенность отражает реализованный винрейт (~57% на пороге, +4пп за очко),
     # а не раздутую память. Держим в честном диапазоне 57-75%.

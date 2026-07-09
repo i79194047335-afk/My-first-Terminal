@@ -93,6 +93,34 @@
     #signalPanel.down { border-top: 3px solid #ef5350; }
     #signalPanel.skip { border-top: 3px solid #555; }
 
+    /* Briefing panel — overlays right chart, scrollable */
+    #briefPanel {
+        position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+        background: rgba(15,15,15,0.92); color: #ddd; font-size: 12px;
+        z-index: 2001; box-sizing: border-box; overflow-y: auto;
+        padding: 14px 16px; display: none;
+    }
+    #briefContent { line-height: 1.6; }
+    #briefContent h2 {
+        font-size: 15px; color: #fff; margin: 0 0 10px 0;
+        border-bottom: 1px solid #333; padding-bottom: 6px;
+    }
+    #briefContent .section { margin: 10px 0; }
+    #briefContent .section-title {
+        font-size: 11px; font-weight: bold; color: #aaa;
+        text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+    }
+    #briefContent .bias-up    { color: #26a69a; font-weight: bold; }
+    #briefContent .bias-down  { color: #ef5350; font-weight: bold; }
+    #briefContent .bias-neutral { color: #ffa726; font-weight: bold; }
+    #briefContent .level {
+        display: inline-block; background: #2a2a2a; padding: 1px 6px;
+        border-radius: 3px; margin: 1px 2px; font-family: monospace; font-size: 11px;
+    }
+    #briefContent .meta { font-size: 10px; color: #666; margin-bottom: 8px; }
+    #briefContent ul { margin: 4px 0; padding-left: 18px; }
+    #briefContent li { margin-bottom: 3px; }
+
     /* ============================================================
        INDICATORS PANEL
        ============================================================ */
@@ -344,10 +372,12 @@
             <button id="rectOverlayBtn2" onclick="setTool('rectOverlay')">Зона</button>
             <button id="posBtn2"         onclick="togglePositionDropdown(2, event)">Позиция ▾</button>
             <button id="signalLogBtn"    onclick="toggleSignalPanel()">Сигналы</button>
+            <button id="briefBtn"        onclick="toggleBriefing()">📋 Brief</button>
             <button id="indBtn2"         onclick="openIndicatorsPanel(2, event)">Indicators ▾</button>
         </div>
         <div class="chart-wrapper" id="wrapper2">
             <div id="signalPanel"></div>
+            <div id="briefPanel" style="display:none;"><div id="briefContent"></div></div>
             <div class="chart" id="chart2"></div>
             <div class="tv-countdown" id="countdown2"></div>
             <div class="zoomCenter">
@@ -427,6 +457,10 @@ if (!layout.symbol)     layout.symbol = "AUD/USD";
 if (!layout.indicators) layout.indicators = {};
 
 let currentSymbol = layout.symbol;
+
+// ── Briefing panel state ──
+let briefVisible = false;
+let lastBriefingData = null;
 
 const panesState  = {};
 const drawings    = { 1: [], 2: [] };
@@ -517,6 +551,7 @@ function handleMessage(id, state, msg) {
         msg.type !== "alert_created" &&
         msg.type !== "analysis" &&
         msg.type !== "signal" &&
+        msg.type !== "briefing" &&
         msg.type !== "signals_history" &&
         msg.requestId !== state.requestId
     ) return;
@@ -593,6 +628,7 @@ function handleMessage(id, state, msg) {
 
     if (msg.type === "analysis") updateMarketEngine(msg);
     if (msg.type === "signal")   showSignal(msg);
+    if (msg.type === "briefing") { lastBriefingData = msg.data; if (briefVisible) renderBriefing(); }
     if (msg.type === "signals_history") applySignalsHistory(msg.data);
 
     if (msg.type === "alert" && msg.symbol === currentSymbol) {
@@ -1406,6 +1442,8 @@ function switchSymbol(symbol) {
         }
     });
     refreshSignalMarkers();
+    // Если панель брифинга открыта — перерендерить для нового символа
+    if (briefVisible) renderBriefing();
 }
 
 // ============================================================================
@@ -1713,6 +1751,177 @@ function showSignal(data) {
     }
     signalAudio.currentTime = 0; signalAudio.play().catch(() => {});
     addSignalToLog(data);
+}
+
+// ===== BRIEFING PANEL =====
+
+function toggleBriefing() {
+    briefVisible = !briefVisible;
+    const panel = document.getElementById("briefPanel");
+    const btn = document.getElementById("briefBtn");
+
+    if (briefVisible) {
+        btn.style.background = "#2962FF";
+        btn.style.color = "#fff";
+        panel.style.display = "block";
+        renderBriefing();
+    } else {
+        btn.style.background = "";
+        btn.style.color = "";
+        panel.style.display = "none";
+    }
+}
+
+function renderBriefing() {
+    const content = document.getElementById("briefContent");
+    if (!content) return;
+
+    if (!lastBriefingData || !lastBriefingData.pairs) {
+        content.innerHTML =
+            "<div style='color:#888;text-align:center;margin-top:40px'>" +
+            "Нет данных брифинга</div>";
+        return;
+    }
+
+    const pairData = lastBriefingData.pairs[currentSymbol];
+    if (!pairData) {
+        content.innerHTML =
+            "<div style='color:#888;text-align:center;margin-top:40px'>" +
+            "Нет брифинга для " + currentSymbol + "</div>";
+        return;
+    }
+
+    const meta = lastBriefingData.meta || {};
+    const globalCtx = lastBriefingData.global_context || {};
+
+    const dir = (pairData.direction || "NEUTRAL").toLowerCase();
+    const dirClass = dir === "up" ? "bias-up" : dir === "down" ? "bias-down" : "bias-neutral";
+    const arrow = dir === "up" ? "▲" : dir === "down" ? "▼" : "◆";
+    const dirLabel = dir === "up" ? "BULLISH" : dir === "down" ? "BEARISH" : "NEUTRAL";
+
+    const fmtLevel = function(v) {
+        if (typeof v === "number") return v.toFixed(5);
+        return String(v);
+    };
+    const supports = (pairData.support_levels || []).map(fmtLevel).join(", ");
+    const resistances = (pairData.resistance_levels || []).map(fmtLevel).join(", ");
+
+    let staleHtml = "";
+    if (meta.generated_ts) {
+        const ageHours = (Date.now() / 1000 - meta.generated_ts) / 3600;
+        if (ageHours > 13) {
+            staleHtml = "<div style='color:#ff8a80;font-size:10px;margin-top:6px'>" +
+                "⚠️ Брифинг устарел (" + Math.round(ageHours) + " ч назад)</div>";
+        }
+    }
+
+    let html = "";
+
+    // Форматируем время в UTC+5
+    let timeStr = "N/A";
+    if (meta.generated_ts) {
+        const d = new Date((meta.generated_ts + TZ_OFFSET * 3600) * 1000);
+        const hh = String(d.getUTCHours()).padStart(2, "0");
+        const mm = String(d.getUTCMinutes()).padStart(2, "0");
+        const dd = String(d.getUTCDate()).padStart(2, "0");
+        const MM = String(d.getUTCMonth() + 1).padStart(2, "0");
+        timeStr = hh + ":" + mm + " UTC+5 (" + dd + "." + MM + ")";
+    }
+
+    html += "<div class='meta'>" +
+        "📅 " + (meta.session_label_ru || meta.session_label || meta.session || "") +
+        " (" + (meta.session_start_utc || "") + "–" + (meta.session_end_utc || "") + " UTC)" +
+        " | 🕐 Составлен: " + timeStr +
+        " | Волатильность: " + (globalCtx.session_volatility || "N/A") +
+        " | Риск: " + (globalCtx.risk_appetite || "N/A") +
+        "</div>";
+
+    html += "<h2>" + currentSymbol +
+        " <span class='" + dirClass + "' style='font-size:16px;margin-left:8px'>" +
+        arrow + " " + dirLabel + " (conf: " + (pairData.direction_confidence || "?") + "/5)" +
+        "</span></h2>";
+
+    html += staleHtml;
+
+    // Currency bias — показываем валюты пары
+    const currencies = currentSymbol.split("/");
+    const currencyBias = lastBriefingData.currency_bias || {};
+    if (currencies.length === 2) {
+        const c1 = currencies[0], c2 = currencies[1];
+        const b1 = currencyBias[c1] || "?";
+        const b2 = currencyBias[c2] || "?";
+        const biasColor = function(b) {
+            if (b === "BULLISH") return "#26a69a";
+            if (b === "BEARISH") return "#ef5350";
+            return "#ffa726";
+        };
+        html += "<div class='section'>" +
+            "<div class='section-title'>Повалютный bias</div>" +
+            "<div style='font-size:13px'>" +
+            "<span style='color:" + biasColor(b1) + ";font-weight:bold'>" + c1 + ": " + b1 + "</span>" +
+            " → " +
+            "<span style='color:" + biasColor(b2) + ";font-weight:bold'>" + c2 + ": " + b2 + "</span>" +
+            "</div></div>";
+    }
+
+    html += "<div class='section'>" +
+        "<div class='section-title'>Технический анализ</div>" +
+        "<div>" + (pairData.technical_summary || "Нет данных.") + "</div>" +
+        "</div>";
+
+    html += "<div class='section'>" +
+        "<div class='section-title'>Ключевые уровни</div>" +
+        "<div><span style='color:#ef5350'>Resistance:</span> " +
+        "<span class='level'>" + (resistances || "N/A") + "</span></div>" +
+        "<div><span style='color:#26a69a'>Support:</span> " +
+        "<span class='level'>" + (supports || "N/A") + "</span></div>" +
+        "<div>Тренд: <b>" + ((pairData.trend || "unknown").toUpperCase()) + "</b></div>" +
+        "</div>";
+
+    html += "<div class='section'>" +
+        "<div class='section-title'>Обоснование</div>" +
+        "<div>" + (pairData.reasoning || "Нет обоснования.") + "</div>" +
+        "</div>";
+
+    // Накопленный контекст
+    const accCtx = lastBriefingData.accumulated_context || {};
+    const pairCtx = accCtx[currentSymbol];
+    if (pairCtx && pairCtx.length > 0) {
+        html += "<div class='section'>" +
+            "<div class='section-title'>Накопленный контекст</div><ul style='color:#aaa;font-size:11px'>" +
+            pairCtx.map(function(c) { return "<li>" + c + "</li>"; }).join("") +
+            "</ul></div>";
+    }
+
+    html += "<div class='section'>" +
+        "<div class='section-title'>На что обратить внимание</div>" +
+        "<div>" + (pairData.watch_for || "Ничего конкретного.") + "</div>" +
+        "</div>";
+
+    if (pairData.key_events && pairData.key_events.length > 0) {
+        html += "<div class='section'>" +
+            "<div class='section-title'>Ожидаемые новости</div><ul>" +
+            pairData.key_events.map(function(e) { return "<li>" + e + "</li>"; }).join("") +
+            "</ul></div>";
+    }
+
+    if (globalCtx.risk_factors && globalCtx.risk_factors.length > 0) {
+        html += "<div class='section'>" +
+            "<div class='section-title'>Факторы риска</div><ul>" +
+            globalCtx.risk_factors.map(function(r) {
+                return "<li style='color:#ff8a80'>⚠️ " + r + "</li>";
+            }).join("") +
+            "</ul></div>";
+    }
+
+    if (globalCtx.recommendation) {
+        html += "<div class='section'>" +
+            "<div class='section-title'>Рекомендация</div>" +
+            "<div>" + globalCtx.recommendation + "</div>" +
+            "</div>";
+    }
+
+    content.innerHTML = html;
 }
 
 function updateMarketEngine(data) {

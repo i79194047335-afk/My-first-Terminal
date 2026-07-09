@@ -77,6 +77,12 @@ market_structures = {}
 SIGNAL_COOLDOWN   = 30
 last_signal_time  = {}
 
+# ── Брифинг (pre_session_brief.py → briefing.json) ──
+BRIEFING_FILE = "briefing.json"
+_briefing_cache = None       # последний прочитанный briefing.json
+_briefing_mtime = 0          # mtime при последнем чтении
+_briefing_lock = threading.Lock()
+
 # ── ФОРВАРД-ТЕСТ: фильтр «последнего сигнала блока» через N-секундную тишину ──
 # Гипотеза (см. memory: signal-block-position-test): из блока сигналов у края
 # (post-cooldown, идут с паузой >=30с) реальный эдж несёт ПОСЛЕДНЕЕ касание
@@ -583,6 +589,45 @@ def send_alert(symbol, price, alert_id):
             clients.pop(ws, None)
 
 
+def _broadcast_briefing():
+    """
+    Шлёт текущий брифинг ВСЕМ подключённым клиентам (без фильтра по символу).
+    Клиент сам фильтрует по currentSymbol.
+    """
+    global _briefing_cache
+    if _briefing_cache is None:
+        return
+    msg = json.dumps({"type": "briefing", "data": _briefing_cache})
+    for ws in list(clients.keys()):
+        try:
+            asyncio.run_coroutine_threadsafe(ws.send(msg), loop_ref)
+        except Exception:
+            clients.pop(ws, None)
+
+
+def briefing_watcher():
+    """
+    Поток: поллит briefing.json mtime каждые 5 секунд.
+    При изменении — перечитывает и broadcast всем клиентам.
+    """
+    global _briefing_cache, _briefing_mtime
+    while True:
+        try:
+            if os.path.exists(BRIEFING_FILE):
+                mtime = os.path.getmtime(BRIEFING_FILE)
+                with _briefing_lock:
+                    if mtime > _briefing_mtime:
+                        with open(BRIEFING_FILE, encoding="utf-8") as f:
+                            _briefing_cache = json.load(f)
+                        _briefing_mtime = mtime
+                        print(f"[briefing] reloaded (mtime={mtime}, "
+                              f"session={_briefing_cache.get('meta', {}).get('session', '?')})", flush=True)
+                        _broadcast_briefing()
+        except Exception as e:
+            print(f"[briefing] watch error: {e}", flush=True)
+        time.sleep(5)
+
+
 
 
 def send_analysis(symbol, data):
@@ -812,6 +857,14 @@ async def handler(ws):
                     "data":      history
                 }))
 
+                # Отправляем текущий брифинг новому клиенту
+                with _briefing_lock:
+                    if _briefing_cache is not None:
+                        await ws.send(json.dumps({
+                            "type": "briefing",
+                            "data": _briefing_cache
+                        }))
+
 
             if data["type"] == "get_signals":
                 await ws.send(json.dumps({
@@ -887,6 +940,7 @@ async def main():
 
 
     threading.Thread(target=tick_writer, daemon=True).start()
+    threading.Thread(target=briefing_watcher, daemon=True).start()
 
 
     loop_ref = asyncio.get_running_loop()
