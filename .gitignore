@@ -6,3 +6,4 @@ vel_log/
 History/
 *.json
 ystemctl status chart
+signal_log.json.bak_*
