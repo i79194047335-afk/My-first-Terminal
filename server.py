@@ -8,7 +8,6 @@ import websockets
 import numpy as np
 import os
 import csv
-import sqlite3
 from core.db import init_db, upsert_candle, upsert_candles_batch, trim_window, \
     KEEP_BARS, load_history as db_load_history
 from core.candles import aggregate_higher_tf
@@ -277,7 +276,8 @@ def load_history():
     print("Загрузка истории...")
 
     # Ensure DB file + schema exist (handles first-run: no .db file at all).
-    init_db(DB_PATH)
+    # Close immediately — each component opens its own connection in-thread.
+    init_db(DB_PATH).close()
 
     # ── Step 1: restore M1 + direct-load TFs from SQLite ──
     for sym in SYMBOLS:
@@ -483,15 +483,18 @@ def db_writer():
         if item is None:          # shutdown sentinel
             break
 
-        symbol, tf, candle = item
-        upsert_candle(conn, "fxcm", symbol, tf, candle)
-        count += 1
+        try:
+            symbol, tf, candle = item
+            upsert_candle(conn, "fxcm", symbol, tf, candle)
+            count += 1
 
-        if count % DB_TRIM_EVERY == 0:
-            for sym in SYMBOLS:
-                for tf_name in TF_SECONDS:
-                    trim_window(conn, "fxcm", sym, tf_name, KEEP_BARS)
-            conn.commit()
+            if count % DB_TRIM_EVERY == 0:
+                for sym in SYMBOLS:
+                    for tf_name in TF_SECONDS:
+                        trim_window(conn, "fxcm", sym, tf_name, KEEP_BARS)
+                conn.commit()
+        except Exception as e:
+            print(f"[db_writer] ERROR: {e} — candle dropped, continuing")
 
     # Final flush on shutdown
     for sym in SYMBOLS:
@@ -502,18 +505,21 @@ def db_writer():
 
 
 def _enqueue_closed(symbol, tf, candle):
-    """Non-blocking enqueue of a closed candle for persistence.
+    """Enqueue a closed candle for persistence (1-second timeout).
 
-    If the queue is full the call blocks with a short timeout — in practice
-    db_writer drains faster than ticks produce closed candles, so this
-    never blocks.
+    If the queue is full (db_writer stalled / crashed), the tick is dropped
+    rather than blocking the FXCM callback thread.
 
     Args:
         symbol: Trading pair.
         tf:     Timeframe string.
         candle: Closed candle dict.
     """
-    db_queue.put((symbol, tf, candle))
+    try:
+        db_queue.put((symbol, tf, candle), timeout=1.0)
+    except Exception:
+        # queue.Full or queue shutdown — drop, tick thread must not stall
+        pass
 
 
 def _load_from_db(symbol):
@@ -530,7 +536,10 @@ def _load_from_db(symbol):
     Returns:
         True if at least M1 data was found and restored, False otherwise.
     """
-    conn = sqlite3.connect(DB_PATH)
+    # init_db is idempotent (CREATE TABLE IF NOT EXISTS) — safe to call
+    # even if the schema already exists.  No implicit dependency on a
+    # prior init_db call elsewhere.
+    conn = init_db(DB_PATH)
     tf_data = symbols_state[symbol]["tf_data"]
 
     m1 = db_load_history(conn, "fxcm", symbol, "M1")
