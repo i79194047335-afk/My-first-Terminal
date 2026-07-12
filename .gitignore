@@ -7,3 +7,6 @@ History/
 *.json
 signal_log.json.bak_*
 .env
+*.db
+*.db-wal
+*.db-shm
