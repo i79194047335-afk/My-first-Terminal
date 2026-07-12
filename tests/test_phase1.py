@@ -7,6 +7,7 @@ Run:  python3 tests/test_phase1.py
 import sys
 import os
 import csv
+import sqlite3
 import tempfile
 import unittest
 
@@ -308,6 +309,71 @@ class TestDb(unittest.TestCase):
         """Loading from empty DB returns [], not error."""
         rows = load_history(self.conn, "fxcm", "NONEXIST", "M1")
         self.assertEqual(rows, [])
+
+    def test_multi_thread_write_then_read_after_reconnect(self):
+        """Write from a non-main thread, close, reopen — data must survive.
+
+        Reproduces defects:
+          1. check_same_thread crash (connection shared across threads)
+          2. Uncommitted writes vanishing on restart
+        """
+        import threading
+        import queue as qmod
+
+        candles_to_write = [
+            {"time": i * 60, "open": 1.1 + i * 0.001, "high": 1.12,
+             "low": 1.09, "close": 1.11}
+            for i in range(50)
+        ]
+
+        errors = []
+        db_path = self.path
+
+        def writer_thread():
+            """Simulates db_writer: creates its OWN connection in-thread."""
+            try:
+                conn = init_db(db_path)
+                for c in candles_to_write:
+                    upsert_candle(conn, "fxcm", "EUR/USD", "M1", c)
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                errors.append(e)
+
+        # Spawn non-main thread
+        t = threading.Thread(target=writer_thread, name="db-writer-test")
+        t.start()
+        t.join()
+
+        # Thread must not have crashed
+        self.assertEqual(errors, [], f"Writer thread crashed: {errors}")
+
+        # Close the main-thread connection and reopen — simulates restart
+        self.conn.close()
+        self.conn = sqlite3.connect(self.path)
+
+        rows = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows), 50,
+                         f"Expected 50 candles after reconnect, got {len(rows)}")
+        self.assertAlmostEqual(rows[0]["open"], 1.1)
+        # close=1.11 for all candles in our test data
+        self.assertAlmostEqual(rows[-1]["open"],  1.1 + 49 * 0.001)
+        self.assertAlmostEqual(rows[-1]["close"], 1.11)
+        # Verify idempotency: re-write same candle from another thread
+        def _idempotent_write():
+            c2 = init_db(db_path)
+            upsert_candle(c2, "fxcm", "EUR/USD", "M1",
+                          {"time": 0, "open": 9.99, "high": 9.99,
+                           "low": 9.99, "close": 9.99})
+            c2.close()
+
+        t2 = threading.Thread(target=_idempotent_write)
+        t2.start()
+        t2.join()
+
+        rows2 = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows2), 50, "Idempotent upsert must not duplicate")
+        self.assertAlmostEqual(rows2[0]["open"], 9.99, "Upsert must overwrite")
 
 
 if __name__ == "__main__":

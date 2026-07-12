@@ -8,7 +8,9 @@ import websockets
 import numpy as np
 import os
 import csv
-from core.db import init_db, upsert_candle, trim_window, KEEP_BARS
+import sqlite3
+from core.db import init_db, upsert_candle, trim_window, KEEP_BARS, \
+    load_history as db_load_history
 from market_engine import MarketEngine
 from structure_engine import StructureEngine, detect_event
 from signal_engine import evaluate_signal, format_signal, get_hour_utc, minutes_in_hour, get_session
@@ -153,7 +155,12 @@ DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_PATH = "market.db"
-db_conn = None  # opened in main()
+
+# ── SQLite writer queue ──
+# process_tick enqueues closed candles here; db_writer thread persists them.
+# Max 5000 items — at ~100 closed candles/min this is ~50 min of buffer.
+db_queue = queue.Queue(maxsize=5000)
+DB_TRIM_EVERY = 200  # trim retention window every N writes (not every candle)
 
 
 tick_queue = queue.Queue(maxsize=200000)
@@ -258,32 +265,53 @@ def to_timestamp(dt):
 
 
 def load_history():
+    """Restore candle history from SQLite (if available) or FXCM API.
 
+    Tries SQLite first.  If all symbols have M1 data in the DB the FXCM
+    round-trip is skipped entirely — restart is instant and history is
+    preserved.  Otherwise falls back to a full FXCM load for missing symbols.
+    """
 
     print("Загрузка истории...")
 
+    # ── Try SQLite first ──
+    from_db = 0
+    for sym in SYMBOLS:
+        if _load_from_db(sym):
+            from_db += 1
+            m1_count = len(symbols_state[sym]["tf_data"]["M1"])
+            print(f"History [{sym}]: restored from SQLite (M1: {m1_count} bars)")
 
+    if from_db == len(SYMBOLS):
+        print(f"История восстановлена из SQLite (все {from_db} символов).")
+        return
+
+    if from_db > 0:
+        print(f"SQLite: восстановлено {from_db}/{len(SYMBOLS)}, "
+              f"догружаю остальные у FXCM...")
+    else:
+        print("SQLite пуста — полная загрузка у FXCM...")
+
+    # ── FXCM fallback (only for symbols not restored from DB) ──
     with ForexConnect() as fx:
 
-
         fx.login(LOGIN, PASSWORD, URL, CONNECTION)
-
 
         end   = datetime.utcnow()
         start = end - timedelta(days=30)
 
-
         for symbol in SYMBOLS:
-
-
-            print("History:", symbol)
-            history = fx.get_history(symbol, "m1", start, end)
-
 
             state   = symbols_state[symbol]
             tf_data = state["tf_data"]
-            data    = history[-HISTORY_COUNT:]
 
+            # Skip symbols already restored from DB
+            if tf_data["M1"]:
+                continue
+
+            print("History [FXCM]:", symbol)
+            history = fx.get_history(symbol, "m1", start, end)
+            data    = history[-HISTORY_COUNT:]
 
             for row in data:
                 ts = to_timestamp(row["Date"])
@@ -295,10 +323,8 @@ def load_history():
                     "close": float(row["BidClose"])
                 })
 
-
             if tf_data["M1"]:
                 tf_data["M1"].pop()
-
 
             build_higher_history(symbol)
 
@@ -320,8 +346,7 @@ def load_history():
                     tf_data[tf].pop()
                 tf_data[tf].sort(key=lambda x: x["time"])
 
-            _persist_history(symbol)
-
+            _persist_all(symbol)
 
     print("История загружена.")
 
@@ -374,34 +399,105 @@ def build_higher_history(symbol):
 # ================= SQLite PERSIST =================
 
 
-def _persist_candle(symbol, tf, candle):
-    """Write a closed candle to SQLite and trim the window.
+def db_writer():
+    """Background thread: persists candles from db_queue to SQLite.
 
-    Thin wrapper so the DB write is a single call site.
+    Creates its OWN sqlite3.Connection inside this thread — avoids
+    ProgrammingError from cross-thread access (check_same_thread=True).
+    Trims the retention window every DB_TRIM_EVERY writes.
+    """
+    conn = init_db(DB_PATH)
+    count = 0
+
+    while True:
+        item = db_queue.get()
+        if item is None:          # shutdown sentinel
+            break
+
+        symbol, tf, candle = item
+        upsert_candle(conn, "fxcm", symbol, tf, candle)
+        count += 1
+
+        if count % DB_TRIM_EVERY == 0:
+            for sym in SYMBOLS:
+                for tf_name in TF_SECONDS:
+                    trim_window(conn, "fxcm", sym, tf_name, KEEP_BARS)
+            conn.commit()
+
+    # Final flush on shutdown
+    for sym in SYMBOLS:
+        for tf_name in TF_SECONDS:
+            trim_window(conn, "fxcm", sym, tf_name, KEEP_BARS)
+    conn.commit()
+    conn.close()
+
+
+def _enqueue_closed(symbol, tf, candle):
+    """Non-blocking enqueue of a closed candle for persistence.
+
+    If the queue is full the call blocks with a short timeout — in practice
+    db_writer drains faster than ticks produce closed candles, so this
+    never blocks.
 
     Args:
-        symbol: Trading pair (e.g. "EUR/USD").
-        tf:     Timeframe string (e.g. "M1").
-        candle: Dict with time, open, high, low, close keys.
+        symbol: Trading pair.
+        tf:     Timeframe string.
+        candle: Closed candle dict.
     """
-    global db_conn
-    if db_conn is None:
-        return
-    upsert_candle(db_conn, "fxcm", symbol, tf, candle)
-    trim_window(db_conn, "fxcm", symbol, tf, KEEP_BARS)
+    db_queue.put((symbol, tf, candle))
 
 
-def _persist_history(symbol):
-    """Write all in-memory candles for one symbol into SQLite (used at startup)."""
-    global db_conn
-    if db_conn is None:
-        return
+def _load_from_db(symbol):
+    """Try to restore history for one symbol from SQLite.
+
+    Args:
+        symbol: Trading pair.
+
+    Returns:
+        True if at least M1 data was found and restored, False otherwise.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    tf_data = symbols_state[symbol]["tf_data"]
+
+    m1 = db_load_history(conn, "fxcm", symbol, "M1")
+    if not m1:
+        conn.close()
+        return False
+
+    tf_data["M1"] = m1
+
+    # Restore higher TFs (aggregated from M1)
+    for tf in TF_SECONDS:
+        if tf == "M1" or tf in DIRECT_LOAD_TF:
+            continue
+        candles = db_load_history(conn, "fxcm", symbol, tf)
+        if candles:
+            tf_data[tf] = candles
+
+    # Restore direct-load TFs (H4, D1)
+    for tf in DIRECT_LOAD_TF:
+        candles = db_load_history(conn, "fxcm", symbol, tf)
+        if candles:
+            tf_data[tf] = candles
+
+    conn.close()
+    return True
+
+
+def _persist_all(symbol):
+    """Bulk-persist all in-memory candles for one symbol after FXCM load.
+
+    Uses a dedicated temporary connection — runs in the main thread during
+    startup, before streaming begins, so there is no concurrent access.
+    """
+    conn = init_db(DB_PATH)
     state = symbols_state[symbol]
     for tf, candles in state["tf_data"].items():
         for c in candles:
-            upsert_candle(db_conn, "fxcm", symbol, tf, c)
-        trim_window(db_conn, "fxcm", symbol, tf, KEEP_BARS)
-    db_conn.commit()
+            upsert_candle(conn, "fxcm", symbol, tf, c)
+        trim_window(conn, "fxcm", symbol, tf, KEEP_BARS)
+    conn.commit()
+    conn.close()
 
 
 
@@ -440,7 +536,7 @@ def process_tick(symbol, price, ts):
             if current_candle[tf]:
                 prev_close = current_candle[tf]["close"]
                 tf_data[tf].append(current_candle[tf])
-                _persist_candle(symbol, tf, current_candle[tf])
+                _enqueue_closed(symbol, tf, current_candle[tf])
 
 
             current_bucket[tf] = bucket
@@ -972,10 +1068,8 @@ async def handler(ws):
 
 
 async def main():
-    global loop_ref, db_conn
+    global loop_ref
 
-
-    db_conn = init_db(DB_PATH)
 
     for s in SYMBOLS:
         init_symbol(s)
@@ -987,6 +1081,7 @@ async def main():
 
 
     threading.Thread(target=tick_writer, daemon=True).start()
+    threading.Thread(target=db_writer, daemon=True).start()
     threading.Thread(target=briefing_watcher, daemon=True).start()
 
 

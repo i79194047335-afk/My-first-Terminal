@@ -75,21 +75,22 @@ def upsert_candle(conn: sqlite3.Connection, provider: str, symbol: str,
         candle:   Dict with keys time, open, high, low, close and optional
                   vol_base, vol_quote.
     """
-    conn.execute(
-        """INSERT OR REPLACE INTO candles
-           (provider, symbol, tf, time, o, h, l, c, vol_base, vol_quote)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            provider, symbol, tf,
-            candle["time"],
-            candle["open"],
-            candle["high"],
-            candle["low"],
-            candle["close"],
-            candle.get("vol_base"),
-            candle.get("vol_quote"),
-        ),
-    )
+    with conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO candles
+               (provider, symbol, tf, time, o, h, l, c, vol_base, vol_quote)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                provider, symbol, tf,
+                candle["time"],
+                candle["open"],
+                candle["high"],
+                candle["low"],
+                candle["close"],
+                candle.get("vol_base"),
+                candle.get("vol_quote"),
+            ),
+        )
 
 
 def upsert_candles_batch(conn: sqlite3.Connection, provider: str, symbol: str,
