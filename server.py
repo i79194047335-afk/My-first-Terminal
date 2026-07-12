@@ -8,6 +8,7 @@ import websockets
 import numpy as np
 import os
 import csv
+from core.db import init_db, upsert_candle, trim_window, KEEP_BARS
 from market_engine import MarketEngine
 from structure_engine import StructureEngine, detect_event
 from signal_engine import evaluate_signal, format_signal, get_hour_utc, minutes_in_hour, get_session
@@ -150,6 +151,9 @@ stream_listener   = None
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
+
+DB_PATH = "market.db"
+db_conn = None  # opened in main()
 
 
 tick_queue = queue.Queue(maxsize=200000)
@@ -316,6 +320,8 @@ def load_history():
                     tf_data[tf].pop()
                 tf_data[tf].sort(key=lambda x: x["time"])
 
+            _persist_history(symbol)
+
 
     print("История загружена.")
 
@@ -365,6 +371,40 @@ def build_higher_history(symbol):
 
 
 
+# ================= SQLite PERSIST =================
+
+
+def _persist_candle(symbol, tf, candle):
+    """Write a closed candle to SQLite and trim the window.
+
+    Thin wrapper so the DB write is a single call site.
+
+    Args:
+        symbol: Trading pair (e.g. "EUR/USD").
+        tf:     Timeframe string (e.g. "M1").
+        candle: Dict with time, open, high, low, close keys.
+    """
+    global db_conn
+    if db_conn is None:
+        return
+    upsert_candle(db_conn, "fxcm", symbol, tf, candle)
+    trim_window(db_conn, "fxcm", symbol, tf, KEEP_BARS)
+
+
+def _persist_history(symbol):
+    """Write all in-memory candles for one symbol into SQLite (used at startup)."""
+    global db_conn
+    if db_conn is None:
+        return
+    state = symbols_state[symbol]
+    for tf, candles in state["tf_data"].items():
+        for c in candles:
+            upsert_candle(db_conn, "fxcm", symbol, tf, c)
+        trim_window(db_conn, "fxcm", symbol, tf, KEEP_BARS)
+    db_conn.commit()
+
+
+
 # ================= LIVE =================
 
 
@@ -400,6 +440,7 @@ def process_tick(symbol, price, ts):
             if current_candle[tf]:
                 prev_close = current_candle[tf]["close"]
                 tf_data[tf].append(current_candle[tf])
+                _persist_candle(symbol, tf, current_candle[tf])
 
 
             current_bucket[tf] = bucket
@@ -931,8 +972,10 @@ async def handler(ws):
 
 
 async def main():
-    global loop_ref
+    global loop_ref, db_conn
 
+
+    db_conn = init_db(DB_PATH)
 
     for s in SYMBOLS:
         init_symbol(s)
