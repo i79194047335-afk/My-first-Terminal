@@ -16,13 +16,17 @@ from signal_tracker import store_signal, resolve_signals as tracker_resolve, pri
 import queue
 from collections import deque
 
+# Load .env file if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-
-
-LOGIN = "D261411120"
-PASSWORD = "d4bHf"
-URL = "http://www.fxcorporate.com/Hosts.jsp"
-CONNECTION = "Demo"
+LOGIN = os.getenv("FXCM_LOGIN")
+PASSWORD = os.getenv("FXCM_PASSWORD")
+URL = os.getenv("FXCM_URL", "http://www.fxcorporate.com/Hosts.jsp")
+CONNECTION = os.getenv("FXCM_CONNECTION", "Demo")
 
 
 PORT = 8765
