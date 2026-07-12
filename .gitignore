@@ -4,8 +4,8 @@ __pycache__/
 data/
 vel_log/
 History/
-!retention.json
 *.json
+!retention.json
 signal_log.json.bak_*
 .env
 *.db

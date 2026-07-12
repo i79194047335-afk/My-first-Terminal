@@ -375,6 +375,63 @@ class TestDb(unittest.TestCase):
         self.assertEqual(len(rows2), 50, "Idempotent upsert must not duplicate")
         self.assertAlmostEqual(rows2[0]["open"], 9.99, "Upsert must overwrite")
 
+    def test_init_on_nonexistent_db(self):
+        """Regression: first run with no .db file must not crash.
+
+        init_db() creates the file + schema; subsequent load_history must
+        return an empty list, not raise OperationalError.
+        """
+        nonexistent = tempfile.mktemp(suffix=".db")
+        try:
+            # Simulates what load_history does on first run
+            conn = init_db(nonexistent)
+            rows = load_history(conn, "fxcm", "EUR/USD", "M1")
+            self.assertEqual(rows, [], "Empty DB must return empty list, not crash")
+            conn.close()
+        finally:
+            if os.path.exists(nonexistent):
+                os.unlink(nonexistent)
+            # Also clean up WAL/SHM if created
+            for suf in ["-wal", "-shm"]:
+                p = nonexistent + suf
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def test_restore_with_gap_detection(self):
+        """Regression: DB has candles up to N hours ago → backfill needed.
+
+        Verifies that load_history correctly reports the most recent candle
+        time so the caller can request only the gap from FXCM.
+        """
+        # Write candles, most recent = 6 hours ago
+        import time as _time
+        now = int(_time.time())
+        gap_hours = 6
+        old_candles = [
+            {"time": now - gap_hours * 3600 + i * 60, "open": 1.1, "high": 1.12,
+             "low": 1.09, "close": 1.11}
+            for i in range(100)
+        ]
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", old_candles)
+        self.conn.commit()
+
+        rows = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows), 100)
+        last_time = max(c["time"] for c in rows)
+
+        # Gap must be detectable (> 1 min from now)
+        gap_sec = now - last_time
+        self.assertGreater(gap_sec, 60,
+                           f"Expected gap > 60s for backfill, got {gap_sec}s")
+        self.assertLess(gap_sec, gap_hours * 3600 + 120,
+                        f"Gap too large: {gap_sec}s")
+
+        # Simulate reload: data survives
+        self.conn.close()
+        self.conn = sqlite3.connect(self.path)
+        rows2 = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows2), 100)
+
 
 if __name__ == "__main__":
     unittest.main()

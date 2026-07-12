@@ -9,8 +9,8 @@ import numpy as np
 import os
 import csv
 import sqlite3
-from core.db import init_db, upsert_candle, trim_window, KEEP_BARS, \
-    load_history as db_load_history
+from core.db import init_db, upsert_candle, upsert_candles_batch, trim_window, \
+    KEEP_BARS, load_history as db_load_history
 from market_engine import MarketEngine
 from structure_engine import StructureEngine, detect_event
 from signal_engine import evaluate_signal, format_signal, get_hour_utc, minutes_in_hour, get_session
@@ -265,86 +265,120 @@ def to_timestamp(dt):
 
 
 def load_history():
-    """Restore candle history from SQLite (if available) or FXCM API.
+    """Restore candle history from DB, backfill gap from FXCM.
 
-    Tries SQLite first.  If all symbols have M1 data in the DB the FXCM
-    round-trip is skipped entirely — restart is instant and history is
-    preserved.  Otherwise falls back to a full FXCM load for missing symbols.
+    - First run (empty DB):        full 30-day FXCM load.
+    - Restart (DB has candles):    restore from DB, request only the gap
+                                   (last_db_time → now) from FXCM.
+    - Higher TFs are always rebuilt from M1 after merging.
     """
 
     print("Загрузка истории...")
 
-    # ── Try SQLite first ──
-    from_db = 0
+    # Ensure DB file + schema exist (handles first-run: no .db file at all).
+    init_db(DB_PATH)
+
+    # ── Step 1: restore M1 + direct-load TFs from SQLite ──
     for sym in SYMBOLS:
         if _load_from_db(sym):
-            from_db += 1
             m1_count = len(symbols_state[sym]["tf_data"]["M1"])
             print(f"History [{sym}]: restored from SQLite (M1: {m1_count} bars)")
+        else:
+            print(f"History [{sym}]: no data in SQLite")
 
-    if from_db == len(SYMBOLS):
-        print(f"История восстановлена из SQLite (все {from_db} символов).")
-        return
-
-    if from_db > 0:
-        print(f"SQLite: восстановлено {from_db}/{len(SYMBOLS)}, "
-              f"догружаю остальные у FXCM...")
-    else:
-        print("SQLite пуста — полная загрузка у FXCM...")
-
-    # ── FXCM fallback (only for symbols not restored from DB) ──
+    # ── Step 2: FXCM backfill (gap for restored, full for empty) ──
     with ForexConnect() as fx:
 
         fx.login(LOGIN, PASSWORD, URL, CONNECTION)
 
-        end   = datetime.utcnow()
-        start = end - timedelta(days=30)
+        now = datetime.utcnow()
+        default_start = now - timedelta(days=30)
 
         for symbol in SYMBOLS:
 
             state   = symbols_state[symbol]
             tf_data = state["tf_data"]
 
-            # Skip symbols already restored from DB
+            # Determine start time for this symbol
             if tf_data["M1"]:
-                continue
+                last_db = max(c["time"] for c in tf_data["M1"])
+                start   = datetime.utcfromtimestamp(last_db)
+                tag     = f"gap [{start.strftime('%H:%M')} → now]"
+            else:
+                start = default_start
+                tag   = "full 30d"
 
-            print("History [FXCM]:", symbol)
-            history = fx.get_history(symbol, "m1", start, end)
-            data    = history[-HISTORY_COUNT:]
+            # Only call FXCM if gap is > 1 M1 candle (60s)
+            gap_sec = (now - start).total_seconds()
+            if gap_sec <= 60:
+                print(f"History [{symbol}]: gap < 1 min, skipped FXCM")
+            else:
+                print(f"History [{symbol}]: FXCM {tag}")
+                raw = fx.get_history(symbol, "m1", start, now)
+                data = raw[-HISTORY_COUNT:]
 
-            for row in data:
-                ts = to_timestamp(row["Date"])
-                tf_data["M1"].append({
-                    "time":  ts,
-                    "open":  float(row["BidOpen"]),
-                    "high":  float(row["BidHigh"]),
-                    "low":   float(row["BidLow"]),
-                    "close": float(row["BidClose"])
-                })
-
-            if tf_data["M1"]:
-                tf_data["M1"].pop()
-
-            build_higher_history(symbol)
-
-            # ---- TF с прямой загрузкой (H4, D1): из M1 вышло бы слишком коротко ----
-            for tf, (fx_tf, days) in DIRECT_LOAD_TF.items():
-                start_tf = end - timedelta(days=days)
-                hist     = fx.get_history(symbol, fx_tf, start_tf, end)
-                tf_data[tf] = []
-                for row in hist:
-                    tf_data[tf].append({
-                        "time":  to_timestamp(row["Date"]),
+                # Append gap candles to existing M1 (or populate from scratch)
+                for row in data:
+                    ts = to_timestamp(row["Date"])
+                    tf_data["M1"].append({
+                        "time":  ts,
                         "open":  float(row["BidOpen"]),
                         "high":  float(row["BidHigh"]),
                         "low":   float(row["BidLow"]),
                         "close": float(row["BidClose"])
                     })
-                # Последняя свеча — текущий незакрытый бар; live достроит её сам.
+
+                # Deduplicate by time (DB + gap overlap at boundary)
+                if tf_data["M1"]:
+                    seen = set()
+                    deduped = []
+                    for c in tf_data["M1"]:
+                        if c["time"] not in seen:
+                            seen.add(c["time"])
+                            deduped.append(c)
+                    deduped.sort(key=lambda x: x["time"])
+                    tf_data["M1"] = deduped
+
+                # Last M1 candle is incomplete — live ticks will extend it
+                if tf_data["M1"]:
+                    tf_data["M1"].pop()
+
+            # ── Rebuild higher TFs from M1 ──
+            build_higher_history(symbol)
+
+            # ── Direct-load TFs (H4, D1) ──
+            for tf, (fx_tf, days) in DIRECT_LOAD_TF.items():
+                # Determine gap for this TF
+                existing = tf_data.get(tf, [])
+                if existing and isinstance(existing, list) and existing:
+                    last_tf = max(c["time"] for c in existing)
+                    start_tf = datetime.utcfromtimestamp(max(last_tf, to_timestamp(default_start)))
+                else:
+                    start_tf = now - timedelta(days=days)
+
+                gap_tf = (now - start_tf).total_seconds()
+                if gap_tf <= 3600:   # < 1h gap for H4/D1 is trivial
+                    continue
+
+                hist = fx.get_history(symbol, fx_tf, start_tf, now)
+                if existing is None or not isinstance(existing, list) or not existing:
+                    tf_data[tf] = []
+
+                for row in hist:
+                    ts_c = to_timestamp(row["Date"])
+                    if ts_c not in {c["time"] for c in tf_data[tf]}:
+                        tf_data[tf].append({
+                            "time":  ts_c,
+                            "open":  float(row["BidOpen"]),
+                            "high":  float(row["BidHigh"]),
+                            "low":   float(row["BidLow"]),
+                            "close": float(row["BidClose"])
+                        })
+
+                # Last candle → pop for live extension
                 if tf_data[tf]:
+                    tf_data[tf].sort(key=lambda x: x["time"])
                     tf_data[tf].pop()
-                tf_data[tf].sort(key=lambda x: x["time"])
 
             _persist_all(symbol)
 
@@ -448,7 +482,10 @@ def _enqueue_closed(symbol, tf, candle):
 
 
 def _load_from_db(symbol):
-    """Try to restore history for one symbol from SQLite.
+    """Restore M1 + direct-load TFs (H4, D1) for one symbol from SQLite.
+
+    Higher TFs (M5, M15, H1 etc.) are NOT restored — they are rebuilt
+    from M1 by build_higher_history() after gap backfill.
 
     Args:
         symbol: Trading pair.
@@ -466,15 +503,6 @@ def _load_from_db(symbol):
 
     tf_data["M1"] = m1
 
-    # Restore higher TFs (aggregated from M1)
-    for tf in TF_SECONDS:
-        if tf == "M1" or tf in DIRECT_LOAD_TF:
-            continue
-        candles = db_load_history(conn, "fxcm", symbol, tf)
-        if candles:
-            tf_data[tf] = candles
-
-    # Restore direct-load TFs (H4, D1)
     for tf in DIRECT_LOAD_TF:
         candles = db_load_history(conn, "fxcm", symbol, tf)
         if candles:
@@ -492,12 +520,15 @@ def _persist_all(symbol):
     """
     conn = init_db(DB_PATH)
     state = symbols_state[symbol]
+    total = 0
     for tf, candles in state["tf_data"].items():
-        for c in candles:
-            upsert_candle(conn, "fxcm", symbol, tf, c)
-        trim_window(conn, "fxcm", symbol, tf, KEEP_BARS)
+        if candles:
+            upsert_candles_batch(conn, "fxcm", symbol, tf, candles)
+            total += len(candles)
+            trim_window(conn, "fxcm", symbol, tf, KEEP_BARS)
     conn.commit()
     conn.close()
+    print(f"  [persist] {symbol}: {total} candles written")
 
 
 
