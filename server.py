@@ -11,6 +11,7 @@ import csv
 import sqlite3
 from core.db import init_db, upsert_candle, upsert_candles_batch, trim_window, \
     KEEP_BARS, load_history as db_load_history
+from core.candles import aggregate_higher_tf
 from market_engine import MarketEngine
 from structure_engine import StructureEngine, detect_event
 from signal_engine import evaluate_signal, format_signal, get_hour_utc, minutes_in_hour, get_session
@@ -299,8 +300,12 @@ def load_history():
             state   = symbols_state[symbol]
             tf_data = state["tf_data"]
 
+            # Snapshot which M1 times came from DB (before gap backfill).
+            # Used later to rebuild higher TFs ONLY from the gap portion.
+            db_m1_times = {c["time"] for c in tf_data.get("M1", [])}
+
             # Determine start time for this symbol
-            if tf_data["M1"]:
+            if tf_data.get("M1"):
                 last_db = max(c["time"] for c in tf_data["M1"])
                 start   = datetime.utcfromtimestamp(last_db)
                 tag     = f"gap [{start.strftime('%H:%M')} → now]"
@@ -320,7 +325,7 @@ def load_history():
                 # Append gap candles to existing M1 (or populate from scratch)
                 for row in data:
                     ts = to_timestamp(row["Date"])
-                    tf_data["M1"].append({
+                    tf_data.setdefault("M1", []).append({
                         "time":  ts,
                         "open":  float(row["BidOpen"]),
                         "high":  float(row["BidHigh"]),
@@ -329,7 +334,7 @@ def load_history():
                     })
 
                 # Deduplicate by time (DB + gap overlap at boundary)
-                if tf_data["M1"]:
+                if tf_data.get("M1"):
                     seen = set()
                     deduped = []
                     for c in tf_data["M1"]:
@@ -343,16 +348,40 @@ def load_history():
                 if tf_data["M1"]:
                     tf_data["M1"].pop()
 
-            # ── Rebuild higher TFs from M1 ──
-            build_higher_history(symbol)
+            # ── Higher TFs: rebuild from gap M1 only, merge into DB data ──
+            if db_m1_times and gap_sec > 60:
+                # DB had data — only aggregate the NEW (gap) M1 candles
+                gap_m1 = [c for c in tf_data.get("M1", [])
+                          if c["time"] not in db_m1_times]
+                if gap_m1:
+                    gap_start = min(c["time"] for c in gap_m1)
+                    for tf, sec in TF_SECONDS.items():
+                        if tf == "M1" or tf in DIRECT_LOAD_TF:
+                            continue
+                        # Include boundary M1 (~1 bucket before gap) so
+                        # aggregate() opens the bucket with the correct price.
+                        boundary = [c for c in tf_data["M1"]
+                                    if c["time"] >= gap_start - sec]
+                        if not boundary:
+                            continue
+                        gap_higher = aggregate_higher_tf(boundary, sec)
+                        # Merge into DB-restored data (dedup by time)
+                        existing = {c["time"]: c for c in tf_data.get(tf, [])}
+                        for c in gap_higher:
+                            existing[c["time"]] = c
+                        tf_data[tf] = sorted(existing.values(),
+                                             key=lambda x: x["time"])
+            elif not db_m1_times:
+                # No DB data — full rebuild from M1 (first run)
+                build_higher_history(symbol)
 
             # ── Direct-load TFs (H4, D1) ──
             for tf, (fx_tf, days) in DIRECT_LOAD_TF.items():
-                # Determine gap for this TF
                 existing = tf_data.get(tf, [])
                 if existing and isinstance(existing, list) and existing:
                     last_tf = max(c["time"] for c in existing)
-                    start_tf = datetime.utcfromtimestamp(max(last_tf, to_timestamp(default_start)))
+                    start_tf = datetime.utcfromtimestamp(
+                        max(last_tf, to_timestamp(default_start)))
                 else:
                     start_tf = now - timedelta(days=days)
 
@@ -361,12 +390,13 @@ def load_history():
                     continue
 
                 hist = fx.get_history(symbol, fx_tf, start_tf, now)
-                if existing is None or not isinstance(existing, list) or not existing:
+                if not tf_data.get(tf):
                     tf_data[tf] = []
 
+                existing_times = {c["time"] for c in tf_data[tf]}
                 for row in hist:
                     ts_c = to_timestamp(row["Date"])
-                    if ts_c not in {c["time"] for c in tf_data[tf]}:
+                    if ts_c not in existing_times:
                         tf_data[tf].append({
                             "time":  ts_c,
                             "open":  float(row["BidOpen"]),
@@ -374,8 +404,8 @@ def load_history():
                             "low":   float(row["BidLow"]),
                             "close": float(row["BidClose"])
                         })
+                        existing_times.add(ts_c)
 
-                # Last candle → pop for live extension
                 if tf_data[tf]:
                     tf_data[tf].sort(key=lambda x: x["time"])
                     tf_data[tf].pop()
@@ -482,10 +512,12 @@ def _enqueue_closed(symbol, tf, candle):
 
 
 def _load_from_db(symbol):
-    """Restore M1 + direct-load TFs (H4, D1) for one symbol from SQLite.
+    """Restore ALL timeframes for one symbol from SQLite.
 
-    Higher TFs (M5, M15, H1 etc.) are NOT restored — they are rebuilt
-    from M1 by build_higher_history() after gap backfill.
+    Each TF has its own 2000-bar sliding window in the DB — restoring
+    all of them preserves the full indicator tail (EMA/RSI/MACD need
+    300–400 bars).  Higher TFs are NOT rebuilt from M1 on restore;
+    only the gap (new FXCM data) is aggregated and merged.
 
     Args:
         symbol: Trading pair.
@@ -501,9 +533,8 @@ def _load_from_db(symbol):
         conn.close()
         return False
 
-    tf_data["M1"] = m1
-
-    for tf in DIRECT_LOAD_TF:
+    # Restore every TF that has data in the DB (S5…S30, M1, M3…H1, H4, D1)
+    for tf in TF_SECONDS:
         candles = db_load_history(conn, "fxcm", symbol, tf)
         if candles:
             tf_data[tf] = candles

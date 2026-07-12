@@ -6,9 +6,9 @@ Run:  python3 tests/test_phase1.py
 
 import sys
 import os
-import csv
 import sqlite3
 import tempfile
+import time
 import unittest
 
 # Ensure we can import from the project root
@@ -21,18 +21,6 @@ from core.db import init_db, upsert_candle, upsert_candles_batch, \
 
 
 # ── helpers ────────────────────────────────────────────────────────────
-
-def _load_ticks_from_csv(path, limit=5000):
-    """Read a data/*.csv file, return list of (ts, price) tuples."""
-    ticks = []
-    with open(path, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            ticks.append((float(row["timestamp_utc"]), float(row["mid"])))
-            if len(ticks) >= limit:
-                break
-    return ticks
-
 
 def _build_reference_aggregate(source, sec):
     """The original aggregate() from server.py, copied for comparison."""
@@ -66,22 +54,42 @@ def _build_reference_aggregate(source, sec):
 class TestCandleBuilder(unittest.TestCase):
     """Verify CandleBuilder produces the same candles as the original logic."""
 
+    @staticmethod
+    def _synthetic_ticks(n=2000, start_time=None, start_price=1.10000,
+                         step=0.00005, min_interval=0.5, max_interval=2.0):
+        """Generate realistic tick data — no dependency on data/ CSV files.
+
+        Args:
+            n:            Number of ticks to generate.
+            start_time:   Unix timestamp for the first tick (default: now - 30 min).
+            start_price:  Initial mid-price.
+            step:         Max price change per tick (random walk).
+            min_interval: Min seconds between ticks.
+            max_interval: Max seconds between ticks.
+
+        Returns:
+            List of (ts, price) tuples sorted by time.
+        """
+        import random
+        random.seed(42)  # deterministic output for reproducible tests
+
+        if start_time is None:
+            start_time = int(time.time()) - 1800  # 30 min ago
+
+        ticks = []
+        ts = float(start_time)
+        price = start_price
+        for _ in range(n):
+            ticks.append((ts, round(price, 5)))
+            ts += random.uniform(min_interval, max_interval)
+            price += random.uniform(-step, step)
+        return ticks
+
     @classmethod
     def setUpClass(cls):
-        # Find a recent CSV to replay
-        data_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data"
-        )
-        csv_files = sorted(
-            [f for f in os.listdir(data_dir) if f.endswith(".csv")]
-        )
-        if not csv_files:
-            raise unittest.SkipTest("No CSV data files found for replay test")
-        cls.csv_path = os.path.join(data_dir, csv_files[-1])
-        cls.ticks = _load_ticks_from_csv(cls.csv_path, limit=5000)
+        cls.ticks = cls._synthetic_ticks(n=3000)
         if len(cls.ticks) < 100:
-            raise unittest.SkipTest(f"Not enough ticks in {cls.csv_path}")
+            raise unittest.SkipTest("Not enough synthetic ticks")
 
     def test_m1_candles_match_reference(self):
         """M1 candles from CandleBuilder match the original inline algorithm."""
@@ -318,7 +326,6 @@ class TestDb(unittest.TestCase):
           2. Uncommitted writes vanishing on restart
         """
         import threading
-        import queue as qmod
 
         candles_to_write = [
             {"time": i * 60, "open": 1.1 + i * 0.001, "high": 1.12,
@@ -431,6 +438,51 @@ class TestDb(unittest.TestCase):
         self.conn = sqlite3.connect(self.path)
         rows2 = load_history(self.conn, "fxcm", "EUR/USD", "M1")
         self.assertEqual(len(rows2), 100)
+
+    def test_all_tf_preserve_window_on_restore(self):
+        """Regression: restoring from DB must keep 2000 bars per TF.
+
+        M1 has 2000 bars (~33h).  If we rebuild H1 from M1 we get
+        only 33 bars — but H1 has its OWN 2000-bar window in the DB.
+        Verifying H1 count = 2000, not 33.
+        """
+        now = int(time.time())
+
+        # Fill 2000 M1 bars (~33 hours)
+        m1_candles = [
+            {"time": now - 2000 * 60 + i * 60, "open": 1.1, "high": 1.12,
+             "low": 1.09, "close": 1.11}
+            for i in range(2000)
+        ]
+        # Fill 2000 H1 bars (~83 days)
+        h1_candles = [
+            {"time": now - 2000 * 3600 + i * 3600, "open": 1.1, "high": 1.15,
+             "low": 1.05, "close": 1.12}
+            for i in range(2000)
+        ]
+        # Also fill S5 (seconds TF)
+        s5_candles = [
+            {"time": now - 2000 * 5 + i * 5, "open": 1.1, "high": 1.1001,
+             "low": 1.0999, "close": 1.1}
+            for i in range(2000)
+        ]
+
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", m1_candles)
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "H1", h1_candles)
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "S5", s5_candles)
+        self.conn.commit()
+
+        # Simulate _load_from_db: restore ALL TFs
+        m1_loaded = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        h1_loaded = load_history(self.conn, "fxcm", "EUR/USD", "H1")
+        s5_loaded = load_history(self.conn, "fxcm", "EUR/USD", "S5")
+
+        self.assertEqual(len(m1_loaded), 2000, "M1 must preserve full window")
+        self.assertEqual(len(h1_loaded), 2000,
+                         f"H1 must be 2000 (own window), not {len(h1_loaded)} "
+                         f"(would be ~33 if rebuilt from M1)")
+        self.assertEqual(len(s5_loaded), 2000,
+                         "S5 seconds TF must also be restored")
 
 
 if __name__ == "__main__":
