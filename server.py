@@ -358,10 +358,15 @@ def load_history():
                     for tf, sec in TF_SECONDS.items():
                         if tf == "M1" or tf in DIRECT_LOAD_TF:
                             continue
-                        # Include boundary M1 (~1 bucket before gap) so
-                        # aggregate() opens the bucket with the correct price.
+                        if sec < 60:
+                            # Seconds TFs (S5–S30) derive from ticks, not M1
+                            continue
+                        # Align start to bucket boundary so the previous
+                        # (partial) bucket is covered fully and the correct
+                        # DB candle is NOT overwritten by an incomplete one.
+                        bucket_start = (gap_start // sec) * sec
                         boundary = [c for c in tf_data["M1"]
-                                    if c["time"] >= gap_start - sec]
+                                    if c["time"] >= bucket_start]
                         if not boundary:
                             continue
                         gap_higher = aggregate_higher_tf(boundary, sec)

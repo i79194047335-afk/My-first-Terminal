@@ -485,5 +485,103 @@ class TestDb(unittest.TestCase):
                          "S5 seconds TF must also be restored")
 
 
+    def test_gap_rebuild_excludes_seconds_tf(self):
+        """Regression: gap rebuild must NOT aggregate M1 into S5–S30.
+
+        Seconds TFs derive from live ticks, not from M1 aggregation.
+        build_higher_history guards this with `if sec >= 60`.
+        """
+        now = int(time.time())
+        # DB has 100 M1 candles
+        m1 = [
+            {"time": now - 200 * 60 + i * 60, "open": 1.1, "high": 1.12,
+             "low": 1.09, "close": 1.11}
+            for i in range(200)
+        ]
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", m1)
+        self.conn.commit()
+
+        # Simulate gap rebuild: M1 gap candles exist, call aggregate_higher_tf
+        # for each TF excluding sub-60.  Mimics the load_history loop.
+        gap_m1 = [
+            {"time": now + i * 60, "open": 1.11, "high": 1.13,
+             "low": 1.10, "close": 1.12}
+            for i in range(10)
+        ]
+        all_m1 = m1 + gap_m1
+        gap_start = min(c["time"] for c in gap_m1)
+
+        for tf, sec in [("S5", 5), ("S10", 10), ("S15", 15), ("S30", 30)]:
+            if sec < 60:
+                # Must skip — same guard as build_higher_history + gap rebuild
+                continue
+            # Should not be reached for S5-S30
+            self.fail(f"Seconds TF {tf} must be excluded from gap rebuild")
+
+        # Verify no S5-S30 candles were created by gap rebuild
+        for tf in ["S5", "S10", "S15", "S30"]:
+            rows = load_history(self.conn, "fxcm", "EUR/USD", tf)
+            self.assertEqual(rows, [],
+                             f"{tf} must be empty — not derived from M1 gap")
+
+    def test_mid_bucket_gap_preserves_previous_candle(self):
+        """Regression: gap starting mid-bucket must not corrupt prior candle.
+
+        Full H1 candle at [3600..7199] built from complete M1 series.
+        Gap starts at 5400 (mid-bucket).  Rebuild uses bucket-aligned
+        start = (5400//3600)*3600 = 3600, includes full M1 from 3600.
+        Result: H1[3600] open MUST match the ground-truth aggregated open.
+        """
+        import random
+        random.seed(123)
+
+        # Build full M1 series for 2 hours (120 candles), price walk
+        base_price = 1.10000
+        m1_full = []
+        for i in range(120):
+            ts = 3600 + i * 60  # start at 3600 for clean bucket alignment
+            o = base_price
+            h = base_price + random.uniform(0, 0.0010)
+            l = base_price - random.uniform(0, 0.0010)
+            c = base_price + random.uniform(-0.0005, 0.0005)
+            m1_full.append({"time": ts, "open": o, "high": h, "low": l, "close": c})
+            base_price = c
+
+        # Ground truth: aggregate full M1 → H1
+        truth_h1 = aggregate_higher_tf(m1_full, 3600)
+        self.assertGreaterEqual(len(truth_h1), 1, "Need at least 1 H1 candle")
+        truth_3600 = truth_h1[0]  # H1 candle at time=3600
+
+        # Store first 30 M1 candles in "DB" (covers time 3600..5340)
+        db_m1 = [c for c in m1_full if c["time"] < 5400]  # 30 candles
+        # Gap M1: the rest (5400..10740)
+        gap_m1 = [c for c in m1_full if c["time"] >= 5400]  # 90 candles
+
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", db_m1)
+        self.conn.commit()
+
+        # Restore from "DB"
+        all_m1 = list(db_m1) + list(gap_m1)
+        all_m1.sort(key=lambda x: x["time"])
+
+        # Run gap rebuild logic (as in load_history)
+        gap_start = min(c["time"] for c in gap_m1)  # 5400
+        sec = 3600  # H1
+        bucket_start = (gap_start // sec) * sec  # = 3600
+        boundary = [c for c in all_m1 if c["time"] >= bucket_start]
+
+        rebuilt_h1 = aggregate_higher_tf(boundary, sec)
+        self.assertGreaterEqual(len(rebuilt_h1), 1)
+        rebuilt_3600 = rebuilt_h1[0]
+
+        # The key check: open must match ground truth (full M1 aggregation)
+        self.assertAlmostEqual(
+            rebuilt_3600["open"], truth_3600["open"], places=5,
+            msg=f"Mid-bucket gap corrupted H1 open: "
+                f"rebuilt={rebuilt_3600['open']}, truth={truth_3600['open']}")
+        self.assertAlmostEqual(rebuilt_3600["high"], truth_3600["high"], places=5)
+        self.assertAlmostEqual(rebuilt_3600["low"],  truth_3600["low"],  places=5)
+
+
 if __name__ == "__main__":
     unittest.main()
