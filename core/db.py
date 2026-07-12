@@ -191,12 +191,16 @@ def trim_window(conn: sqlite3.Connection, provider: str, symbol: str,
     Returns:
         Number of rows deleted.
     """
-    # Find the timestamp of the Nth most recent candle
+    if keep_bars < 1:
+        raise ValueError(f"keep_bars must be >= 1, got {keep_bars}")
+
+    # Find the timestamp of the keep_bars-th most recent candle.
+    # This is the oldest candle we want to KEEP.
     cutoff_row = conn.execute(
         """SELECT time FROM candles
            WHERE provider=? AND symbol=? AND tf=?
            ORDER BY time DESC LIMIT 1 OFFSET ?""",
-        (provider, symbol, tf, keep_bars),
+        (provider, symbol, tf, keep_bars - 1),
     ).fetchone()
 
     if cutoff_row is None:
@@ -217,6 +221,7 @@ def vacuum(conn: sqlite3.Connection) -> None:
     Args:
         conn: Open SQLite connection.
     """
+    conn.commit()          # VACUUM cannot run inside a transaction
     conn.execute("VACUUM")
 
 
