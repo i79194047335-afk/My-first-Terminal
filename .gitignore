@@ -5,5 +5,9 @@ data/
 vel_log/
 History/
 *.json
+!retention.json
 signal_log.json.bak_*
 .env
+*.db
+*.db-wal
+*.db-shm

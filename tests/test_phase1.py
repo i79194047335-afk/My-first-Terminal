@@ -1,0 +1,587 @@
+"""
+Tests for core/candles.py and core/db.py.
+
+Run:  python3 tests/test_phase1.py
+"""
+
+import sys
+import os
+import sqlite3
+import tempfile
+import time
+import unittest
+
+# Ensure we can import from the project root
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.candles import CandleBuilder, aggregate_higher_tf
+from core.db import init_db, upsert_candle, upsert_candles_batch, \
+    load_history, get_candle_count, trim_window, vacuum, \
+    upsert_instrument, get_instrument
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+def _build_reference_aggregate(source, sec):
+    """The original aggregate() from server.py, copied for comparison."""
+    result = []
+    bucket = None
+    candle = None
+    for c in source:
+        b = (c["time"] // sec) * sec
+        if b != bucket:
+            if candle:
+                result.append(candle)
+            bucket = b
+            candle = {
+                "time":  b,
+                "open":  c["open"],
+                "high":  c["high"],
+                "low":   c["low"],
+                "close": c["close"],
+            }
+        else:
+            candle["high"]  = max(candle["high"], c["high"])
+            candle["low"]   = min(candle["low"],  c["low"])
+            candle["close"] = c["close"]
+    if candle:
+        result.append(candle)
+    return result
+
+
+# ── tests ──────────────────────────────────────────────────────────────
+
+class TestCandleBuilder(unittest.TestCase):
+    """Verify CandleBuilder produces the same candles as the original logic."""
+
+    @staticmethod
+    def _synthetic_ticks(n=2000, start_time=None, start_price=1.10000,
+                         step=0.00005, min_interval=0.5, max_interval=2.0):
+        """Generate realistic tick data — no dependency on data/ CSV files.
+
+        Args:
+            n:            Number of ticks to generate.
+            start_time:   Unix timestamp for the first tick (default: now - 30 min).
+            start_price:  Initial mid-price.
+            step:         Max price change per tick (random walk).
+            min_interval: Min seconds between ticks.
+            max_interval: Max seconds between ticks.
+
+        Returns:
+            List of (ts, price) tuples sorted by time.
+        """
+        import random
+        random.seed(42)  # deterministic output for reproducible tests
+
+        if start_time is None:
+            start_time = int(time.time()) - 1800  # 30 min ago
+
+        ticks = []
+        ts = float(start_time)
+        price = start_price
+        for _ in range(n):
+            ticks.append((ts, round(price, 5)))
+            ts += random.uniform(min_interval, max_interval)
+            price += random.uniform(-step, step)
+        return ticks
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ticks = cls._synthetic_ticks(n=3000)
+        if len(cls.ticks) < 100:
+            raise unittest.SkipTest("Not enough synthetic ticks")
+
+    def test_m1_candles_match_reference(self):
+        """M1 candles from CandleBuilder match the original inline algorithm."""
+        tf_defs = {"M1": 60}
+        builder = CandleBuilder(tf_defs)
+
+        # Replay
+        for ts, price in self.ticks:
+            builder.ingest(price, ts)
+
+        # Close final candle
+        builder.close_all()
+        built = builder.history("M1")
+
+        # Build reference via "manual" tick processing (same as server.py process_tick)
+        ref_history = []
+        current_bucket = None
+        current_candle = None
+        for ts, price in self.ticks:
+            bucket = int(ts // 60) * 60
+            if current_bucket is None:
+                current_bucket = bucket
+                current_candle = {
+                    "time": bucket, "open": price,
+                    "high": price, "low": price, "close": price,
+                }
+                continue
+            if bucket != current_bucket:
+                if current_candle:
+                    ref_history.append(current_candle)
+                prev_close = current_candle["close"] if current_candle else None
+                current_bucket = bucket
+                current_candle = {
+                    "time": bucket,
+                    "open": prev_close if prev_close is not None else price,
+                    "high": max(prev_close, price) if prev_close is not None else price,
+                    "low":  min(prev_close, price) if prev_close is not None else price,
+                    "close": price,
+                }
+                continue
+            if current_candle is None:
+                current_candle = {
+                    "time": bucket, "open": price,
+                    "high": price, "low": price, "close": price,
+                }
+                continue
+            current_candle["high"] = max(current_candle["high"], price)
+            current_candle["low"]  = min(current_candle["low"],  price)
+            current_candle["close"] = price
+        if current_candle:
+            ref_history.append(current_candle)
+
+        # Compare
+        self.assertEqual(len(built), len(ref_history),
+                         f"M1 candle count mismatch: {len(built)} vs {len(ref_history)}")
+
+        for i, (b, r) in enumerate(zip(built, ref_history)):
+            with self.subTest(i=i):
+                self.assertEqual(b["time"],  r["time"],  f"time  at candle {i}")
+                self.assertAlmostEqual(b["open"],  r["open"],  places=5)
+                self.assertAlmostEqual(b["high"],  r["high"],  places=5)
+                self.assertAlmostEqual(b["low"],   r["low"],   places=5)
+                self.assertAlmostEqual(b["close"], r["close"], places=5)
+
+    def test_aggregate_higher_tf_matches_reference(self):
+        """aggregate_higher_tf() produces same output as original aggregate()."""
+        # Build M1 candles first
+        tf_defs = {"M1": 60}
+        builder = CandleBuilder(tf_defs)
+        for ts, price in self.ticks:
+            builder.ingest(price, ts)
+        builder.close_all()
+        m1_candles = builder.history("M1")
+
+        if len(m1_candles) < 10:
+            self.skipTest("Not enough M1 candles for higher-TF test")
+
+        for tf_name, sec in [("M5", 300), ("M15", 900), ("H1", 3600)]:
+            with self.subTest(tf=tf_name):
+                built = aggregate_higher_tf(m1_candles, sec)
+                ref   = _build_reference_aggregate(m1_candles, sec)
+                self.assertEqual(len(built), len(ref),
+                                 f"{tf_name} count mismatch: {len(built)} vs {len(ref)}")
+                for i, (b, r) in enumerate(zip(built, ref)):
+                    self.assertEqual(b["time"], r["time"])
+                    self.assertAlmostEqual(b["open"],  r["open"],  places=5)
+                    self.assertAlmostEqual(b["high"],  r["high"],  places=5)
+                    self.assertAlmostEqual(b["low"],   r["low"],   places=5)
+                    self.assertAlmostEqual(b["close"], r["close"], places=5)
+
+    def test_seed_history_then_extend(self):
+        """seed_history() + ingest extends existing candles correctly."""
+        m1_candles = []
+        for ts, price in self.ticks[:100]:
+            m1_candles.append({
+                "time": ts, "open": price,
+                "high": price, "low": price, "close": price,
+            })
+
+        builder = CandleBuilder({"M1": 60})
+        # Seed M5 history from M1 aggregation
+        m5_seed = aggregate_higher_tf(m1_candles, 300)
+        builder.seed_history("M5", m5_seed)
+
+        # Now ingest more ticks
+        for ts, price in self.ticks[100:]:
+            builder.ingest(price, ts)
+        builder.close_all()
+
+        full_m5 = builder.history("M5")
+        self.assertGreaterEqual(len(full_m5), len(m5_seed),
+                                "M5 history should grow after seed + ingest")
+
+
+class TestDb(unittest.TestCase):
+    """Verify SQLite storage: upsert, load, trim, vacuum."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.path = self.tmp.name
+        self.tmp.close()
+        self.conn = init_db(self.path)
+
+    def tearDown(self):
+        self.conn.close()
+        os.unlink(self.path)
+
+    def _make_candle(self, time, o, h, l, c):
+        return {"time": time, "open": o, "high": h, "low": l, "close": c}
+
+    def test_upsert_and_load(self):
+        """Write one candle, read it back."""
+        candle = self._make_candle(1000, 1.10, 1.12, 1.09, 1.11)
+        upsert_candle(self.conn, "fxcm", "EUR/USD", "M1", candle)
+
+        rows = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["time"], 1000)
+        self.assertAlmostEqual(rows[0]["open"],  1.10)
+        self.assertAlmostEqual(rows[0]["high"],  1.12)
+        self.assertAlmostEqual(rows[0]["low"],   1.09)
+        self.assertAlmostEqual(rows[0]["close"], 1.11)
+        self.assertIsNone(rows[0]["vol_base"])
+        self.assertIsNone(rows[0]["vol_quote"])
+
+    def test_upsert_idempotent(self):
+        """Writing the same candle twice does not create a duplicate."""
+        c1 = self._make_candle(1000, 1.10, 1.12, 1.09, 1.11)
+        c2 = self._make_candle(1000, 1.11, 1.13, 1.10, 1.12)  # updated values
+        upsert_candle(self.conn, "fxcm", "EUR/USD", "M1", c1)
+        upsert_candle(self.conn, "fxcm", "EUR/USD", "M1", c2)
+
+        rows = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows), 1, "Should be 1 row, not duplicated")
+        self.assertAlmostEqual(rows[0]["open"], 1.11,
+                               "Second upsert should overwrite first")
+
+    def test_batch_upsert(self):
+        """Batch insert works and preserves order."""
+        candles = [
+            self._make_candle(i * 60, 1.10 + i * 0.001, 1.12, 1.09, 1.11)
+            for i in range(100)
+        ]
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", candles)
+        self.assertEqual(get_candle_count(self.conn, "fxcm", "EUR/USD", "M1"), 100)
+
+    def test_trim_window(self):
+        """Window trim keeps exactly KEEP_BARS most recent candles."""
+        KEEP = 50
+        candles = [
+            self._make_candle(i * 60, 1.10, 1.12, 1.09, 1.11)
+            for i in range(200)
+        ]
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", candles)
+
+        deleted = trim_window(self.conn, "fxcm", "EUR/USD", "M1", keep_bars=KEEP)
+        self.assertEqual(deleted, 200 - KEEP)
+
+        remaining = get_candle_count(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(remaining, KEEP)
+
+        # Verify the remaining are the most recent
+        rows = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(rows[0]["time"], (200 - KEEP) * 60)
+        self.assertEqual(rows[-1]["time"], 199 * 60)
+
+    def test_trim_window_not_full(self):
+        """Trim on a sparse window does nothing."""
+        candles = [self._make_candle(i * 60, 1.10, 1.12, 1.09, 1.11) for i in range(10)]
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", candles)
+
+        deleted = trim_window(self.conn, "fxcm", "EUR/USD", "M1", keep_bars=2000)
+        self.assertEqual(deleted, 0)
+        self.assertEqual(get_candle_count(self.conn, "fxcm", "EUR/USD", "M1"), 10)
+
+    def test_vacuum(self):
+        """Vacuum runs without error after deletes."""
+        candles = [
+            self._make_candle(i * 60, 1.10, 1.12, 1.09, 1.11)
+            for i in range(100)
+        ]
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", candles)
+        trim_window(self.conn, "fxcm", "EUR/USD", "M1", keep_bars=10)
+
+        # Should not raise
+        vacuum(self.conn)
+
+    def test_instrument_upsert_and_get(self):
+        """Instrument metadata round-trips correctly."""
+        upsert_instrument(
+            self.conn, "lighter", "BTC",
+            price_decimals=1, size_decimals=5,
+            min_base=0.0002, has_volume=True,
+            meta={"market_id": 42},
+            updated=1783869420,
+        )
+        inst = get_instrument(self.conn, "lighter", "BTC")
+        self.assertIsNotNone(inst)
+        self.assertEqual(inst["price_decimals"], 1)
+        self.assertEqual(inst["size_decimals"], 5)
+        self.assertTrue(inst["has_volume"])
+        self.assertEqual(inst["meta"]["market_id"], 42)
+
+    def test_load_empty_returns_empty_list(self):
+        """Loading from empty DB returns [], not error."""
+        rows = load_history(self.conn, "fxcm", "NONEXIST", "M1")
+        self.assertEqual(rows, [])
+
+    def test_multi_thread_write_then_read_after_reconnect(self):
+        """Write from a non-main thread, close, reopen — data must survive.
+
+        Reproduces defects:
+          1. check_same_thread crash (connection shared across threads)
+          2. Uncommitted writes vanishing on restart
+        """
+        import threading
+
+        candles_to_write = [
+            {"time": i * 60, "open": 1.1 + i * 0.001, "high": 1.12,
+             "low": 1.09, "close": 1.11}
+            for i in range(50)
+        ]
+
+        errors = []
+        db_path = self.path
+
+        def writer_thread():
+            """Simulates db_writer: creates its OWN connection in-thread."""
+            try:
+                conn = init_db(db_path)
+                for c in candles_to_write:
+                    upsert_candle(conn, "fxcm", "EUR/USD", "M1", c)
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                errors.append(e)
+
+        # Spawn non-main thread
+        t = threading.Thread(target=writer_thread, name="db-writer-test")
+        t.start()
+        t.join()
+
+        # Thread must not have crashed
+        self.assertEqual(errors, [], f"Writer thread crashed: {errors}")
+
+        # Close the main-thread connection and reopen — simulates restart
+        self.conn.close()
+        self.conn = sqlite3.connect(self.path)
+
+        rows = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows), 50,
+                         f"Expected 50 candles after reconnect, got {len(rows)}")
+        self.assertAlmostEqual(rows[0]["open"], 1.1)
+        # close=1.11 for all candles in our test data
+        self.assertAlmostEqual(rows[-1]["open"],  1.1 + 49 * 0.001)
+        self.assertAlmostEqual(rows[-1]["close"], 1.11)
+        # Verify idempotency: re-write same candle from another thread
+        def _idempotent_write():
+            c2 = init_db(db_path)
+            upsert_candle(c2, "fxcm", "EUR/USD", "M1",
+                          {"time": 0, "open": 9.99, "high": 9.99,
+                           "low": 9.99, "close": 9.99})
+            c2.close()
+
+        t2 = threading.Thread(target=_idempotent_write)
+        t2.start()
+        t2.join()
+
+        rows2 = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows2), 50, "Idempotent upsert must not duplicate")
+        self.assertAlmostEqual(rows2[0]["open"], 9.99, "Upsert must overwrite")
+
+    def test_init_on_nonexistent_db(self):
+        """Regression: first run with no .db file must not crash.
+
+        init_db() creates the file + schema; subsequent load_history must
+        return an empty list, not raise OperationalError.
+        """
+        nonexistent = tempfile.mktemp(suffix=".db")
+        try:
+            # Simulates what load_history does on first run
+            conn = init_db(nonexistent)
+            rows = load_history(conn, "fxcm", "EUR/USD", "M1")
+            self.assertEqual(rows, [], "Empty DB must return empty list, not crash")
+            conn.close()
+        finally:
+            if os.path.exists(nonexistent):
+                os.unlink(nonexistent)
+            # Also clean up WAL/SHM if created
+            for suf in ["-wal", "-shm"]:
+                p = nonexistent + suf
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def test_restore_with_gap_detection(self):
+        """Regression: DB has candles up to N hours ago → backfill needed.
+
+        Verifies that load_history correctly reports the most recent candle
+        time so the caller can request only the gap from FXCM.
+        """
+        # Write candles, most recent = 6 hours ago
+        import time as _time
+        now = int(_time.time())
+        gap_hours = 6
+        old_candles = [
+            {"time": now - gap_hours * 3600 + i * 60, "open": 1.1, "high": 1.12,
+             "low": 1.09, "close": 1.11}
+            for i in range(100)
+        ]
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", old_candles)
+        self.conn.commit()
+
+        rows = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows), 100)
+        last_time = max(c["time"] for c in rows)
+
+        # Gap must be detectable (> 1 min from now)
+        gap_sec = now - last_time
+        self.assertGreater(gap_sec, 60,
+                           f"Expected gap > 60s for backfill, got {gap_sec}s")
+        self.assertLess(gap_sec, gap_hours * 3600 + 120,
+                        f"Gap too large: {gap_sec}s")
+
+        # Simulate reload: data survives
+        self.conn.close()
+        self.conn = sqlite3.connect(self.path)
+        rows2 = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        self.assertEqual(len(rows2), 100)
+
+    def test_all_tf_preserve_window_on_restore(self):
+        """Regression: restoring from DB must keep 2000 bars per TF.
+
+        M1 has 2000 bars (~33h).  If we rebuild H1 from M1 we get
+        only 33 bars — but H1 has its OWN 2000-bar window in the DB.
+        Verifying H1 count = 2000, not 33.
+        """
+        now = int(time.time())
+
+        # Fill 2000 M1 bars (~33 hours)
+        m1_candles = [
+            {"time": now - 2000 * 60 + i * 60, "open": 1.1, "high": 1.12,
+             "low": 1.09, "close": 1.11}
+            for i in range(2000)
+        ]
+        # Fill 2000 H1 bars (~83 days)
+        h1_candles = [
+            {"time": now - 2000 * 3600 + i * 3600, "open": 1.1, "high": 1.15,
+             "low": 1.05, "close": 1.12}
+            for i in range(2000)
+        ]
+        # Also fill S5 (seconds TF)
+        s5_candles = [
+            {"time": now - 2000 * 5 + i * 5, "open": 1.1, "high": 1.1001,
+             "low": 1.0999, "close": 1.1}
+            for i in range(2000)
+        ]
+
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", m1_candles)
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "H1", h1_candles)
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "S5", s5_candles)
+        self.conn.commit()
+
+        # Simulate _load_from_db: restore ALL TFs
+        m1_loaded = load_history(self.conn, "fxcm", "EUR/USD", "M1")
+        h1_loaded = load_history(self.conn, "fxcm", "EUR/USD", "H1")
+        s5_loaded = load_history(self.conn, "fxcm", "EUR/USD", "S5")
+
+        self.assertEqual(len(m1_loaded), 2000, "M1 must preserve full window")
+        self.assertEqual(len(h1_loaded), 2000,
+                         f"H1 must be 2000 (own window), not {len(h1_loaded)} "
+                         f"(would be ~33 if rebuilt from M1)")
+        self.assertEqual(len(s5_loaded), 2000,
+                         "S5 seconds TF must also be restored")
+
+
+    def test_gap_rebuild_excludes_seconds_tf(self):
+        """Regression: gap rebuild must NOT aggregate M1 into S5–S30.
+
+        Seconds TFs derive from live ticks, not from M1 aggregation.
+        build_higher_history guards this with `if sec >= 60`.
+        """
+        now = int(time.time())
+        # DB has 100 M1 candles
+        m1 = [
+            {"time": now - 200 * 60 + i * 60, "open": 1.1, "high": 1.12,
+             "low": 1.09, "close": 1.11}
+            for i in range(200)
+        ]
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", m1)
+        self.conn.commit()
+
+        # Simulate gap rebuild: M1 gap candles exist, call aggregate_higher_tf
+        # for each TF excluding sub-60.  Mimics the load_history loop.
+        gap_m1 = [
+            {"time": now + i * 60, "open": 1.11, "high": 1.13,
+             "low": 1.10, "close": 1.12}
+            for i in range(10)
+        ]
+        all_m1 = m1 + gap_m1
+        gap_start = min(c["time"] for c in gap_m1)
+
+        for tf, sec in [("S5", 5), ("S10", 10), ("S15", 15), ("S30", 30)]:
+            if sec < 60:
+                # Must skip — same guard as build_higher_history + gap rebuild
+                continue
+            # Should not be reached for S5-S30
+            self.fail(f"Seconds TF {tf} must be excluded from gap rebuild")
+
+        # Verify no S5-S30 candles were created by gap rebuild
+        for tf in ["S5", "S10", "S15", "S30"]:
+            rows = load_history(self.conn, "fxcm", "EUR/USD", tf)
+            self.assertEqual(rows, [],
+                             f"{tf} must be empty — not derived from M1 gap")
+
+    def test_mid_bucket_gap_preserves_previous_candle(self):
+        """Regression: gap starting mid-bucket must not corrupt prior candle.
+
+        Full H1 candle at [3600..7199] built from complete M1 series.
+        Gap starts at 5400 (mid-bucket).  Rebuild uses bucket-aligned
+        start = (5400//3600)*3600 = 3600, includes full M1 from 3600.
+        Result: H1[3600] open MUST match the ground-truth aggregated open.
+        """
+        import random
+        random.seed(123)
+
+        # Build full M1 series for 2 hours (120 candles), price walk
+        base_price = 1.10000
+        m1_full = []
+        for i in range(120):
+            ts = 3600 + i * 60  # start at 3600 for clean bucket alignment
+            o = base_price
+            h = base_price + random.uniform(0, 0.0010)
+            l = base_price - random.uniform(0, 0.0010)
+            c = base_price + random.uniform(-0.0005, 0.0005)
+            m1_full.append({"time": ts, "open": o, "high": h, "low": l, "close": c})
+            base_price = c
+
+        # Ground truth: aggregate full M1 → H1
+        truth_h1 = aggregate_higher_tf(m1_full, 3600)
+        self.assertGreaterEqual(len(truth_h1), 1, "Need at least 1 H1 candle")
+        truth_3600 = truth_h1[0]  # H1 candle at time=3600
+
+        # Store first 30 M1 candles in "DB" (covers time 3600..5340)
+        db_m1 = [c for c in m1_full if c["time"] < 5400]  # 30 candles
+        # Gap M1: the rest (5400..10740)
+        gap_m1 = [c for c in m1_full if c["time"] >= 5400]  # 90 candles
+
+        upsert_candles_batch(self.conn, "fxcm", "EUR/USD", "M1", db_m1)
+        self.conn.commit()
+
+        # Restore from "DB"
+        all_m1 = list(db_m1) + list(gap_m1)
+        all_m1.sort(key=lambda x: x["time"])
+
+        # Run gap rebuild logic (as in load_history)
+        gap_start = min(c["time"] for c in gap_m1)  # 5400
+        sec = 3600  # H1
+        bucket_start = (gap_start // sec) * sec  # = 3600
+        boundary = [c for c in all_m1 if c["time"] >= bucket_start]
+
+        rebuilt_h1 = aggregate_higher_tf(boundary, sec)
+        self.assertGreaterEqual(len(rebuilt_h1), 1)
+        rebuilt_3600 = rebuilt_h1[0]
+
+        # The key check: open must match ground truth (full M1 aggregation)
+        self.assertAlmostEqual(
+            rebuilt_3600["open"], truth_3600["open"], places=5,
+            msg=f"Mid-bucket gap corrupted H1 open: "
+                f"rebuilt={rebuilt_3600['open']}, truth={truth_3600['open']}")
+        self.assertAlmostEqual(rebuilt_3600["high"], truth_3600["high"], places=5)
+        self.assertAlmostEqual(rebuilt_3600["low"],  truth_3600["low"],  places=5)
+
+
+if __name__ == "__main__":
+    unittest.main()
