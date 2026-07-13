@@ -110,9 +110,20 @@ See [intrade_bot_plan.md](intrade_bot_plan.md) for full plan.
 
 Summary: bot listens to our WebSocket signals (Asia∩TIGHT) and opens binary option trades on intrade.bar via HTTP requests (no official API — reverse-engineered from browser traffic).
 
-## Downtime window (safe to edit)
+## Downtime window — ОТМЕНЕНО (2026-07-14)
 
-- 21:00–23:00 UTC daily
-- 21:00 Fri – 23:00 Sun UTC
-- Cron handles stop/start of the `chart` service automatically (crontab is in **local time = UTC+5**: stop at 02:00, start at 04:00 local)
+Ежедневного окна простоя **больше нет**: крон-остановка сервиса `chart` снята.
+
+Причина: история свечей теперь живёт в SQLite (`market.db`, Фаза 1), и каждая
+остановка сервера — это дыра в секундных ТФ (S5–S30 копятся только с живых тиков,
+из M1 не выводятся). Крон был главным источником таких дыр — по два часа в сутки.
+
+- Строка `0 2 * * 2-6 systemctl stop chart` в crontab **закомментирована**.
+- Строка `0 4 * * 1-5 systemctl start chart` **оставлена** как страховка: если
+  процесс упадёт ночью, утренний `start` его подберёт. Снять её можно будет после
+  Фазы 4 (watchdog + health-эндпоинт).
+- Крон — в **локальном времени = UTC+5**.
+
+Правки живых файлов теперь согласовывать с владельцем по времени, а не полагаться
+на окно.
 
