@@ -61,9 +61,11 @@ TF_SECONDS = {
 # Таймфреймы, которые грузятся напрямую у брокера (а не агрегацией из M1).
 # D1: из 10000 M1-баров (~7 дней) получилось бы всего ~7 дневных свечей.
 # H4: из тех же ~7 дней вышло бы лишь ~41 бар — тоже слишком коротко.
-# Поэтому оба тянем отдельными запросами.
+# H1: из тех же ~7 дней вышло бы ~167 баров, а индикаторам (js/indicators.js,
+#     _tailLen) нужно 300–400 хвоста. 90 дней дают ~2160 баров.
 # Ключ = наше имя TF, значение = (строка TF ForexConnect, глубина истории в днях).
 DIRECT_LOAD_TF = {
+    "H1": ("H1", 90),
     "H4": ("H4", 90),
     "D1": ("D1", 400),
 }
@@ -469,22 +471,23 @@ def build_higher_history(symbol):
 
 
 def db_writer():
-    """Background thread: persists candles from db_queue to SQLite.
+    """Daemon thread: persists closed candles from db_queue to SQLite.
 
     Creates its OWN sqlite3.Connection inside this thread — avoids
     ProgrammingError from cross-thread access (check_same_thread=True).
-    Trims the retention window every DB_TRIM_EVERY writes.
+    Each upsert_candle commits on its own (`with conn:`), so a hard kill
+    of the process loses nothing already dequeued.
+
+    Trims the retention window every DB_TRIM_EVERY writes rather than on
+    every candle — the trim is a SELECT+DELETE per (symbol, tf).
     """
     conn = init_db(DB_PATH)
     count = 0
 
     while True:
-        item = db_queue.get()
-        if item is None:          # shutdown sentinel
-            break
+        symbol, tf, candle = db_queue.get()
 
         try:
-            symbol, tf, candle = item
             upsert_candle(conn, "fxcm", symbol, tf, candle)
             count += 1
 
@@ -492,23 +495,15 @@ def db_writer():
                 for sym in SYMBOLS:
                     for tf_name in TF_SECONDS:
                         trim_window(conn, "fxcm", sym, tf_name, KEEP_BARS)
-                conn.commit()
         except Exception as e:
             print(f"[db_writer] ERROR: {e} — candle dropped, continuing")
 
-    # Final flush on shutdown
-    for sym in SYMBOLS:
-        for tf_name in TF_SECONDS:
-            trim_window(conn, "fxcm", sym, tf_name, KEEP_BARS)
-    conn.commit()
-    conn.close()
-
 
 def _enqueue_closed(symbol, tf, candle):
-    """Enqueue a closed candle for persistence (1-second timeout).
+    """Enqueue a closed candle for persistence. Never blocks.
 
-    If the queue is full (db_writer stalled / crashed), the tick is dropped
-    rather than blocking the FXCM callback thread.
+    If the queue is full (db_writer stalled or crashed), the candle is
+    dropped: the FXCM callback thread must never stall on the DB.
 
     Args:
         symbol: Trading pair.
@@ -516,10 +511,9 @@ def _enqueue_closed(symbol, tf, candle):
         candle: Closed candle dict.
     """
     try:
-        db_queue.put((symbol, tf, candle), timeout=1.0)
-    except Exception:
-        # queue.Full or queue shutdown — drop, tick thread must not stall
-        pass
+        db_queue.put_nowait((symbol, tf, candle))
+    except queue.Full:
+        print(f"[db_queue] FULL — dropped {symbol} {tf} @ {candle['time']}")
 
 
 def _load_from_db(symbol):
