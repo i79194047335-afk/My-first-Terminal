@@ -208,7 +208,15 @@ def init_symbol(symbol):
     symbols_state[symbol] = {
         "tf_data":        {tf: [] for tf in TF_SECONDS},
         "current_bucket": {tf: None for tf in TF_SECONDS},
-        "current_candle": {tf: None for tf in TF_SECONDS}
+        "current_candle": {tf: None for tf in TF_SECONDS},
+        # Смещение сетки ТФ относительно полуночи UTC, в секундах.
+        # 0 для всех ТФ, которые мы режем сами. Для DIRECT_LOAD_TF берётся из
+        # последнего бара брокера: FXCM отдаёт H4 по 01/05/09/13/17/21 UTC
+        # (привязка к закрытию Нью-Йорка, 17:00 UTC), D1 — по 21:00 UTC.
+        # Проверено живым запросом 2026-07-14. Без этого наша нарезка тиков
+        # строила вторую, UTC-сетку (00/04/08/…), и в БД лежали две
+        # несовместимые сетки вперемешку — график ломался.
+        "tf_offset":      {tf: 0 for tf in TF_SECONDS}
     }
     market_engines[symbol]    = MarketEngine()
     market_structures[symbol] = StructureEngine()
@@ -282,6 +290,54 @@ def to_timestamp(dt):
 # ================= HISTORY =================
 
 
+def _bucket_of(symbol, tf, ts):
+    """Bucket start time for a tick, honouring the provider's grid offset.
+
+    Most TFs are aligned to UTC midnight, so the offset is 0 and this is the
+    plain `ts // sec * sec`. The broker-loaded ones (DIRECT_LOAD_TF) are not:
+    FXCM aligns H4 to the trading day (01/05/09/13/17/21 UTC) and D1 to 21:00
+    UTC. Slicing those by UTC midnight produced a second, incompatible grid.
+
+    Args:
+        symbol: Trading pair.
+        tf:     Timeframe string.
+        ts:     Tick timestamp, unix seconds.
+
+    Returns:
+        Unix seconds of the bucket start this tick belongs to.
+    """
+    sec    = TF_SECONDS[tf]
+    offset = symbols_state[symbol]["tf_offset"].get(tf, 0)
+    return ((ts - offset) // sec) * sec + offset
+
+
+def detect_tf_offsets(symbol):
+    """Learn each broker-loaded TF's grid offset from its last closed bar.
+
+    Read from the data itself rather than hardcoded: FXCM's D1 offset shifts
+    between 21:00 and 22:00 UTC across DST, and a hardcoded constant would
+    silently rot twice a year.
+
+    Args:
+        symbol: Trading pair.
+
+    Returns:
+        None. Fills state["tf_offset"][tf] in place for DIRECT_LOAD_TF.
+    """
+    state   = symbols_state[symbol]
+    tf_data = state["tf_data"]
+
+    for tf in DIRECT_LOAD_TF:
+        bars = tf_data.get(tf) or []
+        if not bars:
+            continue
+        sec    = TF_SECONDS[tf]
+        offset = bars[-1]["time"] % sec
+        state["tf_offset"][tf] = offset
+        if offset:
+            print(f"Grid [{symbol}] {tf}: offset {offset // 3600}h from UTC midnight")
+
+
 def seed_current_candles(symbol):
     """Restore the still-open candle of the current bucket for every TF >= 1m.
 
@@ -321,7 +377,7 @@ def seed_current_candles(symbol):
         if sec < 60:
             continue
 
-        bucket = (now // sec) * sec
+        bucket = _bucket_of(symbol, tf, now)
         bars   = [c for c in m1 if c["time"] >= bucket]
 
         if not bars:
@@ -500,8 +556,10 @@ def load_history():
 
             _persist_all(symbol)
 
-    # Незакрытая свеча текущего бакета — из M1, а не с первого живого тика.
+    # Порядок важен: сначала узнаём сетку брокера, потом собираем по ней
+    # незакрытую свечу. Наоборот — свеча сядет на UTC-сетку, мимо истории.
     for symbol in SYMBOLS:
+        detect_tf_offsets(symbol)
         seed_current_candles(symbol)
 
     print("История загружена.")
@@ -674,7 +732,9 @@ def process_tick(symbol, price, ts):
     for tf, sec in TF_SECONDS.items():
 
 
-        bucket = (ts // sec) * sec
+        # Сетка провайдера, не UTC-полночь: у FXCM H4 идёт по 01/05/09/13/17/21,
+        # D1 — по 21:00. Иначе живая нарезка плодит вторую сетку поверх брокерской.
+        bucket = _bucket_of(symbol, tf, ts)
 
 
         if current_bucket[tf] is None:
