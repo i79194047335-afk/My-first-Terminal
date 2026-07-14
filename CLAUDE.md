@@ -8,13 +8,14 @@ Web trading terminal (TradingView-like), browser-based. Displays real-time tick 
 
 ## Stack
 
-- **Frontends (two, same backend):**
-  - [index_split.html](index_split.html) — original UI
-  - [index.html](index.html) — parallel UI with TradingView-style indicators (`js/indicators.js`)
-  - Both served by systemd service `chart-frontend` (`python3.7 -m http.server 8082`) and both connect to the same WebSocket (`ws://...:8765`)
+- **Frontend:** [index.html](index.html) — UI with TradingView-style indicators (`js/indicators.js`),
+  served by systemd service `chart-frontend` (`python3.7 -m http.server 8082`), connects to `ws://...:8765`.
+  `index_split.html` (старый UI) убран в `archive/` в Фазе 2.2.
 - **Backend:** [server.py](server.py) — Python WebSocket server (port 8765), runs as systemd service `chart`
 - **Broker:** FXCM (ForexConnect Python SDK) — live tick streaming, no polling
-- **Data storage:** JSON files on disk (market_memory.json, signal_log.json, signal_stats.json)
+- **Data storage:** SQLite `market.db` (свечи, Фаза 1) + `data/*.csv` (сырые тики).
+  JSON-хранилища сигнального контура (`market_memory.json`, `signal_log.json`,
+  `signal_stats.json`) — в `archive/old_data/`, см. Фазу 2.2.
 - **Python version:** 3.7 (see `__pycache__`)
 
 ## Architecture — data flow
@@ -24,21 +25,29 @@ FXCM Broker ──(push)──> server.py
                           │
                           ├─ tick_writer() ──> data/*.csv (one file per symbol/day)
                           ├─ MarketEngine.update_tick() ──> velocity, pressure, micro_trend, volatility
-                          ├─ StructureEngine.update() ──> near_high / near_low detection
-                          ├─ signal_engine.evaluate_signal() ──> UP/DOWN/SKIP decision
-                          ├─ signal_tracker (store + resolve at T+240s) ──> signal_log.json
-                          ├─ pattern_memory (store + resolve at T+240s) ──> market_memory.json
-                          └─ WebSocket ──(push)──> Browser (index_split.html + index.html)
+                          ├─ db_writer() ──> market.db (закрытые свечи, окно 2000 баров/ТФ)
+                          └─ WebSocket ──(push)──> Browser (index.html)
+
+                          [ выключено флагом SIGNALS_ENABLED=False, Фаза 2.1:
+                            StructureEngine → signal_engine → signal_tracker → pattern_memory ]
 ```
 
-Key: `server.py:process_tick()` is the central dispatch — every tick flows through market engine → structure engine → signal engine → pattern memory → tracker → WebSocket broadcast.
-**Signal filter active:** `signal_engine.ASIA_TIGHT_ONLY=True` — only Asia session + tight edge (pos≤0.05) signals are sent. SKIP signals are silenced (commented out in server.py).
+Key: `server.py:process_tick()` is the central dispatch — every tick flows through market engine →
+candle slicing → db_writer → WebSocket broadcast.
+
+**Сигнальный контур ВЫКЛЮЧЕН (Фаза 2.1):** `server.py:SIGNALS_ENABLED = False`. Код движков не удалён,
+возврат = флаг в `True`. Под флагом не только вызов в `process_tick`, но и **импорт** `pattern_memory` /
+`signal_tracker`: оба читают свои JSON на уровне модуля (~100 МБ RSS), а `pattern_memory` вешает
+`atexit`-сохранение (перезапись 73-МБ файла при каждой остановке). Их данные — в `archive/old_data/`.
 
 ## Python files (backend)
 
 - [server.py](server.py) — WebSocket server + FXCM stream listener. Owns per-symbol state (`symbols_state`) and the main tick processing loop. Does NOT use asyncio for tick processing — ticks arrive via FXCM callback in a daemon thread.
 - [market_engine.py](market_engine.py) — `MarketEngine` class. Computes velocity (smoothed price change over 3s window), tick pressure/imbalance, acceleration, tick rate, micro-trend, HTF trend (M5, 30 candles), range position, and volatility. Returns analysis dict. Has a state-change filter (skips if delta < 0.05 across key metrics).
 - [structure_engine.py](structure_engine.py) — `StructureEngine` class. Tracks 300 recent prices, detects when price is within 15% of range high/low (`near_high`/`near_low`).
+Модули ниже (`structure_engine`, `signal_engine`, `signal_tracker`, `pattern_memory`) **не исполняются**
+с Фазы 2.1 — `SIGNALS_ENABLED = False`. Описания сохранены на случай возврата контура.
+
 - [signal_engine.py](signal_engine.py) — Scoring-based signal generator. Hard filters (minute ±3 of hour change, low volatility, anomalous vol_ratio > 3.0), then accumulates UP/DOWN scores from contrarian factors (range position, velocity edge, contrarian pressure, micro-trend exhaustion, London session amplification) plus a pattern-memory lookup via `market_memory.json`. Returns `SignalResult` dataclass. **Reweighted from live-log validation:** hourly bias and symbol bias removed (no live edge), velocity-fast→UP removed, score threshold ≥4 (UP) / ≥5 (DOWN). **Asia∩TIGHT filter active (2026-07-04):** `ASIA_TIGHT_ONLY=True` — only fires signals in Asia session (0-8 UTC) AND at the tightest range edge (pos≤0.05). Forward 18d: WR 63.8% (n=177). Full log: 60.1% (n=1651). CSCV PBO=0.009. ~11 signals/day. Откат: `ASIA_TIGHT_ONLY=False`.
 - [signal_tracker.py](signal_tracker.py) — Tracks live signals. Stores signal at creation time, resolves after 240s (checks if price moved in signal direction, ≥1 pip threshold). Writes `signal_log.json`, computes aggregate stats to `signal_stats.json`. Module-level `_active_signals` list.
 - [pattern_memory.py](pattern_memory.py) — Pattern storage for learning. Stores patterns with T+60s entry delay, T+240s expiry, 2-pip noise filter. Checks news calendar (`data_loaders/news_calendar.csv`) for high-impact events in window. Writes `market_memory.json`.
@@ -56,11 +65,23 @@ Key: `server.py:process_tick()` is the central dispatch — every tick flows thr
 
 ## Data files (never delete)
 
-- `market_memory.json` — resolved pattern history (for signal_engine memory lookups)
-- `signal_log.json` — all resolved live signals with outcomes
-- `signal_stats.json` — aggregate signal statistics
-- `data/*.csv` — tick data (one file per symbol per day, e.g. `EURUSD_20260525.csv`)
+- `market.db` — SQLite: свечи, окно 2000 баров на каждый (provider, symbol, tf). Боевой файл.
+- `data/*.csv` — tick data (one file per symbol per day, e.g. `EURUSD_20260525.csv`).
+  Вечный архив: из тиков M1 восстановим точно, из БД — уже нет.
 - `vel_log/velocity_*.csv` — velocity logs per day
+- `briefing.json` — брифинг сессии, пишет `pre_session_brief.py` (крон), читает и шлёт на фронт `server.py`
+
+Заархивировано в Фазе 2.2 (`archive/old_data/`, **не удалять**): `market_memory.json`,
+`signal_log.json`, `signal_stats.json`, `session_bias.json`, `briefing_context.json`, `History/`.
+
+## Брифинг
+
+`pre_session_brief.py` — крон 3×/сутки (04/12/17 локального = UTC+5), пред-Азия / пред-Лондон / пред-NY.
+RSS + `data_loaders/news_calendar.csv` + техническая картина **из `market.db`** (не из `market_memory.json`
+— Фаза 2.1) → DeepSeek → `briefing.json`. Требует `DEEPSEEK_API_KEY` в `.env`.
+`pre_asia_brief.py` — старая версия того же, в кроне **нет**, не используется.
+
+Известное: RSS-фиды наполовину мертвы (Reuters закрыл публичные RSS) — новостей приходит мало.
 
 ## Broker connection
 
