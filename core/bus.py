@@ -1,0 +1,513 @@
+"""
+Внутренняя шина: фиды → хаб (WebSocket на 127.0.0.1:8766).
+
+Зачем: forexconnect требует Python 3.7, SDK Lighter — 3.8+. В одном процессе
+они несовместимы, поэтому фиды живут отдельными процессами и толкают тики хабу
+через локальный WebSocket. Бонус: падение одного фида не роняет другой.
+
+    hub.py            ──> BusServer  (слушает 8766, режет свечи, пишет SQLite)
+    feeds/fxcm_feed   ──> BusClient  (py3.7, тики от брокера)
+    feeds/lighter_feed──> BusClient  (py3.10)
+
+Контракт (ROADMAP, Фаза 2.4):
+
+    {"type":"tick","provider":"lighter","symbol":"BTC",
+     "ts":1783869420,"price":64132.6,"size":0.0123}
+
+    {"type":"instruments","provider":"lighter","data":[
+     {"symbol":"BTC","price_decimals":1,"size_decimals":5,
+      "min_base":0.0002,"has_volume":true,"meta":{}}]}
+
+FXCM шлёт то же с "size": null. ВРЕМЯ ВЕЗДЕ В СЕКУНДАХ — Lighter отдаёт
+миллисекунды, конвертация на границе фида; validate() ловит мс как ошибку.
+
+Совместимость: файл обязан работать и на py3.7 (websockets 11), и на py3.10
+(websockets 16) — используется только общее подмножество API (websockets.serve /
+websockets.connect, handler с одним аргументом, `async for` по сокету).
+"""
+
+import asyncio
+import json
+import threading
+import time
+
+import websockets
+
+BUS_HOST = "127.0.0.1"
+BUS_PORT = 8766
+BUS_URL  = "ws://127.0.0.1:8766"
+
+# Сетевые сбои, после которых клиент переподключается. CancelledError сюда
+# попасть не должен: на py3.7 он наследуется от Exception (в 3.8+ — от
+# BaseException), поэтому широкий `except Exception` проглотил бы отмену задачи.
+_NET_ERRORS = (websockets.WebSocketException, OSError, asyncio.TimeoutError)
+
+
+class BusError(Exception):
+    """Сообщение не соответствует контракту шины."""
+
+
+# ── конструкторы сообщений ─────────────────────────────────────────────
+
+def make_tick(provider, symbol, ts, price, size=None):
+    """Собрать сообщение 'tick'.
+
+    Args:
+        provider: Источник ("fxcm", "lighter").
+        symbol:   Инструмент ("EUR/USD", "BTC").
+        ts:       Время в unix-СЕКУНДАХ (int/float).
+        price:    Цена (mid для форекса, last trade для крипты).
+        size:     Объём сделки или None, если провайдер его не даёт (FXCM).
+
+    Returns:
+        Dict сообщения шины.
+    """
+    return {
+        "type":     "tick",
+        "provider": provider,
+        "symbol":   symbol,
+        "ts":       ts,
+        "price":    price,
+        "size":     size,
+    }
+
+
+def make_instruments(provider, data):
+    """Собрать сообщение 'instruments' (метаданные инструментов).
+
+    Args:
+        provider: Источник.
+        data:     Список dict'ов: symbol, price_decimals, size_decimals,
+                  min_base, has_volume, meta.
+
+    Returns:
+        Dict сообщения шины.
+    """
+    return {
+        "type":     "instruments",
+        "provider": provider,
+        "data":     data,
+    }
+
+
+def _is_number(value):
+    """Число ли это (bool — не число).
+
+    isinstance(True, int) == True, поэтому bool отсекается явно: иначе
+    price=True прошёл бы валидацию как цена 1.0.
+
+    Args:
+        value: Проверяемое значение.
+
+    Returns:
+        True, если int/float и не bool.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def validate(msg):
+    """Проверить сообщение на соответствие контракту шины.
+
+    Args:
+        msg: Разобранный dict сообщения.
+
+    Returns:
+        Тот же msg, если всё в порядке.
+
+    Raises:
+        BusError: с описанием того, что именно нарушено.
+    """
+    if not isinstance(msg, dict):
+        raise BusError("сообщение должно быть dict, получено %s" % type(msg).__name__)
+
+    mtype = msg.get("type")
+    if mtype not in ("tick", "instruments"):
+        raise BusError("неизвестный type: %r (ожидается tick/instruments)" % (mtype,))
+
+    provider = msg.get("provider")
+    if not isinstance(provider, str) or not provider.strip():
+        raise BusError("пустой или нестроковый provider: %r" % (provider,))
+
+    if mtype == "tick":
+        symbol = msg.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise BusError("tick: пустой symbol: %r" % (symbol,))
+
+        ts = msg.get("ts")
+        if not _is_number(ts):
+            raise BusError("tick[%s]: ts не число: %r" % (symbol, ts))
+        if ts <= 0:
+            raise BusError("tick[%s]: ts должен быть > 0, получено %r" % (symbol, ts))
+        if ts > 1e11:
+            # 1e11 сек ≈ год 5138 — столько не бывает, значит это миллисекунды.
+            raise BusError(
+                "tick[%s]: ts=%r похож на МИЛЛИСЕКУНДЫ; конвертируй на границе "
+                "фида (ts // 1000) — внутри шины время только в секундах" % (symbol, ts)
+            )
+
+        price = msg.get("price")
+        if not _is_number(price):
+            raise BusError("tick[%s]: price не число: %r" % (symbol, price))
+        if price <= 0:
+            raise BusError("tick[%s]: price должен быть > 0, получено %r" % (symbol, price))
+
+        size = msg.get("size")
+        if size is not None:
+            if not _is_number(size):
+                raise BusError("tick[%s]: size не число и не None: %r" % (symbol, size))
+            if size < 0:
+                raise BusError("tick[%s]: size должен быть >= 0, получено %r" % (symbol, size))
+
+    else:
+        data = msg.get("data")
+        if not isinstance(data, list):
+            raise BusError("instruments: data должен быть списком, получено %s"
+                           % type(data).__name__)
+        for i, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise BusError("instruments: data[%d] не dict: %s" % (i, type(item).__name__))
+            sym = item.get("symbol")
+            if not isinstance(sym, str) or not sym.strip():
+                raise BusError("instruments: data[%d] без symbol: %r" % (i, sym))
+
+    return msg
+
+
+# ── сторона хаба ───────────────────────────────────────────────────────
+
+class BusServer:
+    """Серверная сторона шины — живёт в хабе, слушает 127.0.0.1:8766.
+
+    Принимает подключения фидов, валидирует входящие сообщения и отдаёт их
+    синхронному колбэку. Битое сообщение НЕ роняет сервер и не рвёт соединение:
+    один кривой тик не должен стоить нам всего потока данных.
+    """
+
+    def __init__(self, on_message, host=BUS_HOST, port=BUS_PORT):
+        """Создать сервер шины.
+
+        Args:
+            on_message: callable(dict) — синхронный обработчик валидного
+                        сообщения, вызывается в потоке event loop.
+            host:       Адрес прослушивания.
+            port:       Порт прослушивания.
+
+        Returns:
+            None.
+        """
+        self._on_message = on_message
+        self._host       = host
+        self._port       = port
+        self._server     = None
+        self._received   = 0
+        self._dropped    = 0
+        self._clients    = 0
+
+    async def _handler(self, ws):
+        """Обслужить одно подключение фида.
+
+        Args:
+            ws: WebSocket-соединение (один аргумент — общий для websockets 11/16).
+
+        Returns:
+            None.
+        """
+        self._clients += 1
+        try:
+            async for raw in ws:
+                try:
+                    msg = validate(json.loads(raw))
+                except (ValueError, BusError) as err:
+                    # ValueError покрывает json.JSONDecodeError.
+                    self._dropped += 1
+                    print("[bus] отброшено: %s" % err)
+                    continue
+
+                self._received += 1
+                try:
+                    self._on_message(msg)
+                except Exception as err:
+                    # Ошибка ПОТРЕБИТЕЛЯ (хаба), не шины: логируем и живём дальше.
+                    self._dropped += 1
+                    print("[bus] on_message упал: %r" % (err,))
+        except websockets.ConnectionClosed:
+            print("[bus] фид отключился")
+        finally:
+            self._clients -= 1
+
+    async def start(self):
+        """Забиндить порт и вернуть управление (сервер уже принимает фиды).
+
+        Отдельно от serve(), потому что вызывающему нужно ЗНАТЬ момент, когда
+        порт занят: хаб рядом поднимает второй WS-сервер (для браузера), а фид,
+        стартовавший раньше хаба, иначе получит ConnectionRefused и уйдёт в
+        backoff на секунду.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        self._server = await websockets.serve(self._handler, self._host, self._port)
+        print("[bus] слушаю %s:%d" % (self._host, self._port))
+
+    async def serve(self):
+        """Поднять сервер и работать вечно.
+
+        Args:
+            None.
+
+        Returns:
+            None (не возвращается штатно; завершается отменой задачи).
+        """
+        await self.start()
+        await asyncio.Future()
+
+    async def close(self):
+        """Закрыть слушающий сокет (для тестов и штатной остановки).
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+    @property
+    def stats(self):
+        """Счётчики сервера.
+
+        Args:
+            None.
+
+        Returns:
+            Dict: received (принято валидных), dropped (отброшено),
+            clients (подключённых фидов сейчас).
+        """
+        return {
+            "received": self._received,
+            "dropped":  self._dropped,
+            "clients":  self._clients,
+        }
+
+
+# ── сторона фида ───────────────────────────────────────────────────────
+
+class BusClient:
+    """Клиентская сторона шины — живёт в фиде, шлёт тики хабу.
+
+    Потокобезопасен по отправке: тики FXCM приходят в ДЕМОН-ПОТОКЕ (колбэк
+    брокера), а не в asyncio, поэтому send_threadsafe() можно звать из любого
+    потока.
+
+    Очередь ОГРАНИЧЕНА и при переполнении выбрасывает САМОЕ СТАРОЕ сообщение:
+    рыночные данные протухают, и копить их во время обрыва бессмысленно —
+    лучше потерять старые тики, чем съесть память.
+    """
+
+    def __init__(self, provider, url=BUS_URL, max_queue=10000):
+        """Создать клиента шины.
+
+        Args:
+            provider:  Имя фида ("fxcm", "lighter").
+            url:       Адрес хаба.
+            max_queue: Потолок очереди на время обрыва связи.
+
+        Returns:
+            None.
+        """
+        self._provider   = provider
+        self._url        = url
+        self._max_queue  = max_queue
+
+        # Очередь и loop создаются ЛЕНИВО, уже внутри run(). На py3.7
+        # asyncio.Queue() запоминает event loop в момент СОЗДАНИЯ, а asyncio.run()
+        # заводит новый — и первый же await get() на пустой очереди (штатное
+        # состояние между тиками) падает с "got Future attached to a different
+        # loop". На py3.10 этого не происходит, т.е. баг был бы невидим в тестах
+        # на 3.10 и выстрелил бы только в проде на фиде FXCM.
+        self._queue = None
+        self._loop  = None
+
+        # Сообщение, снятое с очереди, но ещё не подтверждённое отправкой.
+        # Без него тик, пришедший в момент обрыва, терялся бы навсегда: _pump
+        # висит на queue.get(), об оборванном сокете не знает, и первый же
+        # ws.send() падает уже ПОСЛЕ того, как сообщение снято с очереди.
+        self._pending = None
+
+        self._sent       = 0
+        self._dropped    = 0
+        self._reconnects = 0
+        self._connected  = False
+
+    # -- отправка ------------------------------------------------------
+
+    def send_threadsafe(self, msg):
+        """Поставить сообщение в очередь отправки. Можно звать из любого потока.
+
+        Невалидное сообщение отбрасывается (счётчик dropped), исключение наружу
+        не летит: колбэк брокера не должен падать из-за одного кривого тика.
+        Если run() ещё не стартовал — сообщение тоже отбрасывается.
+
+        Args:
+            msg: Dict сообщения (результат make_tick / make_instruments).
+
+        Returns:
+            True, если сообщение принято в очередь; иначе False.
+        """
+        try:
+            validate(msg)
+        except BusError as err:
+            self._dropped += 1
+            print("[bus:%s] не отправлено: %s" % (self._provider, err))
+            return False
+
+        loop = self._loop
+        if loop is None or self._queue is None:
+            self._dropped += 1
+            return False
+
+        loop.call_soon_threadsafe(self._enqueue, msg)
+        return True
+
+    def _enqueue(self, msg):
+        """Положить сообщение в очередь, вытеснив старейшее при переполнении.
+
+        Исполняется строго в потоке event loop (через call_soon_threadsafe),
+        поэтому get_nowait/put_nowait здесь безопасны.
+
+        Args:
+            msg: Dict сообщения.
+
+        Returns:
+            None.
+        """
+        while self._queue.full():
+            try:
+                self._queue.get_nowait()
+                self._dropped += 1
+            except asyncio.QueueEmpty:
+                break
+        try:
+            self._queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            self._dropped += 1
+
+    # -- цикл соединения -----------------------------------------------
+
+    async def run(self):
+        """Вечный цикл: подключиться к хабу, слать очередь, переподключаться.
+
+        Backoff растёт 1→2→4→…→30 с и сбрасывается после успешного коннекта.
+
+        Args:
+            None.
+
+        Returns:
+            None (не возвращается штатно; завершается отменой задачи).
+        """
+        self._loop  = asyncio.get_event_loop()
+        self._queue = asyncio.Queue(maxsize=self._max_queue)
+
+        backoff = 1
+        while True:
+            try:
+                async with websockets.connect(self._url) as ws:
+                    self._connected = True
+                    backoff = 1
+                    print("[bus:%s] подключён к %s" % (self._provider, self._url))
+                    await self._pump(ws)
+            except _NET_ERRORS as err:
+                print("[bus:%s] обрыв (%s), переподключение через %d с"
+                      % (self._provider, type(err).__name__, backoff))
+            finally:
+                if self._connected:
+                    self._reconnects += 1
+                self._connected = False
+
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    async def _pump(self, ws):
+        """Гнать сообщения из очереди в сокет, пока соединение живо.
+
+        Сообщение считается отправленным только после успешного ws.send().
+        Если send упал — оно остаётся в _pending и уйдёт первым же делом после
+        переподключения, не ломая порядок тиков.
+
+        Args:
+            ws: Открытое WebSocket-соединение.
+
+        Returns:
+            None. Выходит через исключение ConnectionClosed при обрыве.
+        """
+        while True:
+            if self._pending is None:
+                self._pending = await self._queue.get()
+
+            await ws.send(json.dumps(self._pending))
+            self._sent += 1
+            self._pending = None
+
+    @property
+    def stats(self):
+        """Счётчики клиента.
+
+        Args:
+            None.
+
+        Returns:
+            Dict: sent, dropped, reconnects, connected, queued.
+        """
+        return {
+            "sent":       self._sent,
+            "dropped":    self._dropped,
+            "reconnects": self._reconnects,
+            "connected":  self._connected,
+            "queued":     self._queue.qsize() if self._queue is not None else 0,
+        }
+
+
+# ── самопроверка: python3.7 core/bus.py / python3.10 core/bus.py ───────
+
+if __name__ == "__main__":
+    received = []
+
+    async def _demo():
+        """Поднять шину, послать тики из отдельного потока, показать stats."""
+        server = BusServer(received.append)
+        client = BusClient("demo", max_queue=5)
+
+        await server.start()  # порт занят ДО старта клиента — без гонки
+        client_task = asyncio.ensure_future(client.run())
+        await asyncio.sleep(0.3)
+
+        def _feed():
+            """Демон-поток: так же, как колбэк FXCM, шлёт тики не из asyncio."""
+            client.send_threadsafe(make_tick("demo", "EUR/USD", time.time(), 1.1735))
+            client.send_threadsafe(make_tick("demo", "BTC", time.time(), 64132.6, 0.0123))
+            client.send_threadsafe(make_instruments("demo", [{"symbol": "BTC"}]))
+            client.send_threadsafe(make_tick("demo", "BTC", time.time() * 1000, 1.0))  # мс → дроп
+
+        threading.Thread(target=_feed, daemon=True).start()
+        await asyncio.sleep(0.5)
+
+        print("server:", server.stats)
+        print("client:", client.stats)
+        print("принято:", len(received), "сообщений")
+        assert len(received) == 3, "ожидалось 3 валидных сообщения, а не %d" % len(received)
+        assert client.stats["sent"] == 3, "клиент должен был отправить 3"
+        assert client.stats["dropped"] == 1, "тик в миллисекундах должен быть отброшен"
+        assert server.stats["clients"] == 1, "фид должен быть подключён"
+        print("OK")
+
+        client_task.cancel()
+        await asyncio.sleep(0)
+        await server.close()
+
+    asyncio.get_event_loop().run_until_complete(_demo())
