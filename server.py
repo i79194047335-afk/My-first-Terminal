@@ -352,9 +352,14 @@ def seed_current_candles(symbol):
     This rebuilds that forming bar from the M1 candles already in memory
     (SQLite history + the gap backfilled from the broker).
 
+    Its open is the CLOSE OF THE PREVIOUS CLOSED BAR of the same TF — exactly
+    what the live path does for sec >= 60 (`prev_close` in process_tick). Taking
+    the open of the bucket's first M1 instead left the restored bar hanging with
+    a gap from the one before it. High/low include the open, again matching live.
+
     Seconds TFs (S5-S30) are skipped on purpose: an M1 candle is too coarse to
-    reconstruct their buckets. They accumulate from live ticks — agreed, not a
-    defect (see LOG.md, Фаза 1).
+    reconstruct their buckets, and in the live path they open from the first tick
+    anyway — a gap there is expected, not a defect (see LOG.md, Фаза 1).
 
     Args:
         symbol: Trading pair, e.g. "EUR/USD".
@@ -380,15 +385,40 @@ def seed_current_candles(symbol):
         bucket = _bucket_of(symbol, tf, now)
         bars   = [c for c in m1 if c["time"] >= bucket]
 
-        if not bars:
+        # open = close последней ЗАКРЫТОЙ свечи этого ТФ, как в живом потоке
+        # (process_tick, ветка sec >= 60). Иначе после рестарта свеча начиналась
+        # от открытия первой минутки бакета и висела с разрывом от предыдущей.
+        # Строго раньше bucket: в tf_data[tf] может лежать бар ТЕКУЩЕГО бакета
+        # (H4/D1 грузятся у брокера напрямую и отдают его незакрытым) — это тот
+        # же бар, который мы сейчас пересобираем, его close брать нельзя.
+        closed     = tf_data.get(tf) or []
+        past       = [c for c in closed if c["time"] < bucket]
+        prev_close = past[-1]["close"] if past else None
+
+        # Для M1 bars ВСЕГДА пуст: его бакет — текущая минута, а её закрытой
+        # минутки в истории по определению ещё нет. Раньше на этом ТФ и рвалось
+        # сильнее всего: свеча пропускалась, и первый тик открывал её от своей
+        # цены. Если prev_close известен — открываем свечу от него прямо сейчас,
+        # без единого тика; первый тик её просто дополнит.
+        if not bars and prev_close is None:
             continue
 
+        if bars:
+            open_price = prev_close if prev_close is not None else bars[0]["open"]
+            high_price = max(open_price, max(c["high"] for c in bars))
+            low_price  = min(open_price, min(c["low"]  for c in bars))
+            close_price = bars[-1]["close"]
+        else:
+            # Баров в бакете нет — свеча ещё «пустая», вся в точке prev_close.
+            open_price = high_price = low_price = close_price = prev_close
+
+        # open входит в диапазон, как в живом потоке: max(prev_close, price).
         state["current_candle"][tf] = {
             "time":  bucket,
-            "open":  bars[0]["open"],
-            "high":  max(c["high"] for c in bars),
-            "low":   min(c["low"]  for c in bars),
-            "close": bars[-1]["close"]
+            "open":  open_price,
+            "high":  high_price,
+            "low":   low_price,
+            "close": close_price
         }
         state["current_bucket"][tf] = bucket
 
