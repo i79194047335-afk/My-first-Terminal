@@ -1214,6 +1214,22 @@ async def handler(ws):
                     "data":      history
                 }))
 
+                # Живая (незакрытая) свеча — сразу за историей, тем же update,
+                # который фронт уже умеет обрабатывать.
+                # Без этого она приходила только со СЛЕДУЮЩИМ тиком: история
+                # рисуется за ~0.02 с, а активная свеча появлялась через
+                # 0.5–5.8 с (на M1 — сколько ждать тика). При каждом
+                # переключении ТФ/инструмента график на миг оставался без неё.
+                current = symbols_state[symbol]["current_candle"].get(tf)
+                if current:
+                    await ws.send(json.dumps({
+                        "type":      "update",
+                        "symbol":    symbol,
+                        "tf":        tf,
+                        "requestId": request_id,
+                        "candle":    current
+                    }))
+
                 # Отправляем текущий брифинг новому клиенту
                 with _briefing_lock:
                     if _briefing_cache is not None:
