@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import websockets
 
-from core.bus import BusClient, BusServer, make_instruments, make_tick
+from core.bus import BusClient, BusServer, make_candles, make_instruments, make_tick
 from core.db import init_db, load_history
 from hub import Hub
 from test_phase2_candles import TF_SECONDS, load_ticks, reference_slice
@@ -255,6 +255,94 @@ class TestHubWebSocket(unittest.TestCase):
         last_closed = hist["data"][-1]
         self.assertEqual(upd["candle"]["open"], last_closed["close"],
                          "живая свеча открылась с разрывом от последней закрытой")
+
+
+class TestHubBackfill(unittest.TestCase):
+    """Фид догружает историю у брокера и шлёт её хабу сообщением candles."""
+
+    def test_backfill_fills_grid_derives_tfs_and_drops_forming_bar(self):
+        import time as _time
+
+        now = int(_time.time())
+
+        # M1 брокера: 300 минуток, последняя — ТЕКУЩАЯ минута (ещё не закрыта).
+        cur_m1 = (now // 60) * 60
+        m1 = [{"time": cur_m1 - 60 * i, "open": 1.17 + i * 1e-4,
+               "high": 1.1705 + i * 1e-4, "low": 1.1695 + i * 1e-4,
+               "close": 1.17 + i * 1e-4}
+              for i in range(299, -1, -1)]
+
+        # H4 по сетке FXCM (01/05/09/13/17/21 UTC → offset 3600), последний бар —
+        # текущий бакет, брокер отдаёт его незакрытым.
+        cur_h4 = ((now - 3600) // 14400) * 14400 + 3600
+        h4 = [{"time": cur_h4 - 14400 * i, "open": 1.16, "high": 1.18,
+               "low": 1.15, "close": 1.17} for i in range(9, -1, -1)]
+
+        tmp = tempfile.mkdtemp()
+        db  = os.path.join(tmp, "hub.db")
+
+        async def scenario():
+            h = HubHarness(db)
+            await h.start()
+            client = BusClient(PROVIDER, url="ws://127.0.0.1:%d" % h.config["bus_port"])
+            task   = asyncio.ensure_future(client.run())
+            await asyncio.sleep(0.3)
+
+            client.send_threadsafe(make_candles(PROVIDER, SYMBOL, "M1", m1))
+            client.send_threadsafe(make_candles(PROVIDER, SYMBOL, "H4", h4))
+            await asyncio.sleep(1.0)
+
+            # Живой тик поверх догруженной истории.
+            client.send_threadsafe(make_tick(PROVIDER, SYMBOL, now, 1.2000))
+            await asyncio.sleep(0.5)
+
+            builder = h.hub._builders[(PROVIDER, SYMBOL)]
+            out = {
+                "offsets": builder.offsets,
+                "hist":    {tf: list(bars) for tf, bars
+                            in h.hub._history[(PROVIDER, SYMBOL)].items()},
+                "current": {tf: builder.current(tf) for tf in ("M1", "M5", "H4")},
+            }
+            task.cancel()
+            await asyncio.sleep(0)
+            await h.stop()
+            return out
+
+        out = run_async(scenario())
+
+        # Смещение сетки выучено из брокерских баров.
+        self.assertEqual(out["offsets"].get("H4"), 3600,
+                         "смещение сетки H4 не выучено из пачки брокера")
+
+        # Незакрытые бары текущего бакета в историю не попали.
+        m1_times = [c["time"] for c in out["hist"]["M1"]]
+        self.assertNotIn(cur_m1, m1_times, "текущая (незакрытая) минутка попала в историю")
+        self.assertIn(cur_m1 - 60, m1_times, "предыдущая минутка потерялась")
+
+        h4_times = [c["time"] for c in out["hist"].get("H4", [])]
+        self.assertNotIn(cur_h4, h4_times, "незакрытый бар H4 попал в закрытые")
+
+        # Производные ТФ выведены из M1 (брокер их не отдаёт).
+        for tf in ("M3", "M5", "M15"):
+            self.assertGreater(len(out["hist"].get(tf, [])), 0,
+                               "%s не выведен из M1" % tf)
+            for c in out["hist"][tf]:
+                self.assertEqual(c["time"] % TF_SECONDS[tf], 0,
+                                 "%s вне сетки" % tf)
+
+        # Живая свеча собрана из догруженной истории, и тик не открыл её заново.
+        self.assertIsNotNone(out["current"]["M1"])
+        self.assertEqual(out["current"]["M1"]["open"], out["hist"]["M1"][-1]["close"],
+                         "живая M1 открылась с разрывом от догруженной истории")
+        self.assertEqual(out["current"]["M1"]["close"], 1.2000, "тик не долетел")
+        self.assertEqual(out["current"]["M1"]["high"], 1.2000)
+
+        # В БД записано ровно то же.
+        conn = init_db(db)
+        from_db = load_history(conn, PROVIDER, SYMBOL, "M1")
+        conn.close()
+        self.assertEqual([c["time"] for c in from_db], m1_times,
+                         "в БД другая история M1")
 
 
 class TestHubRestart(unittest.TestCase):

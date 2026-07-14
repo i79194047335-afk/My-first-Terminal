@@ -37,6 +37,12 @@ BUS_HOST = "127.0.0.1"
 BUS_PORT = 8766
 BUS_URL  = "ws://127.0.0.1:8766"
 
+# Потолок входящего сообщения. У websockets он по умолчанию 1 МБ, а пачка
+# истории — тысячи баров: 10 000 минуток дают ~800 КБ JSON и упёрлись бы в него
+# (хаб просто оборвал бы соединение). Фиды режут историю на куски, но запас
+# нужен: пачки крипты с объёмами толще форексных.
+MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+
 # Сетевые сбои, после которых клиент переподключается. CancelledError сюда
 # попасть не должен: на py3.7 он наследуется от Exception (в 3.8+ — от
 # BaseException), поэтому широкий `except Exception` проглотил бы отмену задачи.
@@ -69,6 +75,31 @@ def make_tick(provider, symbol, ts, price, size=None):
         "ts":       ts,
         "price":    price,
         "size":     size,
+    }
+
+
+def make_candles(provider, symbol, tf, data):
+    """Собрать сообщение 'candles' — историческая пачка баров от провайдера.
+
+    Нужна потому, что хаб к брокеру не ходит: историю за время простоя может
+    догрузить только фид (в монолите это делал load_history). Без неё после
+    каждого рестарта в свечах оставалась бы дыра.
+
+    Args:
+        provider: Источник.
+        symbol:   Инструмент.
+        tf:       Таймфрейм ("M1", "H4", …).
+        data:     Список закрытых свечей (time/open/high/low/close), старые первыми.
+
+    Returns:
+        Dict сообщения шины.
+    """
+    return {
+        "type":     "candles",
+        "provider": provider,
+        "symbol":   symbol,
+        "tf":       tf,
+        "data":     data,
     }
 
 
@@ -121,8 +152,9 @@ def validate(msg):
         raise BusError("сообщение должно быть dict, получено %s" % type(msg).__name__)
 
     mtype = msg.get("type")
-    if mtype not in ("tick", "instruments"):
-        raise BusError("неизвестный type: %r (ожидается tick/instruments)" % (mtype,))
+    if mtype not in ("tick", "candles", "instruments"):
+        raise BusError("неизвестный type: %r (ожидается tick/candles/instruments)"
+                       % (mtype,))
 
     provider = msg.get("provider")
     if not isinstance(provider, str) or not provider.strip():
@@ -157,6 +189,33 @@ def validate(msg):
                 raise BusError("tick[%s]: size не число и не None: %r" % (symbol, size))
             if size < 0:
                 raise BusError("tick[%s]: size должен быть >= 0, получено %r" % (symbol, size))
+
+    elif mtype == "candles":
+        symbol = msg.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise BusError("candles: пустой symbol: %r" % (symbol,))
+
+        tf = msg.get("tf")
+        if not isinstance(tf, str) or not tf.strip():
+            raise BusError("candles[%s]: пустой tf: %r" % (symbol, tf))
+
+        data = msg.get("data")
+        if not isinstance(data, list):
+            raise BusError("candles[%s %s]: data должен быть списком, получено %s"
+                           % (symbol, tf, type(data).__name__))
+
+        for i, bar in enumerate(data):
+            if not isinstance(bar, dict):
+                raise BusError("candles[%s %s]: data[%d] не dict" % (symbol, tf, i))
+            for field in ("time", "open", "high", "low", "close"):
+                if not _is_number(bar.get(field)):
+                    raise BusError("candles[%s %s]: data[%d] без числового %s: %r"
+                                   % (symbol, tf, i, field, bar.get(field)))
+            if bar["time"] > 1e11:
+                raise BusError(
+                    "candles[%s %s]: data[%d] time=%r похож на МИЛЛИСЕКУНДЫ; "
+                    "внутри шины время только в секундах"
+                    % (symbol, tf, i, bar["time"]))
 
     else:
         data = msg.get("data")
@@ -249,7 +308,8 @@ class BusServer:
         Returns:
             None.
         """
-        self._server = await websockets.serve(self._handler, self._host, self._port)
+        self._server = await websockets.serve(self._handler, self._host, self._port,
+                                              max_size=MAX_MESSAGE_BYTES)
         print("[bus] слушаю %s:%d" % (self._host, self._port))
 
     async def serve(self):

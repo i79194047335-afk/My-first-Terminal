@@ -29,9 +29,9 @@ import time
 import websockets
 
 from core.bus import BusServer
-from core.candles import CandleBuilder
+from core.candles import CandleBuilder, aggregate_higher_tf
 from core.db import init_db, load_history, trim_window, upsert_candle, \
-    upsert_instrument
+    upsert_candles_batch, upsert_instrument
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "retention.json")
@@ -128,7 +128,7 @@ class Hub:
                 print("[restore] %s:%s — %d баров, смещения %s"
                       % (provider, symbol, total, offsets or "{}"))
 
-    def _restore_forming(self, provider, symbol, now_ts):
+    def _restore_forming(self, provider, symbol, now_ts, quiet=False):
         """Восстановить незакрытую свечу текущего бакета для всех ТФ >= 1 мин.
 
         Перенос server.py:seed_current_candles(). Без этого первый живой тик
@@ -198,8 +198,9 @@ class Hub:
 
             seeded += 1
 
-        print("[restore] %s:%s — живая свеча восстановлена на %d ТФ"
-              % (provider, symbol, seeded))
+        if not quiet:
+            print("[restore] %s:%s — живая свеча восстановлена на %d ТФ"
+                  % (provider, symbol, seeded))
 
     # ── приём из шины ───────────────────────────────────────────────────
 
@@ -218,10 +219,112 @@ class Hub:
         try:
             if msg["type"] == "tick":
                 self._handle_tick(msg)
+            elif msg["type"] == "candles":
+                self._handle_candles(msg)
             elif msg["type"] == "instruments":
                 self._handle_instruments(msg)
         except Exception as err:
             print("[hub] ошибка на сообщении шины: %r" % (err,))
+
+    def _handle_candles(self, msg):
+        """Влить историческую пачку баров от провайдера.
+
+        Хаб к брокеру не ходит, поэтому дыру за время простоя закрывает фид: он
+        грузит историю и шлёт её сюда (в монолите это делал load_history).
+
+        Три места, где легко испортить данные, и все три обработаны:
+          1. Последний бар пачки может быть НЕЗАКРЫТЫМ (H4/D1 брокер отдаёт баром
+             текущего бакета). Записать его как закрытый — получить фальшивый
+             спайк, поэтому бары текущего бакета отбрасываются: живую свечу
+             соберёт _restore_forming.
+          2. Смещение сетки берётся из брокерских ТФ (H1/H4/D1) — только они
+             несут его сетку. Это единственный источник смещения на пустой БД.
+          3. M3/M5/M15 брокер не отдаёт — они выводятся из M1, как в монолите
+             (build_higher_history).
+
+        Args:
+            msg: Сообщение шины типа "candles".
+
+        Returns:
+            None.
+        """
+        provider = msg["provider"]
+        symbol   = msg["symbol"]
+        tf       = msg["tf"]
+        key      = (provider, symbol)
+
+        builder = self._builders.get(key)
+        if builder is None or tf not in self._tf_seconds:
+            return
+
+        data = msg["data"]
+        if not data:
+            return
+
+        # (2) Смещение сетки — до расчёта бакета, иначе отсечём не то.
+        if tf in self._broker_tf:
+            builder.set_offsets(
+                CandleBuilder.detect_offsets({tf: data}, self._tf_seconds))
+
+        # (1) Бары текущего бакета — не закрытые, в историю им нельзя.
+        sec        = self._tf_seconds[tf]
+        offset     = builder.offsets.get(tf, 0)
+        now        = int(time.time())
+        cur_bucket = ((now - offset) // sec) * sec + offset
+        bars       = [c for c in data if c["time"] < cur_bucket]
+        if not bars:
+            return
+
+        touched = [tf]
+        self._merge_history(key, tf, bars)
+
+        # (3) Производные ТФ из M1: брокер их не отдаёт.
+        if tf == "M1":
+            m1 = self._history[key]["M1"]
+            for other, other_sec in self._tf_seconds.items():
+                if other_sec <= 60 or other in self._broker_tf:
+                    continue
+                derived = aggregate_higher_tf(m1, other_sec)
+                derived = [c for c in derived if c["time"] < cur_bucket]
+                if derived:
+                    self._merge_history(key, other, derived)
+                    touched.append(other)
+
+        # История поменялась — билдер должен увидеть новую и пересобрать живую
+        # свечу от неё, иначе он останется со старой и откроет бар от прежнего
+        # close.
+        for name in touched:
+            builder.seed_history(name, self._history[key][name])
+        self._restore_forming(provider, symbol, now, quiet=True)
+
+        total = sum(len(self._history[key][t]) for t in touched)
+        print("[hub] %s:%s догружено %s → %d баров"
+              % (provider, symbol, ", ".join(touched), total))
+
+    def _merge_history(self, key, tf, bars):
+        """Влить бары в историю: upsert по времени, порядок и окно сохраняются.
+
+        Args:
+            key:  (provider, symbol).
+            tf:   Таймфрейм.
+            bars: Список закрытых свечей.
+
+        Returns:
+            None.
+        """
+        merged = {c["time"]: c for c in self._history[key].get(tf, [])}
+        for c in bars:
+            merged[c["time"]] = c
+
+        out = [merged[t] for t in sorted(merged)]
+        if len(out) > self._keep_bars:
+            out = out[-self._keep_bars:]
+        self._history[key][tf] = out
+
+        # В БД — той же коннекцией главного потока: пачка приходит раз в старт,
+        # через очередь db_writer (maxsize=5000) 10 000 минуток не пролезли бы.
+        upsert_candles_batch(self._conn, key[0], key[1], tf, out)
+        trim_window(self._conn, key[0], key[1], tf, self._keep_bars)
 
     def _handle_tick(self, msg):
         """Нарезать тик в свечи, сохранить закрытые, разослать живую.
