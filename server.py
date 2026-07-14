@@ -282,6 +282,71 @@ def to_timestamp(dt):
 # ================= HISTORY =================
 
 
+def seed_current_candles(symbol):
+    """Restore the still-open candle of the current bucket for every TF >= 1m.
+
+    load_history() deliberately drops the last, incomplete candle of each TF
+    (the .pop() calls) so that a partial bar is never persisted as closed.
+    Nothing then refilled current_candle, so after a restart the forming bar
+    was rebuilt from the first live tick: its open was the price at restart
+    time, not the true bucket open, and everything the market did between the
+    bucket start and the restart was missing. Invisible on S5, a fake spike
+    on H4/D1.
+
+    This rebuilds that forming bar from the M1 candles already in memory
+    (SQLite history + the gap backfilled from the broker).
+
+    Seconds TFs (S5-S30) are skipped on purpose: an M1 candle is too coarse to
+    reconstruct their buckets. They accumulate from live ticks — agreed, not a
+    defect (see LOG.md, Фаза 1).
+
+    Args:
+        symbol: Trading pair, e.g. "EUR/USD".
+
+    Returns:
+        None. Fills state["current_candle"][tf] / state["current_bucket"][tf]
+        in place and removes any duplicate of that bucket from tf_data[tf].
+    """
+    state   = symbols_state[symbol]
+    tf_data = state["tf_data"]
+    m1      = tf_data.get("M1") or []
+
+    if not m1:
+        return
+
+    now    = int(time.time())
+    seeded = 0
+
+    for tf, sec in TF_SECONDS.items():
+        if sec < 60:
+            continue
+
+        bucket = (now // sec) * sec
+        bars   = [c for c in m1 if c["time"] >= bucket]
+
+        if not bars:
+            continue
+
+        state["current_candle"][tf] = {
+            "time":  bucket,
+            "open":  bars[0]["open"],
+            "high":  max(c["high"] for c in bars),
+            "low":   min(c["low"]  for c in bars),
+            "close": bars[-1]["close"]
+        }
+        state["current_bucket"][tf] = bucket
+
+        # Тот же бакет мог остаться в истории как "закрытый" — например H4/D1
+        # грузятся у брокера напрямую и отдают текущий, ещё не закрытый бар.
+        # Он теперь живёт в current_candle, иначе фронт получит его дважды.
+        if tf_data.get(tf):
+            tf_data[tf] = [c for c in tf_data[tf] if c["time"] != bucket]
+
+        seeded += 1
+
+    print(f"Seed [{symbol}]: current candle restored for {seeded} TFs")
+
+
 def load_history():
     """Restore candle history from DB, backfill gap from FXCM.
 
@@ -434,6 +499,10 @@ def load_history():
                     tf_data[tf].pop()
 
             _persist_all(symbol)
+
+    # Незакрытая свеча текущего бакета — из M1, а не с первого живого тика.
+    for symbol in SYMBOLS:
+        seed_current_candles(symbol)
 
     print("История загружена.")
 

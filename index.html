@@ -806,14 +806,17 @@ function createPane(id) {
         const bucket = Math.floor(now / st.tfSeconds) * st.tfSeconds;
         let remain   = st.tfSeconds - (now - bucket);
         if (remain < 0) remain = 0;
-        const m  = Math.floor(remain / 60).toString().padStart(2,'0');
+        // ММ:СС до часа, ЧЧ:ММ:СС дальше — иначе H4/D1 показывали "238:47"
+        const h  = Math.floor(remain / 3600);
+        const m  = Math.floor((remain % 3600) / 60).toString().padStart(2,'0');
         const s  = (remain % 60).toString().padStart(2,'0');
+        const txt = h > 0 ? `${h.toString().padStart(2,'0')}:${m}:${s}` : `${m}:${s}`;
         const y  = st.series.priceToCoordinate(st.lastCandle.close);
         if (y === null) return;
         const el = getPaneElements(paneId).countdown;
         el.style.top  = (y + 9) + "px";
         el.style.background = st.lastCandle.close >= st.lastCandle.open ? "#089981" : "#f23645";
-        el.innerText  = `${m}:${s}`;
+        el.innerText  = txt;
     }
 }
 
