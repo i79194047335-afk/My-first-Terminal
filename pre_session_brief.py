@@ -19,6 +19,7 @@ import os
 import sys
 import logging
 import csv
+import sqlite3
 import time as time_module
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
@@ -41,8 +42,14 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 BRIEFING_FILE = "briefing.json"
 LEGACY_FILE = "session_bias.json"
 CONTEXT_FILE = "briefing_context.json"  # накопленный контекст между брифингами
-MEMORY_FILE = "market_memory.json"
 NEWS_CALENDAR = "data_loaders/news_calendar.csv"
+
+# Техническая картина берётся из SQLite (Фаза 1), а не из market_memory.json:
+# тот был побочным продуктом сигнального контура, который выключен в Фазе 2.1.
+# Свечи живут независимо от сигналов, так что брифинг больше от них не зависит.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(_HERE, "market.db")
+DB_PROVIDER = "fxcm"
 
 # Все 4 пары терминала
 SYMBOLS = ["EUR/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
@@ -374,79 +381,159 @@ def fetch_news():  # type: (...) -> List[Dict]
     return items
 
 
+def _read_candles(conn, symbol, tf, limit):  # type: (...) -> List[Dict]
+    """
+    Читает последние `limit` свечей пары из market.db, старые первыми.
+
+    Args:
+        conn:   Открытое read-only соединение с market.db.
+        symbol: Пара, напр. "EUR/USD".
+        tf:     Таймфрейм, напр. "M1" / "M5".
+        limit:  Сколько последних свечей вернуть.
+
+    Returns:
+        Список dict'ов {time, open, high, low, close} в порядке возрастания времени.
+        Пустой список, если данных нет.
+    """
+    rows = conn.execute(
+        """SELECT time, o, h, l, c FROM candles
+           WHERE provider=? AND symbol=? AND tf=?
+           ORDER BY time DESC LIMIT ?""",
+        (DB_PROVIDER, symbol, tf, limit),
+    ).fetchall()
+
+    rows.reverse()
+    return [{"time": r[0], "open": r[1], "high": r[2],
+             "low": r[3], "close": r[4]} for r in rows]
+
+
 def get_technical_context():  # type: (...) -> Dict
     """
-    Извлекает технический контекст для всех SYMBOLS из market_memory.json.
+    Извлекает технический контекст для всех SYMBOLS из market.db (свечи).
+
+    Раньше источником был market_memory.json — побочный продукт сигнального
+    контура, выключенного в Фазе 2.1. Определения htf_trend / range_pos /
+    volatility повторяют market_engine.py (окно 30 свечей M5), near_high и
+    near_low — structure_engine.py (порог 15% от ширины диапазона), но считаются
+    по свечам, а не по тикам. micro_trend — свечной аналог тикового: направление
+    последних 5 закрытий M1.
 
     Returns:
         {"symbols": {"EUR/USD": {price, htf_trend, day_high, ...}, ...}}
+        Пары без данных в БД просто отсутствуют в словаре.
     """
     ctx = {"symbols": {}}
 
-    if not os.path.exists(MEMORY_FILE):
-        log.warning("market_memory.json не найден")
+    if not os.path.exists(DB_FILE):
+        log.warning("market.db не найден: %s", DB_FILE)
         return ctx
 
     try:
-        with open(MEMORY_FILE) as f:
-            memory = json.load(f)
+        # read-only: брифинг — читатель, писать в боевую БД он не должен.
+        # WAL позволяет читать параллельно с пишущим server.py.
+        conn = sqlite3.connect("file:%s?mode=ro" % DB_FILE, uri=True)
     except Exception as e:
-        log.warning("Ошибка чтения market_memory.json: %s", e)
+        log.warning("Не открылся market.db: %s", e)
         return ctx
 
-    for sym in SYMBOLS:
-        sym_patterns = [p for p in memory if p.get("symbol") == sym and p.get("resolved")]
-        if not sym_patterns:
-            log.warning("Нет данных для %s в market_memory.json", sym)
-            continue
+    try:
+        for sym in SYMBOLS:
+            m5 = _read_candles(conn, sym, "M5", 30)
+            m1 = _read_candles(conn, sym, "M1", 1440)   # сутки
 
-        sym_patterns.sort(key=lambda p: p.get("time", 0))
-        latest = sym_patterns[-1]
-        state = latest.get("state", {})
+            if not m1 or len(m5) < 2:
+                log.warning("Нет данных для %s в market.db", sym)
+                continue
 
-        now = datetime.now(timezone.utc).timestamp()
-        day_ago = now - 86400
-        day_patterns = [p for p in sym_patterns if p.get("time", 0) > day_ago]
+            pip_div = 0.01 if "JPY" in sym else 0.0001
+            price = m1[-1]["close"]
 
-        if day_patterns:
-            day_high = max(p.get("price", 0) for p in day_patterns)
-            day_low = min(p.get("price", 0) for p in day_patterns)
-            day_close = day_patterns[-1].get("price", 0)
-        else:
-            day_high = state.get("range_high", 0)
-            day_low = state.get("range_low", 0)
-            day_close = latest.get("price", 0)
+            # ── Дневной диапазон: последние 24ч по M1 ──
+            day_high = max(c["high"] for c in m1)
+            day_low = min(c["low"] for c in m1)
+            day_close = price
 
-        htf = state.get("htf", "unknown")
-        pip_div = 0.01 if "JPY" in sym else 0.0001
+            # ── HTF-тренд и позиция в диапазоне: 30 свечей M5 (как в market_engine) ──
+            closes = [c["close"] for c in m5]
 
-        # Последний диапазон текущей сессии
-        session_patterns = [p for p in sym_patterns
-                            if p.get("session") == "asia" and p.get("time", 0) > day_ago]
-        if session_patterns:
-            session_high = max(p.get("price", 0) for p in session_patterns)
-            session_low = min(p.get("price", 0) for p in session_patterns)
-            session_range = session_high - session_low
-        else:
-            session_high = session_low = session_range = 0
+            if closes[-1] > closes[0]:
+                htf = "trend_up"
+            elif closes[-1] < closes[0]:
+                htf = "trend_down"
+            else:
+                htf = "range"
 
-        ctx["symbols"][sym] = {
-            "price": latest.get("price", 0),
-            "htf_trend": htf,
-            "day_high": day_high,
-            "day_low": day_low,
-            "day_close": day_close,
-            "day_range_pips": abs(day_high - day_low) / pip_div,
-            "session_high": session_high,
-            "session_low": session_low,
-            "session_range_pips": abs(session_range) / pip_div,
-            "range_pos": state.get("range_pos", 0.5),
-            "near_high": state.get("near_high", False),
-            "near_low": state.get("near_low", False),
-            "velocity": state.get("velocity", 0),
-            "micro_trend": state.get("micro_trend", "unknown"),
-            "volatility": state.get("volatility", "unknown"),
-        }
+            hi, lo = max(closes), min(closes)
+            if hi != lo:
+                range_pos = max(0.0, min(1.0, (price - lo) / (hi - lo)))
+            else:
+                range_pos = 0.5
+
+            # near_* — порог 15% от границы, как в structure_engine
+            near_high = range_pos > 0.85
+            near_low = range_pos < 0.15
+
+            # ── Волатильность: размах последней M5 против средней (как в market_engine) ──
+            ranges = [c["high"] - c["low"] for c in m5[-20:]]
+            if len(ranges) >= 2:
+                avg_range = sum(ranges[:-1]) / (len(ranges) - 1)
+                vol_ratio = ranges[-1] / avg_range if avg_range > 0 else 1.0
+                if vol_ratio > 1.5:
+                    volatility = "high"
+                elif vol_ratio < 0.6:
+                    volatility = "low"
+                else:
+                    volatility = "normal"
+            else:
+                volatility = "normal"
+
+            # ── Micro-trend: направление последних 5 закрытий M1 ──
+            tail = [c["close"] for c in m1[-6:]]
+            if len(tail) >= 2:
+                ups = sum(1 for a, b in zip(tail, tail[1:]) if b > a)
+                downs = sum(1 for a, b in zip(tail, tail[1:]) if b < a)
+                micro_trend = ("up" if ups > downs + 1
+                               else "down" if downs > ups + 1
+                               else "flat")
+            else:
+                micro_trend = "flat"
+
+            # ── Диапазон текущей сессии: бары с её начала (UTC) ──
+            now = datetime.now(timezone.utc)
+            sess_start = now.replace(hour=0, minute=0, second=0,
+                                     microsecond=0).timestamp()
+            sess_bars = [c for c in m1 if c["time"] >= sess_start]
+            if sess_bars:
+                session_high = max(c["high"] for c in sess_bars)
+                session_low = min(c["low"] for c in sess_bars)
+                session_range = session_high - session_low
+            else:
+                session_high = session_low = session_range = 0
+
+            # velocity: тиковой скорости в свечах нет — берём смещение последней
+            # минутной свечи в единицах цены за секунду (грубый аналог).
+            last = m1[-1]
+            velocity = (last["close"] - last["open"]) / 60.0
+
+            ctx["symbols"][sym] = {
+                "price": price,
+                "htf_trend": htf,
+                "day_high": day_high,
+                "day_low": day_low,
+                "day_close": day_close,
+                "day_range_pips": abs(day_high - day_low) / pip_div,
+                "session_high": session_high,
+                "session_low": session_low,
+                "session_range_pips": abs(session_range) / pip_div,
+                "range_pos": round(range_pos, 3),
+                "near_high": near_high,
+                "near_low": near_low,
+                "velocity": velocity,
+                "micro_trend": micro_trend,
+                "volatility": volatility,
+            }
+    finally:
+        conn.close()
 
     return ctx
 
@@ -707,40 +794,10 @@ def main():
     save_context(briefing)
     log.info("✅ briefing_context.json обновлён")
 
-    # 9. Пишем session_bias.json (legacy — для signal_engine.py)
-    usdjpy = data["pairs"].get("USD/JPY", {})
-    direction = usdjpy.get("direction", "NEUTRAL")
-
-    # Берём повалютный bias из нового формата (если есть), иначе маппим из direction
-    currency_bias = data.get("currency_bias", {})
-    usd_bias = currency_bias.get("USD", "BULLISH" if direction == "UP" else "BEARISH" if direction == "DOWN" else "NEUTRAL")
-    jpy_bias = currency_bias.get("JPY", "BEARISH" if direction == "UP" else "BULLISH" if direction == "DOWN" else "NEUTRAL")
-
-    legacy = {
-        "usd_bias": usd_bias,
-        "usd_confidence": usdjpy.get("direction_confidence", 3),
-        "usd_reasoning": usdjpy.get("reasoning", ""),
-        "jpy_bias": jpy_bias,
-        "jpy_confidence": usdjpy.get("direction_confidence", 3),
-        "jpy_reasoning": usdjpy.get("reasoning", ""),
-        "usdjpy_bias": direction,
-        "usdjpy_confidence": usdjpy.get("direction_confidence", 3),
-        "usdjpy_reasoning": usdjpy.get("reasoning", ""),
-        "key_events_today": data.get("global_context", {}).get("key_events_today", []),
-        "risk_factors": data.get("global_context", {}).get("risk_factors", []),
-        "session_volatility": data.get("global_context", {}).get("session_volatility", "NORMAL"),
-        "recommendation": data.get("global_context", {}).get("recommendation", ""),
-        "generated_at": briefing["meta"]["generated_at"],
-        "generated_ts": briefing["meta"]["generated_ts"],
-        "valid_until": f"{session_cfg['end_utc']} UTC",
-        "news_count": len(news_items),
-        "calendar_events": len(calendar),
-        "symbols_analyzed": SYMBOLS,
-    }
-
-    with open(LEGACY_FILE, "w") as f:
-        json.dump(legacy, f, ensure_ascii=False, indent=2)
-    log.info("✅ session_bias.json записан (legacy)")
+    # 9. session_bias.json больше не пишется (Фаза 2.1).
+    # Его единственным читателем был signal_engine.py, а сигнальный контур
+    # выключен флагом SIGNALS_ENABLED. Вернётся вместе с сигналами, если
+    # понадобится: код лежит в истории git, формат см. LEGACY_FILE.
 
     # 10. Логируем результат
     log.info("─── Брифинг: %s ───", session_cfg['label_ru'])

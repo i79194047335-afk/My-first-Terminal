@@ -14,8 +14,6 @@ from core.candles import aggregate_higher_tf
 from market_engine import MarketEngine
 from structure_engine import StructureEngine, detect_event
 from signal_engine import evaluate_signal, format_signal, get_hour_utc, minutes_in_hour, get_session
-from pattern_memory import store_pattern, resolve_patterns
-from signal_tracker import store_signal, resolve_signals as tracker_resolve, print_stats as tracker_print_stats
 import queue
 from collections import deque
 
@@ -81,6 +79,24 @@ loop_ref         = None
 market_engines    = {}
 market_structures = {}
 
+
+# ── Сигнальный контур (Фаза 2.1) ───────────────────────────────────────────
+# Выключен флагом. Код движков НЕ удалён: вернуть контур = SIGNALS_ENABLED=True.
+#
+# Импорт pattern_memory / signal_tracker тоже под флагом — не из чистоплюйства:
+# оба читают свои JSON на уровне модуля (market_memory.json ≈ 73 МБ,
+# signal_log.json ≈ 26 МБ), т.е. просто импорт стоит ~100 МБ RSS, а
+# pattern_memory вдобавок вешает atexit-сохранение — ещё одна полная
+# перезапись файла при каждой остановке сервера.
+SIGNALS_ENABLED = False
+
+if SIGNALS_ENABLED:
+    from pattern_memory import store_pattern, resolve_patterns
+    from signal_tracker import (
+        store_signal,
+        resolve_signals as tracker_resolve,
+        print_stats as tracker_print_stats,
+    )
 
 # Cooldown сигналов — не более 1 сигнала в 30 сек на пару
 SIGNAL_COOLDOWN   = 30
@@ -694,68 +710,69 @@ def process_tick(symbol, price, ts):
         )
 
 
-    # ---- Structure ----
-    structure = market_structures[symbol].update(price, ts)
+    if SIGNALS_ENABLED:
+        # ---- Structure ----
+        structure = market_structures[symbol].update(price, ts)
 
 
-    # ---- block-фильтр: если тишина >= N, буферизованный сигнал признаётся
-    #      «последним в блоке» и отправляется СЕЙЧАС (вход с задержкой ~N сек) ----
-    if BLOCK_FILTER_N > 0:
-        pend = _pending_block_signal.get(symbol)
-        if pend and ts - pend["ts"] >= BLOCK_FILTER_N:
-            _fire_signal(symbol, price, ts, pend["signal"], delay=BLOCK_FILTER_N)
-            _pending_block_signal[symbol] = None
+        # ---- block-фильтр: если тишина >= N, буферизованный сигнал признаётся
+        #      «последним в блоке» и отправляется СЕЙЧАС (вход с задержкой ~N сек) ----
+        if BLOCK_FILTER_N > 0:
+            pend = _pending_block_signal.get(symbol)
+            if pend and ts - pend["ts"] >= BLOCK_FILTER_N:
+                _fire_signal(symbol, price, ts, pend["signal"], delay=BLOCK_FILTER_N)
+                _pending_block_signal[symbol] = None
 
 
-    # ---- Signal — только если цена у края диапазона ----
-    near_high = structure.get("near_high", False) if structure else False
-    near_low  = structure.get("near_low",  False) if structure else False
+        # ---- Signal — только если цена у края диапазона ----
+        near_high = structure.get("near_high", False) if structure else False
+        near_low  = structure.get("near_low",  False) if structure else False
 
 
-    if structure and (near_high or near_low):
-        signal = evaluate_signal(symbol, price, ts, analysis, structure)
+        if structure and (near_high or near_low):
+            signal = evaluate_signal(symbol, price, ts, analysis, structure)
 
 
-        if signal and not signal.skip_reason:
-            # cooldown — не чаще раза в 30 сек на пару
-            if ts - last_signal_time[symbol] >= SIGNAL_COOLDOWN:
-                last_signal_time[symbol] = ts
-                if BLOCK_FILTER_N > 0:
-                    # буферизуем кандидата в «последний сигнал блока»;
-                    # прежний невыстреливший буфер вытесняется (блок продолжился)
-                    _pending_block_signal[symbol] = {
-                        "price": price, "ts": ts, "signal": signal
-                    }
-                else:
-                    _fire_signal(symbol, price, ts, signal)
+            if signal and not signal.skip_reason:
+                # cooldown — не чаще раза в 30 сек на пару
+                if ts - last_signal_time[symbol] >= SIGNAL_COOLDOWN:
+                    last_signal_time[symbol] = ts
+                    if BLOCK_FILTER_N > 0:
+                        # буферизуем кандидата в «последний сигнал блока»;
+                        # прежний невыстреливший буфер вытесняется (блок продолжился)
+                        _pending_block_signal[symbol] = {
+                            "price": price, "ts": ts, "signal": signal
+                        }
+                    else:
+                        _fire_signal(symbol, price, ts, signal)
 
 
-        # SKIP-сигналы во фронт НЕ отправляем — только боевые (Asia∩TIGHT).
-        # Причина: фильтр отсекает ~90% сигналов, поток SKIP'ов бесполезен.
-        # Раскомментировать ниже для отладки.
-        # elif signal and signal.skip_reason:
-        #     if ts - last_signal_time[symbol] >= SIGNAL_COOLDOWN:
-        #         last_signal_time[symbol] = ts
-        #         send_signal(symbol, format_signal(symbol, price, ts, signal))
+            # SKIP-сигналы во фронт НЕ отправляем — только боевые (Asia∩TIGHT).
+            # Причина: фильтр отсекает ~90% сигналов, поток SKIP'ов бесполезен.
+            # Раскомментировать ниже для отладки.
+            # elif signal and signal.skip_reason:
+            #     if ts - last_signal_time[symbol] >= SIGNAL_COOLDOWN:
+            #         last_signal_time[symbol] = ts
+            #         send_signal(symbol, format_signal(symbol, price, ts, signal))
 
 
-    # ---- Трекер — закрываем истёкшие сигналы ----
-    tracker_resolve(symbol, price, ts)
+        # ---- Трекер — закрываем истёкшие сигналы ----
+        tracker_resolve(symbol, price, ts)
 
 
-    # ---- Паттерны для обучения ----
-    event = detect_event(structure) if structure else None
-    if structure and event:
-        combined = {
-            **analysis,
-            **structure,
-            "event":  event,
-            "symbol": symbol
-        }
-        store_pattern(symbol, combined, price, ts)
+        # ---- Паттерны для обучения ----
+        event = detect_event(structure) if structure else None
+        if structure and event:
+            combined = {
+                **analysis,
+                **structure,
+                "event":  event,
+                "symbol": symbol
+            }
+            store_pattern(symbol, combined, price, ts)
 
 
-    resolve_patterns(symbol, price, ts)
+        resolve_patterns(symbol, price, ts)
 
 
     # ---- Analysis в терминал (не трогаем) ----
@@ -1147,7 +1164,8 @@ async def main():
 
     load_history()
 
-    seed_recent_signals()
+    if SIGNALS_ENABLED:
+        seed_recent_signals()
 
 
     threading.Thread(target=tick_writer, daemon=True).start()
