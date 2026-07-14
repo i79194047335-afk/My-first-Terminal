@@ -1,0 +1,17 @@
+{
+  "db_path": "market_hub.db",
+  "keep_bars": 2000,
+  "ws_port": 8767,
+  "bus_host": "127.0.0.1",
+  "bus_port": 8766,
+  "trim_every": 200,
+  "tf_seconds": {
+    "S5": 5, "S10": 10, "S15": 15, "S30": 30,
+    "M1": 60, "M3": 180, "M5": 300, "M15": 900,
+    "H1": 3600, "H4": 14400, "D1": 86400
+  },
+  "broker_tf": ["H1", "H4", "D1"],
+  "markets": {
+    "fxcm": ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"]
+  }
+}

@@ -244,19 +244,22 @@ def upsert_instrument(conn: sqlite3.Connection, provider: str, symbol: str,
         updated:        Unix timestamp of last update.
     """
     import json
-    conn.execute(
-        """INSERT OR REPLACE INTO instruments
-           (provider, symbol, price_decimals, size_decimals,
-            min_base, has_volume, meta, updated)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            provider, symbol,
-            price_decimals, size_decimals,
-            min_base, 1 if has_volume else 0,
-            json.dumps(meta) if meta else None,
-            updated,
-        ),
-    )
+    # `with conn:` — коммит. Без него запись жила только в открытой транзакции и
+    # умирала вместе с процессом: upsert_candle коммитит, а этот — нет (Фаза 1).
+    with conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO instruments
+               (provider, symbol, price_decimals, size_decimals,
+                min_base, has_volume, meta, updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                provider, symbol,
+                price_decimals, size_decimals,
+                min_base, 1 if has_volume else 0,
+                json.dumps(meta) if meta else None,
+                updated,
+            ),
+        )
 
 
 def get_instrument(conn: sqlite3.Connection, provider: str,
