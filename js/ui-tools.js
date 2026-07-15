@@ -1,88 +1,67 @@
 // ============================================================================
 // Tool UI controller
 // ============================================================================
+//
+// Подсветка активного инструмента — через классы (.on / .on-long / .on-short),
+// а не inline-стили: кнопки тулбара стали иконочными (.tb-ic), и заливка фона
+// через element.style ломала бы их вид. Классы описаны в CSS index.html.
+
+// Кнопки панели 1, которые подсвечивает setTool. Панель 2 исторически не
+// подсвечивается (у неё свои id hlineBtn2 и т.д.) — поведение не меняем.
+const TOOL_BTN_IDS = ["lineOverlayBtn", "hlineBtn1", "rectOverlayBtn", "posBtn1"];
+
+function clearToolHighlights() {
+    for (const id of TOOL_BTN_IDS) {
+        const el = document.getElementById(id);
+        if (el) el.classList.remove("on", "on-long", "on-short");
+    }
+    const alertBtn = document.getElementById("AlertBtn");
+    if (alertBtn) alertBtn.classList.remove("on");
+}
 
 function setTool(tool) {
 
     DrawingController.setTool(tool);
 
-    const overlayBtn = document.getElementById("lineOverlayBtn");
-    const hlineBtn   = document.getElementById("hlineBtn1");
-    const rectBtn    = document.getElementById("rectOverlayBtn");
-    const posBtn     = document.getElementById("posBtn1");
+    clearToolHighlights();
 
-    if (overlayBtn) {
-        overlayBtn.style.background = "";
-        overlayBtn.style.color = "";
-    }
-
-    if (rectBtn) {
-        rectBtn.style.background = "";
-        rectBtn.style.color = "";
-    }
-
-    if (hlineBtn) {
-        hlineBtn.style.background = "";
-        hlineBtn.style.color = "";
-    }
-
-    if (posBtn) { posBtn.style.background = ""; posBtn.style.color = ""; }
+    const posBtn = document.getElementById("posBtn1");
 
     if (tool === "posLong") {
         DrawingController.clearPreview();
-        if (posBtn) { posBtn.style.background = "#089981"; posBtn.style.color = "#fff"; }
+        if (posBtn) posBtn.classList.add("on-long");
         return;
     }
 
     if (tool === "posShort") {
         DrawingController.clearPreview();
-        if (posBtn) { posBtn.style.background = "#f23645"; posBtn.style.color = "#fff"; }
+        if (posBtn) posBtn.classList.add("on-short");
         return;
     }
 
     if (tool === "lineOverlay") {
-
         DrawingController.clearPreview();
-
-        if (overlayBtn) {
-            overlayBtn.style.background = "#2962FF";
-            overlayBtn.style.color = "#fff";
-        }
-
+        const el = document.getElementById("lineOverlayBtn");
+        if (el) el.classList.add("on");
         return;
     }
 
     if (tool === "rectOverlay") {
-
         DrawingController.clearPreview();
-
-        if (rectBtn) {
-            rectBtn.style.background = "#2962FF";
-            rectBtn.style.color = "#fff";
-        }
-
+        const el = document.getElementById("rectOverlayBtn");
+        if (el) el.classList.add("on");
         return;
     }
 
     if (tool === "hline") {
-
-        if (hlineBtn) {
-            hlineBtn.style.background = "#2962FF";
-            hlineBtn.style.color = "#fff";
-        }
-
+        const el = document.getElementById("hlineBtn1");
+        if (el) el.classList.add("on");
         return;
     }
 
     if (tool === "alert") {
-
         const alertBtn = document.getElementById("AlertBtn");
-
-        if (alertBtn) {
-            alertBtn.style.background = "#2962FF";
-            alertBtn.style.color = "#fff";
-        }
-
+        if (alertBtn) alertBtn.classList.add("on");
         return;
     }
 
@@ -91,17 +70,7 @@ function setTool(tool) {
 
 
 function updateToolButtonState(isActive) {
-
     const btn = document.getElementById("hlineBtn1");
-
     if (!btn) return;
-
-    if (isActive) {
-        btn.style.background = "#2962FF";
-        btn.style.color = "#fff";
-    } else {
-        btn.style.background = "";
-        btn.style.color = "";
-    }
-
+    btn.classList.toggle("on", !!isActive);
 }

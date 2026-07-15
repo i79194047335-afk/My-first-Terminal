@@ -7,12 +7,6 @@
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
     body { margin:0; font-family:Arial, sans-serif; }
-    #layoutMenu { position:absolute; top:8px; right:10px; z-index:5000; }
-    #layoutBtn { background:#fff; border:1px solid #aaa; padding:4px 10px; cursor:pointer; }
-    #layoutDropdown { display:none; position:absolute; right:0; background:#fff; border:1px solid #aaa; margin-top:4px; min-width:160px; box-shadow:0 2px 8px rgba(0,0,0,0.15); }
-    #layoutDropdown div { padding:6px 12px; cursor:pointer; }
-    #layoutDropdown div:hover { background:#f0f0f0; }
-
     #contextMenu, #lineMenu {
         position:absolute; display:none; background:#fff; border:1px solid #aaa;
         padding:10px; z-index:6000; font-size:12px; box-shadow:0 2px 10px rgba(0,0,0,0.2);
@@ -62,6 +56,53 @@
 
     select, button { padding:4px 8px; border:1px solid #bbb; background:#f3f3f3; cursor:pointer; }
     button { border-radius:3px; }
+
+    /* ── Иконочный тулбар (иконки + группы) ── */
+    .toolbar select.tb { height:30px; padding:0 6px 0 10px; border-radius:5px; font-size:12.5px; font-weight:550; }
+    /* иконочная кнопка */
+    .tb-ic {
+        width:30px; height:30px; padding:0; border:1px solid #bbb; background:#f3f3f3;
+        border-radius:5px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;
+        position:relative; color:#1c1c1e; flex-shrink:0;
+    }
+    .tb-ic:hover { border-color:#2962ff; color:#2962ff; }
+    .tb-ic svg { width:16px; height:16px; display:block; pointer-events:none; }
+    /* активное состояние — для инструментов рисования и Sync */
+    .tb-ic.on { background:#e8effd; border-color:#2962ff; color:#2962ff; }
+    /* активная позиция: long зелёная, short красная */
+    .tb-ic.on-long  { background:#089981; border-color:#089981; color:#fff; }
+    .tb-ic.on-short { background:#f23645; border-color:#f23645; color:#fff; }
+    /* сегментная группа инструментов рисования */
+    .tb-seg { display:inline-flex; border:1px solid #bbb; border-radius:5px; overflow:hidden; flex-shrink:0; }
+    .tb-seg .tb-ic { border:0; border-right:1px solid #bbb; border-radius:0; width:32px; }
+    .tb-seg .tb-ic:last-child { border-right:0; }
+    /* текстовая кнопка с иконкой (Сигналы, Brief) */
+    .tb-txt { height:30px; padding:0 10px; border:1px solid #bbb; background:#f3f3f3; border-radius:5px;
+        cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:#1c1c1e; flex-shrink:0; }
+    .tb-txt:hover { border-color:#2962ff; }
+    .tb-txt svg { width:15px; height:15px; }
+    .tb-txt.on { background:#e8effd; border-color:#2962ff; color:#2962ff; }
+    /* разделитель и распорка */
+    .tb-div { width:1px; height:20px; background:#d8d8d8; margin:0 2px; flex-shrink:0; }
+    .tb-spacer { flex:1; }
+    /* tooltip */
+    .tb-ic[data-tip]:hover::after, .tb-txt[data-tip]:hover::after {
+        content:attr(data-tip); position:absolute; top:calc(100% + 6px); left:50%;
+        transform:translateX(-50%); background:#1c1c1e; color:#fff; font-size:11px;
+        padding:3px 7px; border-radius:4px; white-space:nowrap; pointer-events:none; z-index:2000; font-weight:500;
+    }
+    .tb-txt { position:relative; }
+    /* меню «⋯» */
+    .tb-more-menu {
+        position:absolute; z-index:3000; background:#fff; border:1px solid #d8d8d8; border-radius:6px;
+        box-shadow:0 6px 24px rgba(0,0,0,.12); min-width:190px; overflow:hidden; display:none;
+    }
+    .tb-more-menu.open { display:block; }
+    .tb-more-menu .mi { display:flex; align-items:center; gap:10px; padding:8px 12px; font-size:13px;
+        cursor:pointer; border-bottom:1px solid #eee; background:none; width:100%; text-align:left; }
+    .tb-more-menu .mi:last-child { border-bottom:0; }
+    .tb-more-menu .mi:hover { background:#e8effd; color:#2962ff; }
+    .tb-more-menu .mi svg { width:15px; height:15px; }
 
     .menu-item { cursor:pointer; padding:4px 0; }
 
@@ -193,7 +234,6 @@
         .toolbar select, .toolbar button {
             font-size: 11px; padding: 2px 6px; white-space: nowrap; flex-shrink: 0; height: 26px;
         }
-        #layoutMenu { display: none; }
         .expand, .scrollRight, .resetZoom { padding: 5px 10px; font-size: 14px; }
         .zoomBtn { width: 28px; height: 28px; font-size: 16px; }
     }
@@ -201,13 +241,7 @@
 </head>
 <body>
 
-<div id="layoutMenu">
-    <div id="layoutBtn">Layout ▼</div>
-    <div id="layoutDropdown">
-        <div onclick="exportLayout()">Save to File</div>
-        <div onclick="document.getElementById('importFile').click()">Load from File</div>
-    </div>
-</div>
+<!-- Layout (Save/Load) переехал в меню «⋯» тулбара; #importFile ниже, скрытый. -->
 
 <!-- MOBILE TAB BAR -->
 <div id="mobileTabBar">
@@ -333,20 +367,30 @@
 <div class="column" id="column1">
     <div class="price-pane" id="pane1">
         <div class="toolbar">
-            <select id="symbolSelect">
+            <select id="symbolSelect" class="tb">
                 <option value="AUD/USD">AUD/USD</option>
                 <option value="EUR/USD">EUR/USD</option>
                 <option value="USD/CAD">USD/CAD</option>
                 <option value="USD/JPY">USD/JPY</option>
             </select>
-            <select id="tf1"></select>
-            <button id="hlineBtn1" onclick="setTool('hline')">Линия</button>
-            <button id="lineOverlayBtn" onclick="setTool('lineOverlay')">Луч</button>
-            <button id="rectOverlayBtn" onclick="setTool('rectOverlay')">Зона</button>
-            <button id="posBtn1" onclick="togglePositionDropdown(1, event)">Позиция ▾</button>
-            <button id="clearDrawingsBtn">Удалить всё</button>
-            <button id="chartSyncBtn">Sync</button>
-            <button id="indBtn1" onclick="openIndicatorsPanel(1, event)">Indicators ▾</button>
+            <select id="tf1" class="tb"></select>
+            <div class="tb-div"></div>
+            <div class="tb-seg">
+                <button id="hlineBtn1" class="tb-ic" onclick="setTool('hline')" data-tip="Гор. линия"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18"/></svg></button>
+                <button id="lineOverlayBtn" class="tb-ic" onclick="setTool('lineOverlay')" data-tip="Луч"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20L20 4"/><circle cx="4" cy="20" r="1.6" fill="currentColor" stroke="none"/></svg></button>
+                <button id="rectOverlayBtn" class="tb-ic" onclick="setTool('rectOverlay')" data-tip="Зона"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg></button>
+            </div>
+            <button id="posBtn1" class="tb-ic" onclick="togglePositionDropdown(1, event)" data-tip="Позиция"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4v16M6 9l6-5 6 5"/></svg></button>
+            <button id="indBtn1" class="tb-ic" onclick="openIndicatorsPanel(1, event)" data-tip="Индикаторы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17l5-6 4 4 5-8 4 5"/></svg></button>
+            <div class="tb-spacer"></div>
+            <button id="chartSyncBtn" class="tb-ic" data-tip="Синхронизация панелей"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9a8 8 0 0113-3l3 3M20 15a8 8 0 01-13 3l-3-3"/><path d="M20 4v5h-5M4 20v-5h5"/></svg></button>
+            <button id="moreBtn1" class="tb-ic" onclick="toggleMoreMenu(1, event)" data-tip="Ещё"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+            <div id="moreMenu1" class="tb-more-menu">
+                <button class="mi" onclick="clearAllDrawings(); closeMoreMenus()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg> Удалить все объекты</button>
+                <button class="mi" onclick="autoScaleChart(1); closeMoreMenus()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v18M3 12h18"/></svg> Сбросить масштаб</button>
+                <button class="mi" onclick="exportLayout(); closeMoreMenus()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12M8 11l4 4 4-4M4 19h16"/></svg> Сохранить разметку</button>
+                <button class="mi" onclick="document.getElementById('importFile').click(); closeMoreMenus()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 15V3M8 7l4-4 4 4M4 19h16"/></svg> Загрузить разметку</button>
+            </div>
         </div>
         <div class="chart-wrapper" id="wrapper1">
             <div class="chart" id="chart1"></div>
@@ -366,14 +410,18 @@
 <div class="column" id="column2">
     <div class="price-pane" id="pane2">
         <div class="toolbar">
-            <select id="tf2"></select>
-            <button id="hlineBtn2"       onclick="setTool('hline')">Линия</button>
-            <button id="lineOverlayBtn2" onclick="setTool('lineOverlay')">Луч</button>
-            <button id="rectOverlayBtn2" onclick="setTool('rectOverlay')">Зона</button>
-            <button id="posBtn2"         onclick="togglePositionDropdown(2, event)">Позиция ▾</button>
-            <button id="signalLogBtn"    onclick="toggleSignalPanel()">Сигналы</button>
-            <button id="briefBtn"        onclick="toggleBriefing()">📋 Brief</button>
-            <button id="indBtn2"         onclick="openIndicatorsPanel(2, event)">Indicators ▾</button>
+            <select id="tf2" class="tb"></select>
+            <div class="tb-div"></div>
+            <div class="tb-seg">
+                <button id="hlineBtn2" class="tb-ic" onclick="setTool('hline')" data-tip="Гор. линия"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18"/></svg></button>
+                <button id="lineOverlayBtn2" class="tb-ic" onclick="setTool('lineOverlay')" data-tip="Луч"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20L20 4"/><circle cx="4" cy="20" r="1.6" fill="currentColor" stroke="none"/></svg></button>
+                <button id="rectOverlayBtn2" class="tb-ic" onclick="setTool('rectOverlay')" data-tip="Зона"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg></button>
+            </div>
+            <button id="posBtn2" class="tb-ic" onclick="togglePositionDropdown(2, event)" data-tip="Позиция"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4v16M6 9l6-5 6 5"/></svg></button>
+            <button id="indBtn2" class="tb-ic" onclick="openIndicatorsPanel(2, event)" data-tip="Индикаторы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17l5-6 4 4 5-8 4 5"/></svg></button>
+            <div class="tb-spacer"></div>
+            <button id="signalLogBtn" class="tb-txt" onclick="toggleSignalPanel()" data-tip="Сигналы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
+            <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
         </div>
         <div class="chart-wrapper" id="wrapper2">
             <div id="signalPanel"></div>
@@ -410,18 +458,20 @@
 // stomping the ui-tools.js version before we capture it.
 // ============================================================================
 (function() {
+    // Подсветка панели 2 — через классы (.on / .on-long / .on-short), как в
+    // ui-tools.js для панели 1: кнопки стали иконочными, inline-заливка их ломает.
     const _orig = window.setTool;
     window.setTool = function setTool(tool) {
         _orig(tool);
         const ids2 = { lineOverlay: "lineOverlayBtn2", rectOverlay: "rectOverlayBtn2", hline: "hlineBtn2", posLong: "posBtn2", posShort: "posBtn2" };
-        const colors2 = { posLong: "#089981", posShort: "#f23645" };
+        const cls2 = { posLong: "on-long", posShort: "on-short" };
         ["lineOverlayBtn2", "hlineBtn2", "rectOverlayBtn2", "posBtn2"].forEach(id => {
             const b = document.getElementById(id);
-            if (b) { b.style.background = ""; b.style.color = ""; }
+            if (b) b.classList.remove("on", "on-long", "on-short");
         });
         if (ids2[tool]) {
             const b = document.getElementById(ids2[tool]);
-            if (b) { b.style.background = colors2[tool] || "#2962FF"; b.style.color = "#fff"; }
+            if (b) b.classList.add(cls2[tool] || "on");
         }
     };
 
@@ -429,9 +479,7 @@
     window.updateToolButtonState = function updateToolButtonState(isActive) {
         _origBtn(isActive);
         const b2 = document.getElementById("hlineBtn2");
-        if (!b2) return;
-        if (isActive) { b2.style.background = "#2962FF"; b2.style.color = "#fff"; }
-        else          { b2.style.background = ""; b2.style.color = ""; }
+        if (b2) b2.classList.toggle("on", !!isActive);
     };
 })();
 
@@ -2341,14 +2389,7 @@ document.addEventListener("click", e => {
 // ============================================================================
 // Global keyboard handlers
 // ============================================================================
-document.getElementById("layoutBtn").onclick = () => {
-    const dd = document.getElementById("layoutDropdown");
-    dd.style.display = dd.style.display === "block" ? "none" : "block";
-};
-
 document.addEventListener("click", e => {
-    if (!document.getElementById("layoutMenu").contains(e.target))
-        document.getElementById("layoutDropdown").style.display = "none";
     const contextMenu = document.getElementById("contextMenu");
     const chartMenu   = document.getElementById("chartMenu");
     if (contextMenu && !contextMenu.contains(e.target) && chartMenu && !chartMenu.contains(e.target))
@@ -2430,9 +2471,33 @@ function toggleChartSync() {
     syncEnabled = !syncEnabled;
     const btn = document.getElementById("chartSyncBtn");
     if (!btn) return;
-    btn.style.background = syncEnabled ? "#2962FF" : "";
-    btn.style.color      = syncEnabled ? "#fff"    : "";
+    btn.classList.toggle("on", syncEnabled);
 }
+
+// ── Меню «⋯» (редкие действия: удалить всё, сбросить масштаб) ──
+function closeMoreMenus() {
+    document.querySelectorAll(".tb-more-menu.open").forEach(m => m.classList.remove("open"));
+}
+function toggleMoreMenu(paneId, e) {
+    if (e) e.stopPropagation();
+    const menu = document.getElementById("moreMenu" + paneId);
+    const btn  = document.getElementById("moreBtn" + paneId);
+    if (!menu || !btn) return;
+    const wasOpen = menu.classList.contains("open");
+    closeMoreMenus();
+    if (wasOpen) return;
+    // Позиционируем меню под кнопкой (fixed, чтобы не обрезалось тулбаром).
+    const r = btn.getBoundingClientRect();
+    menu.style.position = "fixed";
+    menu.style.top   = (r.bottom + 6) + "px";
+    menu.style.right = (window.innerWidth - r.right) + "px";
+    menu.classList.add("open");
+}
+// Закрытие по клику вне меню.
+document.addEventListener("click", e => {
+    if (!e.target.closest(".tb-more-menu") && !e.target.closest('[id^="moreBtn"]'))
+        closeMoreMenus();
+});
 
 // ============================================================================
 // Mobile
@@ -2470,14 +2535,8 @@ function initMobileLayout() {
 
 function toggleMobileLayout(e) {
     if (e) e.stopPropagation();
-    const dd = document.getElementById("layoutDropdown");
-    if (!dd) return;
-    if (dd.style.display === "block") { dd.style.display = "none"; }
-    else {
-        dd.style.display = "block"; dd.style.position = "fixed";
-        dd.style.bottom = "52px"; dd.style.right = "4px"; dd.style.zIndex = "99999";
-        dd.onclick = ev => ev.stopPropagation();
-    }
+    // Save/Load разметки переехали в меню «⋯» тулбара — на мобиле открываем его.
+    toggleMoreMenu(1, e);
 }
 
 window.addEventListener("resize", () => {
@@ -2496,7 +2555,7 @@ function initialize() {
 
     // Sync btn initial state
     const syncBtn = document.getElementById("chartSyncBtn");
-    if (syncBtn && syncEnabled) { syncBtn.style.background = "#2962FF"; syncBtn.style.color = "#fff"; }
+    if (syncBtn && syncEnabled) syncBtn.classList.add("on");
 
     // Symbol selector
     const symbolSelect = document.getElementById("symbolSelect");
@@ -2509,9 +2568,8 @@ function initialize() {
     if (layout.split === "leftFull")  document.getElementById("column2").classList.add("hidden");
     if (layout.split === "rightFull") document.getElementById("column1").classList.add("hidden");
 
-    // Button handlers
-    document.getElementById("clearDrawingsBtn").onclick = clearAllDrawings;
-    document.getElementById("chartSyncBtn").onclick     = toggleChartSync;
+    // Button handlers ("Удалить всё" переехал в меню «⋯» с прямым onclick)
+    document.getElementById("chartSyncBtn").onclick = toggleChartSync;
 
     document.getElementById("hlineBtn1").onclick = () => {
         setTool("hline");
