@@ -30,8 +30,8 @@ import websockets
 
 from core.bus import BusServer
 from core.candles import CandleBuilder, aggregate_higher_tf
-from core.db import init_db, load_history, trim_window, upsert_candle, \
-    upsert_candles_batch, upsert_instrument
+from core.db import init_db, load_history, load_instruments, trim_window, \
+    upsert_candle, upsert_candles_batch, upsert_instrument
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "retention.json")
@@ -117,6 +117,15 @@ class Hub:
         now = int(time.time())
 
         for provider, symbols in self._config["markets"].items():
+            # Инструменты — из БД: фид шлёт их один раз при логине, и рестарт
+            # хаба иначе терял бы их до следующего рестарта фида (селектор и
+            # precision на фронте остались бы на HTML-fallback).
+            saved = load_instruments(self._conn, provider)
+            if saved:
+                self._instruments[provider] = saved
+                print("[restore] %s — инструменты: %s"
+                      % (provider, ", ".join(i["symbol"] for i in saved)))
+
             for symbol in symbols:
                 key  = (provider, symbol)
                 hist = {}
