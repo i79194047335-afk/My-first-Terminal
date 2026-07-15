@@ -80,6 +80,14 @@ class Hub:
         self._instruments = {}   # provider -> [метаданные инструментов]
         self._loop        = None
 
+        # Ценовые алерты. Ключ — symbol (как шлёт фронт, без провайдера); фронт
+        # различает алерты только по symbol+id. last_price нужен для проверки
+        # ПЕРЕСЕЧЕНИЯ уровня (не «цена выше»): алерты живут в памяти, как в
+        # server.py — при рестарте их заново создаёт фронт из localStorage.
+        self._alerts      = {}   # symbol -> [{"id","price","triggered"}]
+        self._alert_id    = 1
+        self._last_price  = {}   # symbol -> последняя цена (для пересечения)
+
         self._db_queue = queue.Queue(maxsize=5000)
 
         self.ticks_received = 0
@@ -348,7 +356,13 @@ class Hub:
             return
 
         self.ticks_received += 1
-        closed = builder.ingest(msg["price"], msg["ts"])
+        price = msg["price"]
+
+        # Алерты — до нарезки: нужен prev_price для проверки пересечения уровня.
+        self._check_alerts(symbol, self._last_price.get(symbol, price), price)
+        self._last_price[symbol] = price
+
+        closed = builder.ingest(price, msg["ts"])
 
         for tf, candle in closed.items():
             self.closed_candles += 1
@@ -386,8 +400,8 @@ class Hub:
                 updated=int(time.time()),
             )
 
-        self._send_all(json.dumps({"type": "instruments",
-                                   "data": self._instruments}))
+        self._broadcast(json.dumps({"type": "instruments",
+                                    "data": self._instruments}))
 
     # ── запись в SQLite (отдельный поток) ───────────────────────────────
 
@@ -490,6 +504,15 @@ class Hub:
                 elif mtype == "get_instruments":
                     await ws.send(json.dumps({"type": "instruments",
                                               "data": self._instruments}))
+
+                elif mtype == "add_alert":
+                    await self._on_add_alert(ws, data)
+
+                elif mtype == "update_alert":
+                    self._on_update_alert(data)
+
+                elif mtype == "remove_alert":
+                    self._on_remove_alert(data)
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -542,6 +565,73 @@ class Hub:
                 "candle":    current,
             }))
 
+    async def _on_add_alert(self, ws, data):
+        """Создать алерт и вернуть клиенту серверный id.
+
+        Фронт создаёт алерт с id=null и ждёт alert_created, чтобы подставить
+        настоящий id (index.html: obj.id = msg.id) — без ответа алерт нельзя
+        будет ни обновить, ни удалить.
+
+        Args:
+            ws:   Соединение клиента.
+            data: Сообщение add_alert (symbol, price).
+
+        Returns:
+            None.
+        """
+        symbol = data["symbol"]
+        price  = round(float(data["price"]), 5)
+        alert  = {"id": self._alert_id, "price": price, "triggered": False}
+        self._alerts.setdefault(symbol, []).append(alert)
+        self._alert_id += 1
+
+        await ws.send(json.dumps({
+            "type":   "alert_created",
+            "symbol": symbol,
+            "price":  price,
+            "id":     alert["id"],
+        }))
+
+    def _on_update_alert(self, data):
+        """Передвинуть уровень алерта.
+
+        Args:
+            data: Сообщение update_alert (symbol, id, price).
+
+        Returns:
+            None.
+        """
+        symbol   = data.get("symbol")
+        alert_id = data.get("id")
+        price    = data.get("price")
+        if symbol is None or alert_id is None or price is None:
+            return
+        price = round(float(price), 5)
+        for alert in self._alerts.get(symbol, []):
+            if alert["id"] == alert_id:
+                alert["price"]     = price
+                # Сдвинули уровень — алерт снова «заряжен».
+                alert["triggered"] = False
+                break
+
+    def _on_remove_alert(self, data):
+        """Удалить алерт.
+
+        Args:
+            data: Сообщение remove_alert (symbol, id).
+
+        Returns:
+            None.
+        """
+        symbol   = data.get("symbol")
+        alert_id = data.get("id")
+        if symbol is None or alert_id is None:
+            return
+        alert_id = int(alert_id)
+        if symbol in self._alerts:
+            self._alerts[symbol] = [a for a in self._alerts[symbol]
+                                    if a["id"] != alert_id]
+
     def _broadcast_update(self, provider, symbol):
         """Разослать живую свечу подписанным клиентам.
 
@@ -573,6 +663,51 @@ class Hub:
                 "candle":    candle,
             }))
 
+    def _check_alerts(self, symbol, prev_price, price):
+        """Сработать алерты, чьи уровни цена ПЕРЕСЕКЛА этим тиком.
+
+        Перенос server.py:check_alerts. Условие — пересечение уровня в любую
+        сторону (prev_price <= level <= price или наоборот), а не «цена выше».
+        Сработавший алерт помечается triggered и больше не срабатывает — фронт
+        рисует его 🔕 и сбрасывает только пересозданием.
+
+        Args:
+            symbol:     Инструмент (как шлёт фронт).
+            prev_price: Цена предыдущего тика.
+            price:      Цена текущего тика.
+
+        Returns:
+            None.
+        """
+        for alert in self._alerts.get(symbol, []):
+            if alert["triggered"]:
+                continue
+            level = alert["price"]
+            if (prev_price <= level <= price) or (price <= level <= prev_price):
+                alert["triggered"] = True
+                print("[hub] ALERT %s id=%s level=%s tick=%s"
+                      % (symbol, alert["id"], level, price))
+                # Событие срабатывания — ВСЕМ клиентам (фронт принимает его
+                # независимо от requestId и подписки на символ).
+                self._broadcast(json.dumps({
+                    "type":   "alert",
+                    "symbol": symbol,
+                    "price":  level,
+                    "id":     alert["id"],
+                }))
+
+    def _broadcast(self, payload):
+        """Разослать готовый JSON всем клиентам (алерты, инструменты).
+
+        Args:
+            payload: Строка JSON.
+
+        Returns:
+            None.
+        """
+        for ws in list(self._clients):
+            self._send(ws, payload)
+
     def _send(self, ws, payload):
         """Отправить клиенту готовый JSON, не роняя хаб на мёртвом сокете.
 
@@ -587,18 +722,6 @@ class Hub:
             asyncio.ensure_future(ws.send(payload))
         except Exception:
             self._clients.pop(ws, None)
-
-    def _send_all(self, payload):
-        """Разослать готовый JSON всем клиентам.
-
-        Args:
-            payload: Строка JSON.
-
-        Returns:
-            None.
-        """
-        for ws in list(self._clients):
-            self._send(ws, payload)
 
     @property
     def stats(self):
