@@ -1,7 +1,7 @@
 {
-  "db_path": "market_hub.db",
+  "db_path": "/root/projects/terminal/market.db",
   "keep_bars": 2000,
-  "ws_port": 8767,
+  "ws_port": 8765,
   "bus_host": "127.0.0.1",
   "bus_port": 8766,
   "trim_every": 200,
