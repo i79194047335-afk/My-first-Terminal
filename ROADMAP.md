@@ -200,11 +200,13 @@ FXCM шлёт то же с `"size": null`.
 
 ### 2.5 Фронт
 
-- Новое WS-сообщение `instruments` при коннекте → `priceFormat: {precision, minMove}`
-  берётся оттуда. **Убрать захардкоженные** `precision: 5, minMove: 0.00001`
-  из `createChartInternal`.
-- Символы: `fxcm:EUR/USD`, `lighter:BTC`. Селектор заполняется из `instruments`,
-  а не из HTML-разметки.
+- ✅ Новое WS-сообщение `instruments` при коннекте → `priceFormat: {precision, minMove}`
+  берётся оттуда. Захардкоженные `precision: 5` убраны (2026-07-15, USD/JPY=3).
+- ✅ Селектор заполняется из `instruments`, а не из HTML-разметки (2026-07-15).
+- ⏸ Символы `fxcm:EUR/USD`, `lighter:BTC` — **ОТЛОЖЕНО до Фазы 3**. Префикс нужен
+  только при втором провайдере (коллизия `BTC` у двоих). Сейчас он лишь сломал бы
+  localStorage и UI (currentSymbol в 22 местах index.html), а под Lighter (другой
+  формат символов) его всё равно придётся переделывать. Делать вместе с Фазой 3.
 
 ### 2.6 Миграция без простоя
 
