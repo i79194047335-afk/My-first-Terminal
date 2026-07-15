@@ -11,6 +11,7 @@
     "H1": 3600, "H4": 14400, "D1": 86400
   },
   "broker_tf": ["H1", "H4", "D1"],
+  "briefing_file": "/root/projects/terminal/briefing.json",
   "markets": {
     "fxcm": ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"]
   }

@@ -88,6 +88,13 @@ class Hub:
         self._alert_id    = 1
         self._last_price  = {}   # symbol -> последняя цена (для пересечения)
 
+        # Брифинг: pre_session_brief.py (крон 3×/сутки) пишет briefing.json, хаб
+        # поллит его mtime и рассылает клиентам. Путь абсолютный в конфиге —
+        # файл живёт в боевом дереве, а хаб запущен из worktree.
+        self._briefing        = None
+        self._briefing_mtime  = 0
+        self._briefing_lock   = threading.Lock()
+
         self._db_queue = queue.Queue(maxsize=5000)
 
         self.ticks_received = 0
@@ -455,6 +462,60 @@ class Hub:
             except Exception as err:
                 print("[hub] db_writer: %r — свеча пропущена" % (err,))
 
+    # ── брифинг ─────────────────────────────────────────────────────────
+
+    def briefing_watcher(self):
+        """Поток-демон: поллить briefing.json и рассылать при обновлении.
+
+        Файл пишет крон (pre_session_brief.py) 3×/сутки. Поллинг по mtime раз в
+        5 с — как в server.py. Рассылка идёт из потока-демона, поэтому через
+        loop.call_soon_threadsafe (в отличие от алертов, которые уже в потоке
+        event loop).
+
+        Args:
+            None.
+
+        Returns:
+            None (бесконечный цикл). Тихо простаивает, если файла нет.
+        """
+        path = self._config.get("briefing_file")
+        if not path:
+            return
+
+        while True:
+            try:
+                if os.path.exists(path):
+                    mtime = os.path.getmtime(path)
+                    if mtime > self._briefing_mtime:
+                        with open(path, encoding="utf-8") as f:
+                            data = json.load(f)
+                        with self._briefing_lock:
+                            self._briefing       = data
+                            self._briefing_mtime = mtime
+                        session = data.get("meta", {}).get("session", "?")
+                        print("[hub] брифинг обновлён (session=%s)" % session)
+                        self._broadcast_threadsafe(json.dumps(
+                            {"type": "briefing", "data": data}))
+            except Exception as err:
+                print("[hub] briefing_watcher: %r" % (err,))
+            time.sleep(5)
+
+    def _broadcast_threadsafe(self, payload):
+        """Разослать JSON всем клиентам ИЗ ЛЮБОГО потока.
+
+        _broadcast трогает клиентские сокеты и должен исполняться в потоке event
+        loop; watcher живёт в своём потоке, поэтому перекладываем туда.
+
+        Args:
+            payload: Строка JSON.
+
+        Returns:
+            None.
+        """
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._broadcast, payload)
+
     # ── WebSocket для браузера ──────────────────────────────────────────
 
     def _provider_of(self, symbol):
@@ -493,6 +554,13 @@ class Hub:
             if self._instruments:
                 await ws.send(json.dumps({"type": "instruments",
                                           "data": self._instruments}))
+
+            # Текущий брифинг — сразу новому клиенту (иначе он ждал бы следующего
+            # обновления файла, т.е. до следующей крон-сессии).
+            with self._briefing_lock:
+                cached = self._briefing
+            if cached is not None:
+                await ws.send(json.dumps({"type": "briefing", "data": cached}))
 
             async for raw in ws:
                 data = json.loads(raw)
@@ -771,6 +839,7 @@ async def main():
     hub._loop = asyncio.get_event_loop()
 
     threading.Thread(target=hub.db_writer, daemon=True).start()
+    threading.Thread(target=hub.briefing_watcher, daemon=True).start()
 
     bus = BusServer(hub.on_bus_message, config["bus_host"], config["bus_port"])
     await bus.start()
