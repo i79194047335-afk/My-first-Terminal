@@ -471,6 +471,31 @@ function applyPriceFormat(id) {
     st.series.applyOptions({ priceFormat: { type: 'price', precision, minMove } });
 }
 
+// Перестраивает <option> селектора пар из списка, пришедшего в instruments.
+// HTML-разметка селектора остаётся как fallback до первого instruments (чтобы
+// он не был пустым при загрузке). Порядок опций сохраняем как пришёл от хаба.
+function populateSymbolSelect(symbols) {
+    const select = document.getElementById("symbolSelect");
+    if (!select || !symbols || !symbols.length) return;
+
+    // Ничего не делаем, если набор совпадает — чтобы не сбрасывать выбор.
+    const existing = Array.from(select.options).map(o => o.value);
+    const same = existing.length === symbols.length &&
+                 existing.every((v, i) => v === symbols[i]);
+    if (same) return;
+
+    const prev = select.value;
+    select.innerHTML = "";
+    for (const sym of symbols) {
+        const opt = document.createElement("option");
+        opt.value = sym; opt.text = sym;
+        select.appendChild(opt);
+    }
+    // Сохраняем текущий выбор, если он ещё есть в новом списке.
+    select.value = symbols.includes(prev) ? prev
+                 : (symbols.includes(currentSymbol) ? currentSymbol : symbols[0]);
+}
+
 // ── Briefing panel state ──
 let briefVisible = false;
 let lastBriefingData = null;
@@ -646,13 +671,17 @@ function handleMessage(id, state, msg) {
 
     if (msg.type === "instruments") {
         // data: { provider: [ {symbol, price_decimals, ...}, ... ] }
+        const symbols = [];
         for (const provider in msg.data) {
             for (const inst of msg.data[provider]) {
                 const d = (inst.price_decimals == null) ? 5 : inst.price_decimals;
                 instrumentPrecision[inst.symbol] = { precision: d, minMove: Math.pow(10, -d) };
+                symbols.push(inst.symbol);
             }
         }
         Object.keys(panesState).forEach(id => applyPriceFormat(id));
+        // Селектор пар — из instruments, а не из захардкоженной HTML-разметки.
+        populateSymbolSelect(symbols);
     }
 
     if (msg.type === "alert" && msg.symbol === currentSymbol) {
@@ -717,6 +746,10 @@ function createPane(id) {
 
     state.ws.onopen    = () => {
         setTF(id, els.tfSelect.value);
+        // Запрашиваем instruments явно: хаб шлёт их при коннекте только если уже
+        // получил от фида, а браузер может подключиться раньше. Без запроса
+        // селектор и precision остались бы на HTML-fallback.
+        state.ws.send(JSON.stringify({ type: "get_instruments" }));
         // Подтянуть недавние сигналы сессии, чтобы стрелки переживали
         // перезагрузку страницы. Запрос один (из панели 1) — _signalLog общий.
         if (id === 1) state.ws.send(JSON.stringify({ type: "get_signals" }));
