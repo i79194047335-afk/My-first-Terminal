@@ -376,3 +376,27 @@ UTC, D1 — по 21:00 (торговый день). Подключи хаб к `
 Руками из `terminal-phase2`: `python3.10 hub.py` и
 `set -a; . /root/projects/terminal/.env; set +a; python3.7 -m feeds.fxcm_feed`.
 Откат к монолиту: `systemctl enable --now chart` (сперва погасить хаб — конфликт 8765).
+
+---
+
+## 2026-07-15 — systemd-юниты для хаба и фида (снят «прод на ручнике»)
+
+После переключения прода хаб/фид жили ручными фоновыми процессами — без
+автозапуска. Заведены сервисы `chart-hub` (py3.10, hub.py) и `chart-feed` (py3.7,
+feeds.fxcm_feed), оба `Restart=always`, `enabled`, `WorkingDirectory` = worktree
+`terminal-phase2`. Фиду окружение (FXCM_*) даёт `EnvironmentFile=` боевого `.env`.
+`chart-feed` идёт `After=chart-hub`, но жёсткой зависимости нет — фид сам
+переподключается к шине с backoff.
+
+Замена ручных процессов на сервисы — атомарно: kill обоих → 8765/8766 свободны →
+`start chart-hub` → `start chart-feed`. Простой контура ~5 сек.
+
+**Проверено живьём:** `Restart=always` реально работает — `kill -9` фида, systemd
+поднял новый за ~секунды, тот перелогинился к FXCM и вернулся на шину. Данные
+текут, живая свеча идёт.
+
+Копии юнитов в репозитории: `deploy/chart-hub.service`, `deploy/chart-feed.service`
+(боевые — в `/etc/systemd/system/`).
+
+Итого сервисы прода: `chart-hub` + `chart-feed` (новьё) + `chart-frontend` (:8082,
+без изменений). `chart` (монолит) — stopped + disabled, откат к нему возможен.

@@ -1,0 +1,16 @@
+[Unit]
+Description=Chart FXCM Feed (broker ticks + history -> bus :8766)
+After=network.target chart-hub.service
+Wants=chart-hub.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/projects/terminal-phase2
+# FXCM_LOGIN / FXCM_PASSWORD / FXCM_URL / FXCM_CONNECTION живут в боевом .env.
+EnvironmentFile=/root/projects/terminal/.env
+ExecStart=/usr/local/bin/python3.7 -m feeds.fxcm_feed
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
