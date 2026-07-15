@@ -6,13 +6,37 @@
 <title>Trading Terminal</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
-    body { margin:0; font-family:Arial, sans-serif; }
-    #contextMenu, #lineMenu {
-        position:absolute; display:none; background:#fff; border:1px solid #aaa;
-        padding:10px; z-index:6000; font-size:12px; box-shadow:0 2px 10px rgba(0,0,0,0.2);
+    /* ── Тема: светлая (дефолт) и тёмная. Переключается через #contextMenu
+       (меню настроек графика). Нейтрали уведены в сине-графит под акцент. ── */
+    :root {
+        --bg:#ffffff; --panel:#f9f9f9; --btn:#f3f3f3; --btn-border:#bbbbbb;
+        --divider:#d8d8d8; --text:#1c1c1e; --muted:#6b6f76;
+        --accent:#2962ff; --accent-soft:#e8effd;
+        --menu-bg:#ffffff; --menu-hover:#f0f0f0; --menu-border:#aaaaaa;
+        /* цвета графика LWC (применяются через chart.applyOptions) */
+        --chart-bg:#ffffff; --chart-text:#4a4f57; --chart-grid:#ececec; --chart-sep:#cccccc;
     }
-    #contextMenu { background:#ffffff; color:#000000; }
+    :root[data-theme="dark"] {
+        --bg:#161a1e; --panel:#1c2127; --btn:#232a31; --btn-border:#333b44;
+        --divider:#2c333b; --text:#e8eaed; --muted:#8a9099;
+        --accent:#4d84ff; --accent-soft:#22314f;
+        --menu-bg:#1c2127; --menu-hover:#2a323b; --menu-border:#333b44;
+        --chart-bg:#161a1e; --chart-text:#9aa0a8; --chart-grid:#222932; --chart-sep:#2c333b;
+    }
+    body { margin:0; font-family:Arial, sans-serif; background:var(--bg); color:var(--text); }
+    #contextMenu, #lineMenu {
+        position:absolute; display:none; background:var(--menu-bg); border:1px solid var(--menu-border);
+        padding:10px; z-index:6000; font-size:12px; box-shadow:0 2px 10px rgba(0,0,0,0.3); color:var(--text);
+    }
+    #contextMenu { background:var(--menu-bg); color:var(--text); }
     #contextMenu input, #lineMenu input, #lineMenu select { width:100%; margin:6px 0; }
+    /* переключатель темы в меню настроек графика */
+    #themeRow { display:flex; align-items:center; justify-content:space-between; gap:12px;
+        margin:8px 0 4px; padding-top:8px; border-top:1px solid var(--divider); }
+    #themeToggle { display:inline-flex; border:1px solid var(--btn-border); border-radius:5px; overflow:hidden; }
+    #themeToggle button { border:0; border-radius:0; background:var(--btn); color:var(--text);
+        padding:4px 10px; font-size:12px; cursor:pointer; }
+    #themeToggle button.on { background:var(--accent); color:#fff; }
 
     #container {
         display: flex;
@@ -25,7 +49,7 @@
         flex-direction: column;
         flex: 1;
         min-width: 0;
-        border-right: 1px solid #ccc;
+        border-right: 1px solid var(--divider);
     }
     .column:last-child { border-right: none; }
 
@@ -37,13 +61,13 @@
     }
 
     .hidden { display:none !important; }
-    .toolbar { padding:6px; border-bottom:1px solid #ccc; background:#f9f9f9; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .toolbar { padding:6px; border-bottom:1px solid var(--divider); background:var(--panel); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     .chart-wrapper { position:relative; flex:1; overflow:hidden; }
     .chart { width:100%; height:100%; }
 
     .expand, .scrollRight, .resetZoom {
         position:absolute; top:8px; z-index:1000; cursor:pointer;
-        background:#fff; border:1px solid #aaa; padding:3px 7px; border-radius:3px;
+        background:var(--btn); color:var(--text); border:1px solid var(--btn-border); padding:3px 7px; border-radius:3px;
     }
     .expand      { right:8px; }
     .scrollRight { right:38px; }
@@ -54,54 +78,54 @@
         border-radius:3px; pointer-events:none; z-index:1000; color:#fff;
     }
 
-    select, button { padding:4px 8px; border:1px solid #bbb; background:#f3f3f3; cursor:pointer; }
+    select, button { padding:4px 8px; border:1px solid var(--btn-border); background:var(--btn); color:var(--text); cursor:pointer; }
     button { border-radius:3px; }
 
     /* ── Иконочный тулбар (иконки + группы) ── */
     .toolbar select.tb { height:30px; padding:0 6px 0 10px; border-radius:5px; font-size:12.5px; font-weight:550; }
     /* иконочная кнопка */
     .tb-ic {
-        width:30px; height:30px; padding:0; border:1px solid #bbb; background:#f3f3f3;
+        width:30px; height:30px; padding:0; border:1px solid var(--btn-border); background:var(--btn);
         border-radius:5px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center;
-        position:relative; color:#1c1c1e; flex-shrink:0;
+        position:relative; color:var(--text); flex-shrink:0;
     }
-    .tb-ic:hover { border-color:#2962ff; color:#2962ff; }
+    .tb-ic:hover { border-color:var(--accent); color:var(--accent); }
     .tb-ic svg { width:16px; height:16px; display:block; pointer-events:none; }
     /* активное состояние — для инструментов рисования и Sync */
-    .tb-ic.on { background:#e8effd; border-color:#2962ff; color:#2962ff; }
-    /* активная позиция: long зелёная, short красная */
+    .tb-ic.on { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); }
+    /* активная позиция: long зелёная, short красная (семантика, не тема) */
     .tb-ic.on-long  { background:#089981; border-color:#089981; color:#fff; }
     .tb-ic.on-short { background:#f23645; border-color:#f23645; color:#fff; }
     /* сегментная группа инструментов рисования */
-    .tb-seg { display:inline-flex; border:1px solid #bbb; border-radius:5px; overflow:hidden; flex-shrink:0; }
-    .tb-seg .tb-ic { border:0; border-right:1px solid #bbb; border-radius:0; width:32px; }
+    .tb-seg { display:inline-flex; border:1px solid var(--btn-border); border-radius:5px; overflow:hidden; flex-shrink:0; }
+    .tb-seg .tb-ic { border:0; border-right:1px solid var(--btn-border); border-radius:0; width:32px; }
     .tb-seg .tb-ic:last-child { border-right:0; }
     /* текстовая кнопка с иконкой (Сигналы, Brief) */
-    .tb-txt { height:30px; padding:0 10px; border:1px solid #bbb; background:#f3f3f3; border-radius:5px;
-        cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:#1c1c1e; flex-shrink:0; }
-    .tb-txt:hover { border-color:#2962ff; }
+    .tb-txt { height:30px; padding:0 10px; border:1px solid var(--btn-border); background:var(--btn); border-radius:5px;
+        cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:var(--text); flex-shrink:0; }
+    .tb-txt:hover { border-color:var(--accent); }
     .tb-txt svg { width:15px; height:15px; }
-    .tb-txt.on { background:#e8effd; border-color:#2962ff; color:#2962ff; }
+    .tb-txt.on { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); }
     /* разделитель и распорка */
-    .tb-div { width:1px; height:20px; background:#d8d8d8; margin:0 2px; flex-shrink:0; }
+    .tb-div { width:1px; height:20px; background:var(--divider); margin:0 2px; flex-shrink:0; }
     .tb-spacer { flex:1; }
     /* tooltip */
     .tb-ic[data-tip]:hover::after, .tb-txt[data-tip]:hover::after {
         content:attr(data-tip); position:absolute; top:calc(100% + 6px); left:50%;
-        transform:translateX(-50%); background:#1c1c1e; color:#fff; font-size:11px;
+        transform:translateX(-50%); background:var(--text); color:var(--bg); font-size:11px;
         padding:3px 7px; border-radius:4px; white-space:nowrap; pointer-events:none; z-index:2000; font-weight:500;
     }
     .tb-txt { position:relative; }
     /* меню «⋯» */
     .tb-more-menu {
-        position:absolute; z-index:3000; background:#fff; border:1px solid #d8d8d8; border-radius:6px;
-        box-shadow:0 6px 24px rgba(0,0,0,.12); min-width:190px; overflow:hidden; display:none;
+        position:absolute; z-index:3000; background:var(--menu-bg); color:var(--text); border:1px solid var(--menu-border); border-radius:6px;
+        box-shadow:0 6px 24px rgba(0,0,0,.25); min-width:190px; overflow:hidden; display:none;
     }
     .tb-more-menu.open { display:block; }
     .tb-more-menu .mi { display:flex; align-items:center; gap:10px; padding:8px 12px; font-size:13px;
-        cursor:pointer; border-bottom:1px solid #eee; background:none; width:100%; text-align:left; }
+        cursor:pointer; border-bottom:1px solid var(--divider); background:none; color:inherit; width:100%; text-align:left; }
     .tb-more-menu .mi:last-child { border-bottom:0; }
-    .tb-more-menu .mi:hover { background:#e8effd; color:#2962ff; }
+    .tb-more-menu .mi:hover { background:var(--accent-soft); color:var(--accent); }
     .tb-more-menu .mi svg { width:15px; height:15px; }
 
     .menu-item { cursor:pointer; padding:4px 0; }
@@ -112,10 +136,10 @@
     }
     .zoomBtn {
         width:22px; height:22px; display:flex; align-items:center; justify-content:center;
-        background:#ffffff; border:1px solid #aaa; border-radius:3px;
+        background:var(--btn); color:var(--text); border:1px solid var(--btn-border); border-radius:3px;
         cursor:pointer; font-size:14px; font-weight:bold; user-select:none;
     }
-    .zoomBtn:hover { background:#f0f0f0; }
+    .zoomBtn:hover { background:var(--accent-soft); }
 
     #signalPanel {
         position: absolute; left: 8px; top: 8px;
@@ -168,29 +192,30 @@
     #indicatorsPanel {
         position: absolute;
         display: none;
-        background: #fff;
-        border: 1px solid #aaa;
+        background: var(--menu-bg);
+        color: var(--text);
+        border: 1px solid var(--menu-border);
         border-radius: 4px;
         padding: 10px 14px;
         z-index: 7000;
         font-size: 12px;
         min-width: 280px;
-        box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.3);
     }
     #addIndBtn {
         font-size: 12px; padding: 3px 8px; cursor: pointer;
-        background: #f5f5f5; border: 1px solid #ccc; border-radius: 3px;
+        background: var(--btn); color: var(--text); border: 1px solid var(--btn-border); border-radius: 3px;
     }
-    #addIndBtn:hover { background: #e8e8e8; }
+    #addIndBtn:hover { background: var(--accent-soft); }
     #addIndDropdown button {
         display: block; width: 100%; text-align: left;
-        padding: 6px 12px; background: none; border: none;
+        padding: 6px 12px; background: none; color: var(--text); border: none;
         cursor: pointer; font-size: 12px;
     }
-    #addIndDropdown button:hover { background: #f0f0f0; }
+    #addIndDropdown button:hover { background: var(--accent-soft); }
     #indList .ind-row {
         display: flex; align-items: center; gap: 6px; padding: 4px 0;
-        border-bottom: 1px solid #f0f0f0; font-size: 12px;
+        border-bottom: 1px solid var(--divider); font-size: 12px;
     }
     #indList .ind-row:last-child { border-bottom: none; }
     .ind-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
@@ -199,7 +224,7 @@
         background: none; border: 1px solid #ddd; border-radius: 3px;
         cursor: pointer; font-size: 11px; padding: 1px 5px;
     }
-    .ind-settings-btn:hover { background: #f0f0f0; }
+    .ind-settings-btn:hover { background: var(--accent-soft); }
     .ind-del-btn:hover { background: #ffeaea; }
 
     /* ============================================================
@@ -257,6 +282,13 @@
     <div>Верхний фитиль</div><input type="color" id="wickUpColor">
     <div>Нижний фитиль</div><input type="color" id="wickDownColor">
     <button id="resetColors" onclick="resetColors()">Reset Default</button>
+    <div id="themeRow">
+        <span>Тема</span>
+        <span id="themeToggle">
+            <button type="button" onclick="setTheme('light')" data-theme-btn="light">☀ Светлая</button>
+            <button type="button" onclick="setTheme('dark')" data-theme-btn="dark">☾ Тёмная</button>
+        </span>
+    </div>
 </div>
 
 <!-- Line / overlay context menu -->
@@ -321,9 +353,9 @@
 
 <!-- ====== INDICATOR SETTINGS MENU ====== -->
 <div id="indSettingsMenu"
-     style="position:fixed; display:none; background:#fff; border:1px solid #aaa;
+     style="position:fixed; display:none; background:var(--menu-bg); color:var(--text); border:1px solid var(--menu-border);
             border-radius:4px; padding:10px 14px; z-index:8500; font-size:12px;
-            min-width:200px; box-shadow:0 4px 16px rgba(0,0,0,0.18);">
+            min-width:200px; box-shadow:0 4px 16px rgba(0,0,0,0.3);">
   <div style="margin-bottom:6px; font-weight:bold;" id="indSM_title">Settings</div>
   <div id="indSM_colorRow" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
     <span id="indSM_colorLabel">Color</span>
@@ -351,7 +383,7 @@
     <span style="font-weight:bold; font-size:13px;">Indicators</span>
     <div style="position:relative;">
       <button id="addIndBtn" onclick="toggleAddIndDropdown(event)">＋ Add ▾</button>
-      <div id="addIndDropdown" style="display:none; position:absolute; right:0; top:100%; background:#fff; border:1px solid #ccc; border-radius:4px; min-width:140px; z-index:8000; box-shadow:0 2px 8px rgba(0,0,0,0.15);">
+      <div id="addIndDropdown" style="display:none; position:absolute; right:0; top:100%; background:var(--menu-bg); color:var(--text); border:1px solid var(--menu-border); border-radius:4px; min-width:140px; z-index:8000; box-shadow:0 2px 8px rgba(0,0,0,0.3);">
       </div>
     </div>
   </div>
@@ -858,6 +890,10 @@ function createPane(id) {
         // Точный precision для текущего символа, если instruments уже пришли
         // (иначе останется дефолт 5 до первого сообщения instruments).
         applyPriceFormat(paneId);
+
+        // Тема графика (фон/текст/сетка) — сразу при создании, иначе новый
+        // график рисуется на дефолтном белом фоне LWC до следующей смены темы.
+        if (typeof chartThemeOptions === "function") st.chart.applyOptions(chartThemeOptions());
 
         // Indicator manager — created here, loaded later in handleMessage.
         // stretch hooks persist user-set oscillator pane heights in layout.
@@ -2474,6 +2510,38 @@ function toggleChartSync() {
     btn.classList.toggle("on", syncEnabled);
 }
 
+// ── Тема (светлая/тёмная) ──
+// CSS-часть меняется через data-theme на <html>; график LWC красится отдельно
+// через applyOptions (он не читает CSS-переменные). Выбор — в layout.theme.
+function chartThemeOptions() {
+    const css = getComputedStyle(document.documentElement);
+    const bg   = css.getPropertyValue("--chart-bg").trim();
+    const text = css.getPropertyValue("--chart-text").trim();
+    const grid = css.getPropertyValue("--chart-grid").trim();
+    const sep  = css.getPropertyValue("--chart-sep").trim();
+    return {
+        layout: { background: { color: bg }, textColor: text, panes: { separatorColor: sep } },
+        grid:   { vertLines: { color: grid }, horzLines: { color: grid } },
+    };
+}
+function applyChartTheme() {
+    const opts = chartThemeOptions();
+    Object.values(panesState).forEach(st => { if (st.chart) st.chart.applyOptions(opts); });
+}
+function applyTheme(theme) {
+    const t = (theme === "dark") ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", t);
+    // подсветка активной кнопки в переключателе
+    document.querySelectorAll("#themeToggle button").forEach(b =>
+        b.classList.toggle("on", b.dataset.themeBtn === t));
+    applyChartTheme();
+}
+function setTheme(theme) {
+    layout.theme = (theme === "dark") ? "dark" : "light";
+    applyTheme(layout.theme);
+    StorageLayer.autoSave(layout);
+}
+
 // ── Меню «⋯» (редкие действия: удалить всё, сбросить масштаб) ──
 function closeMoreMenus() {
     document.querySelectorAll(".tb-more-menu.open").forEach(m => m.classList.remove("open"));
@@ -2552,6 +2620,9 @@ function initialize() {
 
     panes.forEach(createPane);
     applyColors();
+
+    // Тема — из сохранённого layout (по умолчанию светлая)
+    applyTheme(layout.theme || "light");
 
     // Sync btn initial state
     const syncBtn = document.getElementById("chartSyncBtn");
