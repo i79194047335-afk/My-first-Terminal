@@ -42,6 +42,20 @@ class DrawingEngine {
         this.render();
     }
 
+    // Нижняя граница ЦЕНОВОЙ области в пикселях canvas. Рисунки не должны
+    // вылезать в под-паны индикаторов (Stoch и т.п.): раньше границей брали
+    // всю высоту canvas, и луч/прямоугольник продолжались в осцилляторную пану.
+    // panes()[0] — ценовая пана; её высота в тех же координатах, что и
+    // series.priceToCoordinate. Фолбэк — прежнее поведение, если API нет.
+    priceAreaBottom() {
+        try {
+            const p0 = this.chart.panes()[0];
+            const h = p0 && p0.getHeight && p0.getHeight();
+            if (h && h > 0) return h;
+        } catch (e) {}
+        return this.canvas.height - this.chart.timeScale().height();
+    }
+
     setTimeframe(tfSeconds) {
         this.timeMapper.setTimeframe(tfSeconds);
     }
@@ -106,6 +120,13 @@ if (x1 > rightLimit) {
 
             // если одна из точек вне диапазона — всё равно пробуем рисовать
 
+            // Клип по ценовой области: линия/луч не должны заходить в под-паны
+            // индикаторов, даже если пользователь тянул конец в область Stoch.
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(0, 0, this.chart.timeScale().width(), this.priceAreaBottom());
+            ctx.clip();
+
 					ctx.beginPath();
 			ctx.strokeStyle = obj.selected
 			? "#2962FF"
@@ -132,8 +153,7 @@ if (
     const rightX = this.chart.timeScale().width();
 
     const top = 0;
-    const bottom =
-        this.canvas.height - this.chart.timeScale().height();
+    const bottom = this.priceAreaBottom();
 
     let targetX = rightX;
     let targetY = y1 + slope * (rightX - x1);
@@ -172,7 +192,9 @@ ctx.stroke();
                 ctx.arc(x2, y2, radius, 0, Math.PI * 2);
                 ctx.fill();
             }
-			} 
+
+            ctx.restore();  // снимаем клип ценовой области
+			}
 // ================= RECTANGLE =================
 if (obj.type === "rect") {
 
@@ -202,7 +224,7 @@ if (obj.type === "rect") {
     ctx.save();
 
     const paneWidth = this.chart.timeScale().width();
-    const paneHeight = this.canvas.height;
+    const paneHeight = this.priceAreaBottom();
 
     ctx.beginPath();
     ctx.rect(0, 0, paneWidth, paneHeight);
@@ -306,7 +328,7 @@ if (obj.type === "position") {
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, 0, paneWidth, this.canvas.height);
+    ctx.rect(0, 0, paneWidth, this.priceAreaBottom());
     ctx.clip();
 
     // ---- Зона прибыли (entry → target), зелёная ----
