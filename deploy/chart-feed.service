@@ -4,6 +4,7 @@ After=network.target chart-hub.service
 Wants=chart-hub.service
 
 [Service]
+Environment=PYTHONUNBUFFERED=1
 Type=simple
 WorkingDirectory=/root/projects/terminal-phase2
 # FXCM_LOGIN / FXCM_PASSWORD / FXCM_URL / FXCM_CONNECTION живут в боевом .env.
