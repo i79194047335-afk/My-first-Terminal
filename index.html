@@ -458,6 +458,19 @@ if (!layout.indicators) layout.indicators = {};
 
 let currentSymbol = layout.symbol;
 
+// symbol → {precision, minMove}. Заполняется из WS-сообщения instruments (его
+// шлёт хаб по данным брокера). Раньше precision был захардкожен 5 для всех, а у
+// USD/JPY на самом деле 3 знака — цена рисовалась с двумя лишними нулями.
+let instrumentPrecision = {};
+function applyPriceFormat(id) {
+    const st = panesState[id];
+    if (!st || !st.series) return;
+    const p = instrumentPrecision[currentSymbol];
+    const precision = p ? p.precision : 5;
+    const minMove   = p ? p.minMove   : 0.00001;
+    st.series.applyOptions({ priceFormat: { type: 'price', precision, minMove } });
+}
+
 // ── Briefing panel state ──
 let briefVisible = false;
 let lastBriefingData = null;
@@ -631,6 +644,17 @@ function handleMessage(id, state, msg) {
     if (msg.type === "briefing") { lastBriefingData = msg.data; if (briefVisible) renderBriefing(); }
     if (msg.type === "signals_history") applySignalsHistory(msg.data);
 
+    if (msg.type === "instruments") {
+        // data: { provider: [ {symbol, price_decimals, ...}, ... ] }
+        for (const provider in msg.data) {
+            for (const inst of msg.data[provider]) {
+                const d = (inst.price_decimals == null) ? 5 : inst.price_decimals;
+                instrumentPrecision[inst.symbol] = { precision: d, minMove: Math.pow(10, -d) };
+            }
+        }
+        Object.keys(panesState).forEach(id => applyPriceFormat(id));
+    }
+
     if (msg.type === "alert" && msg.symbol === currentSymbol) {
         playAlertSound();
         showAlertPopup(msg.symbol + " @ " + msg.price);
@@ -750,6 +774,9 @@ function createPane(id) {
             { priceFormat: { type: 'price', precision: 5, minMove: 0.00001 } },
             0
         );
+        // Точный precision для текущего символа, если instruments уже пришли
+        // (иначе останется дефолт 5 до первого сообщения instruments).
+        applyPriceFormat(paneId);
 
         // Indicator manager — created here, loaded later in handleMessage.
         // stretch hooks persist user-set oscillator pane heights in layout.
@@ -1424,6 +1451,7 @@ function switchSymbol(symbol) {
         const state = panesState[id];
         if (!state) return;
         state.indicatorsLoaded = false; // force reload on next history
+        applyPriceFormat(id);           // precision нового символа
         const tf = layout[`pane${id}`]?.tf || "M1";
         const rs = state.ws && state.ws.readyState;
 
