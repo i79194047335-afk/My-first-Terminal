@@ -521,6 +521,33 @@
 const TF_MAP = {
     S5:5, S10:10, S15:15, S30:30, M1:60, M3:180, M5:300, M15:900, H1:3600, H4:14400, D1:86400
 };
+// Адрес хаба; ?ws=ws://127.0.0.1:8767 — для локальной отладки против тест-хаба.
+const WS_URL = new URLSearchParams(location.search).get("ws") || "ws://89.107.10.204:8765";
+// Рэндж-бары: пресеты селектора; произвольное значение — через пункт "R…".
+const RANGE_PRESETS = [5, 10, 20];
+
+// "R:5" → 5.0; null, если это не рэндж-ТФ (зеркало hub.parse_range_tf).
+function parseRangeTF(tf) {
+    if (typeof tf !== "string" || !tf.startsWith("R:")) return null;
+    const pips = parseFloat(tf.slice(2));
+    return (pips > 0 && pips <= 10000) ? pips : null;
+}
+
+// Пипс — предпоследний знак котировки: 10^-(precision-1). Дефолт — мажоры.
+function pipSizeOf(symbol) {
+    const p = instrumentPrecision[symbol]?.precision ?? 5;
+    return Math.pow(10, -(p - 1));
+}
+
+// Кастомный рэндж ("R:7") должен существовать в селекторе, иначе value не встанет.
+function ensureTfOption(select, tf) {
+    if (!parseRangeTF(tf)) return;
+    if ([...select.options].some(o => o.value === tf)) return;
+    const opt = document.createElement("option");
+    opt.value = tf; opt.text = tf.replace(":", "");
+    const custom = [...select.options].find(o => o.value === "R:custom");
+    select.insertBefore(opt, custom || null);
+}
 const DEFAULT_BAR_COUNT = 122;
 const TZ_OFFSET = 5;
 const DEFAULT_COLORS = {
@@ -808,8 +835,9 @@ function createPane(id) {
 
     const state = panesState[id] = {
         chart: null, series: null, lastCandle: null, requestId: 0,
-        ws: new WebSocket(`ws://89.107.10.204:8765`),
-        tfSeconds: TF_MAP[layout[`pane${id}`]?.tf || "M1"],
+        ws: new WebSocket(WS_URL),
+        tfSeconds: TF_MAP[layout[`pane${id}`]?.tf || "M1"] ?? null,
+        rangePips: parseRangeTF(layout[`pane${id}`]?.tf || "M1"),
         selectedLine: null, data: [], syncBound: false,
         indicatorManager: null, indicatorsLoaded: false
     };
@@ -822,6 +850,17 @@ function createPane(id) {
         opt.value = tf; opt.text = tf;
         els.tfSelect.appendChild(opt);
     });
+    RANGE_PRESETS.forEach(p => {
+        const opt = document.createElement("option");
+        opt.value = "R:" + p; opt.text = "R" + p;
+        els.tfSelect.appendChild(opt);
+    });
+    const customOpt = document.createElement("option");
+    customOpt.value = "R:custom"; customOpt.text = "R…";
+    els.tfSelect.appendChild(customOpt);
+
+    // Сохранённый кастомный рэндж (например "R:7") добавляем как опцию.
+    ensureTfOption(els.tfSelect, layout[`pane${id}`]?.tf);
     els.tfSelect.value = layout[`pane${id}`]?.tf || "M1";
 
     state.ws.onopen    = () => {
@@ -836,7 +875,24 @@ function createPane(id) {
     };
     state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
 
-    els.tfSelect.onchange = () => setTF(id, els.tfSelect.value);
+    els.tfSelect.onchange = () => {
+        let v = els.tfSelect.value;
+        if (v === "R:custom") {
+            const prev  = layout[`pane${id}`]?.tf || "M1";
+            const inp   = prompt("Диапазон рэндж-бара, в пипсах:",
+                                 parseRangeTF(prev) || 10);
+            const pips  = inp === null ? null
+                        : parseFloat(String(inp).replace(",", "."));
+            if (!pips || pips <= 0 || pips > 10000) {
+                els.tfSelect.value = prev;   // отмена/мусор — откат селектора
+                return;
+            }
+            v = "R:" + pips;
+            ensureTfOption(els.tfSelect, v);
+            els.tfSelect.value = v;
+        }
+        setTF(id, v);
+    };
     setInterval(() => updateCountdown(id), 250);
     // Pick up user-dragged oscillator pane heights (LWC has no pane-resize event).
     setInterval(() => panesState[id]?.indicatorManager?.captureStretch(), 1500);
@@ -868,7 +924,7 @@ function createPane(id) {
             },
             timeScale: {
                 timeVisible: true,
-                secondsVisible: tfSec < 60,
+                secondsVisible: !tfSec || tfSec < 60,
                 rightBarStaysOnScroll: true,
                 rightOffset: 12,
                 tickMarkFormatter: (time) => {
@@ -946,15 +1002,24 @@ function createPane(id) {
     function updateCountdown(paneId) {
         const st = panesState[paneId];
         if (!st.lastCandle || !st.series) return;
-        const now    = Math.floor(Date.now() / 1000);
-        const bucket = Math.floor(now / st.tfSeconds) * st.tfSeconds;
-        let remain   = st.tfSeconds - (now - bucket);
-        if (remain < 0) remain = 0;
-        // ММ:СС до часа, ЧЧ:ММ:СС дальше — иначе H4/D1 показывали "238:47"
-        const h  = Math.floor(remain / 3600);
-        const m  = Math.floor((remain % 3600) / 60).toString().padStart(2,'0');
-        const s  = (remain % 60).toString().padStart(2,'0');
-        const txt = h > 0 ? `${h.toString().padStart(2,'0')}:${m}:${s}` : `${m}:${s}`;
+        let txt;
+        if (st.rangePips) {
+            // У рэндж-бара нет времени закрытия — показываем набранный
+            // диапазон: «3.2/5» пипсов.
+            const got = (st.lastCandle.high - st.lastCandle.low)
+                        / pipSizeOf(currentSymbol);
+            txt = got.toFixed(1) + "/" + st.rangePips;
+        } else {
+            const now    = Math.floor(Date.now() / 1000);
+            const bucket = Math.floor(now / st.tfSeconds) * st.tfSeconds;
+            let remain   = st.tfSeconds - (now - bucket);
+            if (remain < 0) remain = 0;
+            // ММ:СС до часа, ЧЧ:ММ:СС дальше — иначе H4/D1 показывали "238:47"
+            const h  = Math.floor(remain / 3600);
+            const m  = Math.floor((remain % 3600) / 60).toString().padStart(2,'0');
+            const s  = (remain % 60).toString().padStart(2,'0');
+            txt = h > 0 ? `${h.toString().padStart(2,'0')}:${m}:${s}` : `${m}:${s}`;
+        }
         const y  = st.series.priceToCoordinate(st.lastCandle.close);
         if (y === null) return;
         const el = getPaneElements(paneId).countdown;
@@ -1302,7 +1367,8 @@ function setupInteractionHandlers(paneId, st, els) {
         if (found) selectLine(found); else deselectLine();
 
         // Signal marker click — navigate to the signal that occupies this candle bucket
-        if (_signalsVisible && typeof param.time === "number" && DrawingController.getTool() === "idle") {
+        // (на рэндж-ТФ маркеры не рисуются — там нет временных бакетов)
+        if (_signalsVisible && st.tfSeconds && typeof param.time === "number" && DrawingController.getTool() === "idle") {
             const tf = st.tfSeconds;
             const clickedBucket = Math.floor(param.time / tf) * tf;
             const matchIdx = _signalLog.findLastIndex(s => {
@@ -1529,14 +1595,18 @@ function setupInteractionHandlers(paneId, st, els) {
 function setTF(paneId, tf) {
     const st = panesState[paneId];
     st.requestId++;
-    st.tfSeconds = TF_MAP[tf];
+    st.rangePips = parseRangeTF(tf);
+    // Для рэндж-ТФ tfSeconds = null: вся временная логика (таймер, бакеты
+    // маркеров, crosshair-sync) обязана проверять его перед использованием.
+    st.tfSeconds = st.rangePips ? null : TF_MAP[tf];
     if (st.drawingEngine) st.drawingEngine.setTimeframe(st.tfSeconds);
     if (st.chart) {
         // Сбросить перекрестие перед сменой ТФ: иначе при подмене данных на ТФ с
         // меньшим числом баров LWC дёргает устаревший логический индекс курсора
         // во время рассинхрона и бросает "Value is null" на каждое движение мыши.
         try { st.chart.clearCrosshairPosition(); } catch (e) {}
-        st.chart.applyOptions({ timeScale: { secondsVisible: st.tfSeconds < 60 } });
+        st.chart.applyOptions({ timeScale:
+            { secondsVisible: !st.tfSeconds || st.tfSeconds < 60 } });
     }
     layout[`pane${paneId}`].tf = tf;
     StorageLayer.autoSave(layout);
@@ -1582,7 +1652,7 @@ function switchSymbol(symbol) {
             // currentSymbol, пересоздавать не нужно.
         } else {
             // Только если сокет закрыт/закрывается — создаём заново.
-            state.ws = new WebSocket(`ws://89.107.10.204:8765`);
+            state.ws = new WebSocket(WS_URL);
             state.ws.onopen    = () => setTF(id, layout[`pane${id}`]?.tf || "M1");
             state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
             if (id === 1) ws1 = state.ws;
@@ -1753,6 +1823,8 @@ function getMarkersForPane(paneId) {
     const st = panesState[paneId];
     if (!st?.data?.length || !st.chart) return [];
     const tf = st.tfSeconds;
+    // Рэндж-ТФ: у сигналов временные метки, снапить их не к чему — маркеров нет.
+    if (!tf) return [];
     // Маркер ОБЯЗАН ложиться на точку шкалы: LightweightCharts при раскладке
     // маркеров зовёт timeToCoordinate(marker.time) и оборачивает результат в
     // ensureNotNull — для времени, которого нет на шкале, это бросает "Value is

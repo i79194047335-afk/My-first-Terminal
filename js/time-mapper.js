@@ -15,7 +15,9 @@ class TimeMapper {
     }
 
     bucketTime(time) {
-        if (!time || !this.tfSeconds) return null;
+        if (!time) return null;
+        // Рэндж-ТФ (tfSeconds=null): бакетов нет, время рисунка — как есть.
+        if (!this.tfSeconds) return time;
         return Math.floor(time / this.tfSeconds) * this.tfSeconds;
     }
 
