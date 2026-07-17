@@ -73,24 +73,47 @@ class TestRangeBarBuilder(unittest.TestCase):
         self.assertEqual(bar["close"], 1.1010)
         self.assertAlmostEqual(bar["high"] - bar["low"], R, places=10)
 
-    def test_open_equals_prev_close(self):
-        """Непрерывность: open нового бара = close закрытого."""
+    def test_open_from_breaker_price(self):
+        """Новый бар открывается от цены тика-пробойщика (= close закрытого)."""
         b = RangeBarBuilder(R)
         closed = walk(b, [1.1000, 1.1010, 1.1015, 1.1020])
         self.assertEqual(len(closed), 2)
+        # Пробой ровный — open совпадает с close предыдущего, но по механике
+        # это цена тика-пробойщика, а не подтяжка (проверяется в gap-тесте).
         self.assertEqual(b.current()["open"], closed[-1]["close"])
-        self.assertEqual(closed[1]["open"], closed[0]["close"])
 
-    def test_gap_single_honest_bar(self):
-        """Гэп в 5R — ОДИН широкий бар, без фантомной лесенки."""
+    def test_gap_tick_closes_bar_and_leaves_visible_gap(self):
+        """Гэп-тик (скачок > R) закрывает бар КАК ЕСТЬ и оставляет разрыв.
+
+        Раньше такой тик вливался в бар и раздувал его размах до десятков
+        пипсов (бары по 30-50п при R=10). Теперь бар закрывается до скачка,
+        а разрыв виден как гэп close→open между барами.
+        """
         b = RangeBarBuilder(R)
-        closed = walk(b, [1.1000, 1.1002, 1.1052])   # прыжок 50 пипсов
+        # 1.1000→1.1010 закрывает bar0 (o=1.1000 c=1.1010), новый бар — точка
+        # 1.1010; тик 1.1060 отстоит от close на 50п (> R) → ГЭП: закрывает
+        # бар-точку как есть (размах 0), открывает новый от 1.1060.
+        closed = walk(b, [1.1000, 1.1010, 1.1060])
+        self.assertEqual(len(closed), 2)
+        self.assertEqual(closed[0]["close"], 1.1010)
+        # Второй закрытый — «точка» до гэпа, НЕ растянут скачком.
+        gap_bar = closed[1]
+        self.assertEqual(gap_bar["high"] - gap_bar["low"], 0.0)
+        self.assertEqual(gap_bar["close"], 1.1010)
+        # Разрыв виден: close закрытого 1.1010, а новый бар открыт от 1.1060.
+        self.assertEqual(b.current()["open"], 1.1060)
+
+    def test_fast_move_within_R_not_treated_as_gap(self):
+        """Быстрый тик В ПРЕДЕЛАХ R — обычное расширение, не гэп."""
+        b = RangeBarBuilder(R)
+        # шаги по 4-5п (< R) — нормальный ход, гэп-ветка не срабатывает
+        closed = walk(b, [1.1000, 1.1004, 1.1009, 1.1013])
         self.assertEqual(len(closed), 1)
         bar = closed[0]
-        self.assertAlmostEqual(bar["high"] - bar["low"], 0.0052, places=10)
-        self.assertEqual(bar["close"], 1.1052)
-        # следующий бар открыт от цены пробойщика
-        self.assertEqual(b.current()["open"], 1.1052)
+        # закрылся расширением, размах >= R (не нулевой бар-точка), и не
+        # раздут гэпом: превышение над R меньше R (шаги в тесте < R → размах < 2R).
+        self.assertGreaterEqual(bar["high"] - bar["low"], R - 1e-12)
+        self.assertLess(bar["high"] - bar["low"], 2 * R)
 
     def test_time_unique_ascending_on_burst(self):
         """Несколько закрытий в одну секунду → время бампится, LWC доволен."""
@@ -111,15 +134,17 @@ class TestRangeBarBuilder(unittest.TestCase):
         walk(b, prices)
         self.assertEqual(len(b.history()), 3)
 
-    def test_seed_history_continuity(self):
-        """После seed первый тик открывает бар от close последнего из истории."""
+    def test_seed_history_then_first_tick_opens_from_tick(self):
+        """После seed первый тик открывает бар от СВОЕЙ цены (не от close истории)."""
         b = RangeBarBuilder(R)
         b.seed_history([{"time": 100, "open": 1.1000, "high": 1.1010,
                          "low": 1.1000, "close": 1.1010}])
         b.ingest(1.1013, 200.0)
         cur = b.current()
-        self.assertEqual(cur["open"], 1.1010)
+        # Бар открыт от цены тика 1.1013 (одна точка), а не подтянут к 1.1010.
+        self.assertEqual(cur["open"], 1.1013)
         self.assertEqual(cur["high"], 1.1013)
+        self.assertEqual(cur["low"], 1.1013)
 
     def test_rejects_bad_range(self):
         """range_size <= 0 — ошибка сразу, а не мусор в данных."""
@@ -141,26 +166,33 @@ class TestBackfillRealTicks(unittest.TestCase):
         cls.data_dir = os.path.dirname(max(files, key=os.path.getsize))
 
     def test_real_day_invariants(self):
-        """R=5 пипсов на реальных тиках: диапазон, непрерывность, время."""
+        """R=5 пипсов на реальных тиках: диапазон, OHLC, время, размах ≈ R."""
         r = 0.0005
         builder = backfill(self.data_dir, "EUR/USD", r, max_bars=2000)
         bars = builder.history()
         self.assertGreater(len(bars), 10, "слишком мало баров — что-то не так")
 
         prev = None
+        gaps = 0
         for bar in bars:
-            self.assertGreaterEqual(bar["high"] - bar["low"], r - 1e-12)
+            # OHLC-консистентность обязана держаться на ЛЮБОМ баре.
             self.assertGreaterEqual(bar["high"], max(bar["open"], bar["close"]))
             self.assertLessEqual(bar["low"], min(bar["open"], bar["close"]))
+            # Размах закрытого бара не превышает R больше чем на «один тик»
+            # (дискретность котировки). Гэп-бары («точки» перед разрывом) имеют
+            # размах ~0 — это норма; раздутых баров (десятки пипсов) быть НЕ
+            # должно, ради чего и вводилась гэп-логика.
+            span = (bar["high"] - bar["low"]) / 0.0001
+            self.assertLess(span, 20, "раздутый бар %.1fп — гэп не отсечён" % span)
             if prev is not None:
                 self.assertGreater(bar["time"], prev["time"])
-                self.assertEqual(bar["open"], prev["close"])
+                if bar["open"] != prev["close"]:
+                    gaps += 1   # разрыв — норма на выходных/новостях
             prev = bar
 
-        # Живой бар открыт и непрерывен с последним закрытым
-        cur = builder.current()
-        if cur is not None and bars:
-            self.assertEqual(cur["open"], bars[-1]["close"])
+        # Гэпы редки: на месяце тиков их единицы, не большинство.
+        self.assertLess(gaps, len(bars) * 0.05,
+                        "слишком много разрывов — что-то не так с логикой гэпа")
 
     def test_since_ts_filters(self):
         """since_ts режет старые тики (и целые файлы — по имени)."""
