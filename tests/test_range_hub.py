@@ -1,5 +1,5 @@
 """
-Сквозной тест рэндж-баров в хабе: set_tf "R:<пипсы>" → бэкфил из тикового
+Сквозной тест рэндж-баров в хабе: set_tf "R:<поинты>" → бэкфил из тикового
 архива → history/update по контракту свечных ТФ → живые тики из шины.
 
 Архив — синтетический CSV во временном каталоге (боевой data/ не читается:
@@ -32,9 +32,9 @@ from test_phase2_hub import HubHarness
 PROVIDER = "fxcm"
 SYMBOL   = "EUR/USD"
 
-# Тики архива (ts, mid). R=5 пипсов (0.0005). Ожидание, посчитанное руками:
-#   бар1: 1.1000 → 1.1005 (диапазон ровно 5п)   o=1.1000 h=1.1005 l=1.1000 c=1.1005 t=1000
-#   бар2: открыт пробойщиком 1.1005; 1.1007 (h), 1.1003, 1.1002 (l, 5п — закрытие)
+# Тики архива (ts, mid). R:50 = 50 ПОИНТОВ = 0.0005. Ожидание руками:
+#   бар1: 1.1000 → 1.1005 (диапазон ровно 50 поинтов) o=1.1000 h=1.1005 l=1.1000 c=1.1005 t=1000
+#   бар2: открыт пробойщиком 1.1005; 1.1007 (h), 1.1003, 1.1002 (l, 50п — закрытие)
 #         o=1.1005 h=1.1007 l=1.1002 c=1.1002 t=1002
 #   живой: открыт от 1.1002; тик 1.1004 → o=1.1002 h=1.1004 l=1.1002 c=1.1004 t=1005
 ARCHIVE_TICKS = [
@@ -105,16 +105,16 @@ class TestRangeHub(unittest.TestCase):
         for bad in ("M1", "R:", "R:0", "R:-3", "R:abc", "R:99999", None, 5):
             self.assertIsNone(Hub.parse_range_tf(bad), repr(bad))
 
-    def test_pip_size_from_instruments(self):
-        """Пипс выводится из price_decimals; без instruments — дефолт 0.0001."""
+    def test_point_size_from_instruments(self):
+        """Поинт (мин. тик) = 10^-price_decimals; без instruments — дефолт 0.00001."""
         hub = Hub.__new__(Hub)          # без запуска: метод трогает только поле
         hub._instruments = {PROVIDER: [
             {"symbol": "EUR/USD", "price_decimals": 5},
             {"symbol": "USD/JPY", "price_decimals": 3},
         ]}
-        self.assertAlmostEqual(hub._pip_size(PROVIDER, "EUR/USD"), 0.0001)
-        self.assertAlmostEqual(hub._pip_size(PROVIDER, "USD/JPY"), 0.01)
-        self.assertAlmostEqual(hub._pip_size(PROVIDER, "AUD/USD"), 0.0001)
+        self.assertAlmostEqual(hub._point_size(PROVIDER, "EUR/USD"), 0.00001)
+        self.assertAlmostEqual(hub._point_size(PROVIDER, "USD/JPY"), 0.001)
+        self.assertAlmostEqual(hub._point_size(PROVIDER, "AUD/USD"), 0.00001)
 
     def test_backfill_history_live_flow(self):
         """Полный путь: set_tf → бэкфил CSV → history+update → живые тики."""
@@ -138,7 +138,7 @@ class TestRangeHub(unittest.TestCase):
             url = "ws://127.0.0.1:%d" % h.config["ws_port"]
             async with websockets.connect(url) as ws:
                 await ws.send(json.dumps({"type": "set_tf", "symbol": SYMBOL,
-                                          "tf": "R:5", "requestId": 7}))
+                                          "tf": "R:50", "requestId": 7}))
 
                 history = await recv_typed(ws, "history", 7)
                 live    = await recv_typed(ws, "update", 7)
@@ -153,7 +153,7 @@ class TestRangeHub(unittest.TestCase):
                 # Повторный set_tf того же диапазона — билдер уже в кэше,
                 # история приходит сразу и включает закрытый живьём бар.
                 await ws.send(json.dumps({"type": "set_tf", "symbol": SYMBOL,
-                                          "tf": "R:5", "requestId": 8}))
+                                          "tf": "R:50", "requestId": 8}))
                 history2 = await recv_typed(ws, "history", 8)
 
             stats = h.hub.stats
@@ -166,7 +166,7 @@ class TestRangeHub(unittest.TestCase):
             run_async(scenario())
 
         # Бэкфил: ровно два закрытых бара, посчитанных руками, и живой бар.
-        self.assertEqual(history["tf"], "R:5")
+        self.assertEqual(history["tf"], "R:50")
         self.assertEqual(len(history["data"]), 2)
         self.assertEqual(history["data"][0], EXPECTED_BAR1)
         self.assertEqual(history["data"][1], EXPECTED_BAR2)

@@ -537,20 +537,23 @@ const TF_MAP = {
 };
 // Адрес хаба; ?ws=ws://127.0.0.1:8767 — для локальной отладки против тест-хаба.
 const WS_URL = new URLSearchParams(location.search).get("ws") || "ws://89.107.10.204:8765";
-// Рэндж-бары: пресеты селектора; произвольное значение — через пункт "R…".
-const RANGE_PRESETS = [5, 10, 20];
+// Рэндж-бары: пресеты в ПОИНТАХ (как TradingView), произвольное — через "R…".
+// Поинт = минимальный тик (5-й знак EUR/USD), поэтому пресеты крупнее пипсовых:
+// R10 = 10 поинтов = 1 пипс, R50 = 5 пипсов.
+const RANGE_PRESETS = [10, 20, 50];
 
-// "R:5" → 5.0; null, если это не рэндж-ТФ (зеркало hub.parse_range_tf).
+// "R:10" → 10.0; null, если это не рэндж-ТФ (зеркало hub.parse_range_tf).
 function parseRangeTF(tf) {
     if (typeof tf !== "string" || !tf.startsWith("R:")) return null;
-    const pips = parseFloat(tf.slice(2));
-    return (pips > 0 && pips <= 10000) ? pips : null;
+    const points = parseFloat(tf.slice(2));
+    return (points > 0 && points <= 10000) ? points : null;
 }
 
-// Пипс — предпоследний знак котировки: 10^-(precision-1). Дефолт — мажоры.
-function pipSizeOf(symbol) {
+// Размер ОДНОГО ПОИНТА (пипетты) — последний знак котировки: 10^-precision.
+// EUR/USD → 0.00001, USD/JPY → 0.001. Единица рэндж-баров, как у всех. Дефолт — мажоры.
+function pointSizeOf(symbol) {
     const p = instrumentPrecision[symbol]?.precision ?? 5;
-    return Math.pow(10, -(p - 1));
+    return Math.pow(10, -p);
 }
 
 // Кастомный рэндж ("R:7") должен существовать в селекторе, иначе value не встанет.
@@ -1017,10 +1020,10 @@ function createPane(id) {
         let txt;
         if (st.rangePips) {
             // У рэндж-бара нет времени закрытия — показываем набранный
-            // диапазон: «3.2/5» пипсов.
+            // диапазон в ПОИНТАХ: «6/10» (rangePips хранит поинты, как задан R).
             const got = (st.lastCandle.high - st.lastCandle.low)
-                        / pipSizeOf(currentSymbol);
-            txt = got.toFixed(1) + "/" + st.rangePips;
+                        / pointSizeOf(currentSymbol);
+            txt = got.toFixed(0) + "/" + st.rangePips;
         } else {
             const now    = Math.floor(Date.now() / 1000);
             const bucket = Math.floor(now / st.tfSeconds) * st.tfSeconds;

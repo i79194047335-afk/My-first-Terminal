@@ -96,7 +96,7 @@ class Hub:
         self._briefing_mtime  = 0
         self._briefing_lock   = threading.Lock()
 
-        # Рэндж-бары: билдеры создаются ЛЕНИВО по set_tf "R:<пипсы>" и живут
+        # Рэндж-бары: билдеры создаются ЛЕНИВО по set_tf "R:<поинты>" и живут
         # только в памяти — источник истины у них один, тиковый архив, и после
         # рестарта история честно перестраивается из него же (персист в candles
         # намеренно НЕ делаем: произвольные R замусорили бы таблицу, а шов
@@ -541,13 +541,13 @@ class Hub:
 
     @staticmethod
     def parse_range_tf(tf):
-        """Распознать рэндж-ТФ вида "R:<пипсы>".
+        """Распознать рэндж-ТФ вида "R:<поинты>".
 
         Args:
             tf: Строка ТФ из set_tf ("M1", "R:5", "R:2.5", …).
 
         Returns:
-            Диапазон в пипсах (float) или None, если это не рэндж-ТФ либо
+            Диапазон в поинтах (float) или None, если это не рэндж-ТФ либо
             значение вне здравого смысла (<= 0 или > 10000).
         """
         if not isinstance(tf, str) or not tf.startswith("R:"):
@@ -560,24 +560,26 @@ class Hub:
             return None
         return pips
 
-    def _pip_size(self, provider, symbol):
-        """Размер пипса инструмента в единицах цены.
+    def _point_size(self, provider, symbol):
+        """Размер ОДНОГО ПОИНТА (пипетты) инструмента в единицах цены.
 
-        Пипс — предпоследний знак котировки: 10^-(price_decimals-1).
-        EUR/USD (5 знаков) → 0.0001, USD/JPY (3 знака) → 0.01.
+        Поинт — последний знак котировки, минимальный тик: 10^-price_decimals.
+        EUR/USD (5 знаков) → 0.00001, USD/JPY (3 знака) → 0.001. Единица
+        рэндж-баров задаётся в поинтах, как в TradingView («10R» = 10 поинтов),
+        а не в пипсах — чтобы наши значения совпадали с общепринятыми.
 
         Args:
             provider: Провайдер.
             symbol:   Инструмент.
 
         Returns:
-            Float; 0.0001, если инструмент в _instruments не найден
-            (форекс-мажоры — подавляющий случай).
+            Float; 0.00001, если инструмент в _instruments не найден
+            (форекс-мажоры с 5 знаками — подавляющий случай).
         """
         for item in self._instruments.get(provider, []):
             if item.get("symbol") == symbol and item.get("price_decimals"):
-                return 10.0 ** -(item["price_decimals"] - 1)
-        return 0.0001
+                return 10.0 ** -item["price_decimals"]
+        return 0.00001
 
     def _range_ingest(self, provider, symbol, price, ts):
         """Прогнать живой тик через рэндж-контур этой пары.
@@ -646,7 +648,7 @@ class Hub:
             provider:   Провайдер.
             symbol:     Инструмент.
             tf:         Строка ТФ как прислал фронт ("R:5").
-            pips:       Разобранный диапазон в пипсах.
+            pips:       Разобранный диапазон в поинтах.
             request_id: requestId клиента.
 
         Returns:
@@ -680,8 +682,8 @@ class Hub:
             None. Результат уходит в _finish_range_backfill через
             call_soon_threadsafe (билдер трогает event loop — только оттуда).
         """
-        provider, symbol, pips = key
-        rsize   = pips * self._pip_size(provider, symbol)
+        provider, symbol, points = key
+        rsize   = points * self._point_size(provider, symbol)
         builder = RangeBarBuilder(rsize, max_bars=self._keep_bars)
         last_ts = None
         try:
@@ -691,7 +693,7 @@ class Hub:
         except Exception as err:
             # Архива может не быть (свежий инстанс) — отдаём что успели.
             print("[hub] бэкфил рэндж %s:%s R=%s: %r"
-                  % (provider, symbol, pips, err))
+                  % (provider, symbol, points, err))
 
         loop = self._loop
         if loop is not None:
