@@ -38,6 +38,13 @@
         padding:4px 10px; font-size:12px; cursor:pointer; }
     #themeToggle button.on { background:var(--accent); color:#fff; }
 
+    #chartTypeRow { display:flex; align-items:center; justify-content:space-between; gap:12px;
+        margin:4px 0; }
+    #chartTypeToggle { display:inline-flex; border:1px solid var(--btn-border); border-radius:5px; overflow:hidden; }
+    #chartTypeToggle button { border:0; border-radius:0; background:var(--btn); color:var(--text);
+        padding:4px 10px; font-size:12px; cursor:pointer; }
+    #chartTypeToggle button.on { background:var(--accent); color:#fff; }
+
     #container {
         display: flex;
         width: 100%;
@@ -287,6 +294,13 @@
         <span id="themeToggle">
             <button type="button" onclick="setTheme('light')" data-theme-btn="light">☀ Светлая</button>
             <button type="button" onclick="setTheme('dark')" data-theme-btn="dark">☾ Тёмная</button>
+        </span>
+    </div>
+    <div id="chartTypeRow">
+        <span>Тип</span>
+        <span id="chartTypeToggle">
+            <button type="button" onclick="setChartTypeFromMenu('candles')" data-charttype-btn="candles">🕯 Свечи</button>
+            <button type="button" onclick="setChartTypeFromMenu('bars')" data-charttype-btn="bars">📊 Бары</button>
         </span>
     </div>
 </div>
@@ -553,6 +567,8 @@ const TZ_OFFSET = 5;
 const DEFAULT_COLORS = {
     up: "#26a69a", down: "#ef5350", wickUp: "#26a69a", wickDown: "#ef5350"
 };
+// Тип отрисовки главной серии. "candles" — свечи, "bars" — OHLC-бары.
+const CHART_TYPES = ["candles", "bars"];
 
 // ============================================================================
 // Global state
@@ -938,11 +954,7 @@ function createPane(id) {
             }
         });
 
-        st.series = st.chart.addSeries(
-            LightweightCharts.CandlestickSeries,
-            { priceFormat: { type: 'price', precision: 5, minMove: 0.00001 } },
-            0
-        );
+        st.series = makeSeries(st.chart, layout[`pane${paneId}`]?.chartType);
         // Точный precision для текущего символа, если instruments уже пришли
         // (иначе останется дефолт 5 до первого сообщения instruments).
         applyPriceFormat(paneId);
@@ -1750,14 +1762,66 @@ document.getElementById("importFile").onchange = e => {
 // ============================================================================
 // Colors
 // ============================================================================
+// Создать главную серию нужного типа. BarSeries и CandlestickSeries — разные
+// типы LWC, у уже созданной серии тип не меняется, поэтому смена типа = снос
+// старой серии и создание новой (см. setChartType).
+function makeSeries(chart, chartType) {
+    const type = CHART_TYPES.includes(chartType) ? chartType : "candles";
+    const ctor = type === "bars"
+        ? LightweightCharts.BarSeries
+        : LightweightCharts.CandlestickSeries;
+    return chart.addSeries(
+        ctor,
+        { priceFormat: { type: 'price', precision: 5, minMove: 0.00001 } },
+        0
+    );
+}
+
+// Переключить тип отрисовки панели, перенеся данные, цвета, precision,
+// индикаторную привязку, рисунки и сигнальные маркеры на новую серию.
+function setChartType(paneId, chartType) {
+    const st = panesState[paneId];
+    if (!st || !st.chart) return;
+    const type = CHART_TYPES.includes(chartType) ? chartType : "candles";
+    layout[`pane${paneId}`] = layout[`pane${paneId}`] || {};
+    if (layout[`pane${paneId}`].chartType === type && st.series) return;
+    layout[`pane${paneId}`].chartType = type;
+    StorageLayer.autoSave(layout);
+
+    if (st.series) {
+        try { st.chart.removeSeries(st.series); } catch (e) {}
+        st.signalMarkers = null;   // плагин маркеров жил на старой серии
+    }
+    st.series = makeSeries(st.chart, type);
+    if (st.data?.length) st.series.setData(st.data);
+
+    // Перевесить всё, что держало ссылку на главную серию.
+    if (st.drawingEngine)    st.drawingEngine.series    = st.series;
+    if (st.indicatorManager) st.indicatorManager.candleSeries = st.series;
+
+    applyPriceFormat(paneId);
+    applyColors();
+    refreshSignalMarkers();
+    st.drawingEngine?.render();
+    syncChartTypeButtons(paneId);
+}
+
 function applyColors() {
-    Object.values(panesState).forEach(p => {
+    Object.entries(panesState).forEach(([paneId, p]) => {
         if (!p.series) return;
-        p.series.applyOptions({
-            upColor: layout.colors.up, downColor: layout.colors.down,
-            wickUpColor: layout.colors.wickUp, wickDownColor: layout.colors.wickDown,
-            borderUpColor: layout.colors.up, borderDownColor: layout.colors.down
-        });
+        const type = layout[`pane${paneId}`]?.chartType || "candles";
+        if (type === "bars") {
+            // У BarSeries нет фитилей/границ — только up/down тела баров.
+            p.series.applyOptions({
+                upColor: layout.colors.up, downColor: layout.colors.down
+            });
+        } else {
+            p.series.applyOptions({
+                upColor: layout.colors.up, downColor: layout.colors.down,
+                wickUpColor: layout.colors.wickUp, wickDownColor: layout.colors.wickDown,
+                borderUpColor: layout.colors.up, borderDownColor: layout.colors.down
+            });
+        }
     });
 }
 function resetColors() {
@@ -2607,6 +2671,18 @@ function applyTheme(theme) {
     document.querySelectorAll("#themeToggle button").forEach(b =>
         b.classList.toggle("on", b.dataset.themeBtn === t));
     applyChartTheme();
+}
+
+// Тумблер типа в #contextMenu действует на панель, по которой меню открыто
+// (chartMenuPane выставляется showChartMenu). Без панели — тихо выходим.
+function setChartTypeFromMenu(type) {
+    if (typeof chartMenuPane !== "number" || !panesState[chartMenuPane]) return;
+    setChartType(chartMenuPane, type);
+}
+function syncChartTypeButtons(paneId) {
+    const cur = layout[`pane${paneId}`]?.chartType || "candles";
+    document.querySelectorAll("#chartTypeToggle button").forEach(b =>
+        b.classList.toggle("on", b.dataset.charttypeBtn === cur));
 }
 function setTheme(theme) {
     layout.theme = (theme === "dark") ? "dark" : "light";

@@ -34,34 +34,9 @@ function initCandleColorMenu() {
 
 }
 
-function applyColors() {
-
-    Object.values(panesState).forEach(p => {
-
-        if (!p.series) return;
-
-        p.series.applyOptions({
-            upColor: layout.colors.up,
-            downColor: layout.colors.down,
-            wickUpColor: layout.colors.wickUp,
-            wickDownColor: layout.colors.wickDown,
-            borderUpColor: layout.colors.up,
-            borderDownColor: layout.colors.down
-        });
-
-    });
-
-}
-
-function resetColors() {
-
-    layout.colors = { ...DEFAULT_COLORS };
-
-    applyColors();
-
-    StorageLayer.autoSave(layout);
-
-}
+// applyColors / resetColors определены в index.html (там версия знает про тип
+// отрисовки — свечи/бары). Дубль отсюда убран, чтобы порядок загрузки скриптов
+// не решал, какая из двух реализаций в силе.
 
 function showCandleContextMenu(x, y) {
 	console.log("open candle menu");
@@ -92,6 +67,12 @@ function showCandleContextMenu(x, y) {
     document.getElementById("downColor").value = layout.colors.down;
     document.getElementById("wickUpColor").value = layout.colors.wickUp;
     document.getElementById("wickDownColor").value = layout.colors.wickDown;
+
+    // Подсветить активный тип отрисовки для панели, по которой открыто меню.
+    if (typeof syncChartTypeButtons === "function" &&
+        typeof chartMenuPane === "number") {
+        syncChartTypeButtons(chartMenuPane);
+    }
 
 }
 // ============================================================================
