@@ -2783,9 +2783,19 @@ function initialize() {
         symbolSelect.onchange = e => switchSymbol(e.target.value);
     }
 
-    // Restore layout split
-    if (layout.split === "leftFull")  document.getElementById("column2").classList.add("hidden");
-    if (layout.split === "rightFull") document.getElementById("column1").classList.add("hidden");
+    // Restore layout split.
+    // ВАЖНО: прячем колонку тем же механизмом, что и toggleFull (инлайновый
+    // style.display + flex видимой колонки), а НЕ классом .hidden. Класс —
+    // это display:none !important, и toggleFull, снимающий скрытие через
+    // style.display="" , не может его перебить: выход из фулскрина после
+    // перезагрузки молча не срабатывал (баг «нельзя вернуться в сплит»).
+    const _col1 = document.getElementById("column1");
+    const _col2 = document.getElementById("column2");
+    if (layout.split === "leftFull") {
+        _col2.style.display = "none"; _col1.style.flex = "1 1 100%";
+    } else if (layout.split === "rightFull") {
+        _col1.style.display = "none"; _col2.style.flex = "1 1 100%";
+    }
 
     // Button handlers ("Удалить всё" переехал в меню «⋯» с прямым onclick)
     document.getElementById("chartSyncBtn").onclick = toggleChartSync;
