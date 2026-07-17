@@ -244,19 +244,22 @@ def upsert_instrument(conn: sqlite3.Connection, provider: str, symbol: str,
         updated:        Unix timestamp of last update.
     """
     import json
-    conn.execute(
-        """INSERT OR REPLACE INTO instruments
-           (provider, symbol, price_decimals, size_decimals,
-            min_base, has_volume, meta, updated)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            provider, symbol,
-            price_decimals, size_decimals,
-            min_base, 1 if has_volume else 0,
-            json.dumps(meta) if meta else None,
-            updated,
-        ),
-    )
+    # `with conn:` — коммит. Без него запись жила только в открытой транзакции и
+    # умирала вместе с процессом: upsert_candle коммитит, а этот — нет (Фаза 1).
+    with conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO instruments
+               (provider, symbol, price_decimals, size_decimals,
+                min_base, has_volume, meta, updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                provider, symbol,
+                price_decimals, size_decimals,
+                min_base, 1 if has_volume else 0,
+                json.dumps(meta) if meta else None,
+                updated,
+            ),
+        )
 
 
 def get_instrument(conn: sqlite3.Connection, provider: str,
@@ -292,3 +295,38 @@ def get_instrument(conn: sqlite3.Connection, provider: str,
         "meta":           json.loads(row[6]) if row[6] else None,
         "updated":        row[7],
     }
+
+
+def load_instruments(conn: sqlite3.Connection, provider: str) -> list:
+    """Read all instrument metadata for a provider, ordered by symbol.
+
+    Позволяет хабу восстановить instruments из БД при рестарте, не дожидаясь,
+    пока фид пришлёт их заново (он шлёт один раз при логине).
+
+    Args:
+        conn:     Open SQLite connection.
+        provider: Feed identifier.
+
+    Returns:
+        List of instrument dicts (see get_instrument); [] if none stored.
+    """
+    rows = conn.execute(
+        """SELECT provider, symbol, price_decimals, size_decimals,
+                  min_base, has_volume, meta, updated
+           FROM instruments WHERE provider=? ORDER BY symbol""",
+        (provider,),
+    ).fetchall()
+
+    return [
+        {
+            "provider":       r[0],
+            "symbol":         r[1],
+            "price_decimals": r[2],
+            "size_decimals":  r[3],
+            "min_base":       r[4],
+            "has_volume":     bool(r[5]),
+            "meta":           json.loads(r[6]) if r[6] else None,
+            "updated":        r[7],
+        }
+        for r in rows
+    ]

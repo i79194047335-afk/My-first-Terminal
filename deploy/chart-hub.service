@@ -1,0 +1,15 @@
+[Unit]
+Description=Chart Hub (bus -> candles -> SQLite -> browser WS :8765)
+After=network.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+WorkingDirectory=/root/projects/terminal-phase2
+# retention.json указывает на боевую market.db (абсолютный путь) и порт 8765.
+ExecStart=/usr/bin/python3.10 /root/projects/terminal-phase2/hub.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
