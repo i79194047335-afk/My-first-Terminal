@@ -17,7 +17,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.range_bars import RangeBarBuilder, backfill, iter_ticks
+from core.range_bars import RangeBarBuilder, backfill, backfill_tail, iter_ticks
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -202,6 +202,29 @@ class TestBackfillRealTicks(unittest.TestCase):
                            since_ts=first_ts + 3600)
         _, ts = next(later)
         self.assertGreaterEqual(ts, first_ts + 3600)
+
+    def test_backfill_tail_matches_full(self):
+        """backfill_tail даёт тот же хвост, что полный backfill, но читая меньше.
+
+        Хвост (закрытые бары) обязан совпасть до тика: путь-зависимость якоря
+        затухает на нескольких днях. Живой бар может отличаться на 1 тик
+        (срез архива по границе суток) — он всё равно тут же обновится потоком,
+        поэтому сверяем только закрытую историю.
+        """
+        r = 0.0010   # R:100 поинтов — хвост в несколько дней, ветка «прицела»
+        full = backfill(self.data_dir, "EUR/USD", r, max_bars=500)
+        tail, last_ts = backfill_tail(self.data_dir, "EUR/USD", r, max_bars=500)
+
+        fb, tb = full.history(), tail.history()
+        self.assertEqual(len(tb), min(len(fb), 500))
+        self.assertIsNotNone(last_ts)
+
+        # Последние 200 закрытых баров совпадают полностью.
+        n = min(len(fb), len(tb), 200)
+        for i in range(1, n + 1):
+            self.assertEqual(tb[-i]["time"],  fb[-i]["time"])
+            self.assertEqual(tb[-i]["open"],  fb[-i]["open"])
+            self.assertEqual(tb[-i]["close"], fb[-i]["close"])
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ import websockets
 
 from core.bus import BusServer
 from core.candles import CandleBuilder, aggregate_higher_tf
-from core.range_bars import RangeBarBuilder, iter_ticks
+from core.range_bars import RangeBarBuilder, backfill_tail
 from core.db import init_db, load_history, load_instruments, trim_window, \
     upsert_candle, upsert_candles_batch, upsert_instrument
 
@@ -687,9 +687,10 @@ class Hub:
         builder = RangeBarBuilder(rsize, max_bars=self._keep_bars)
         last_ts = None
         try:
-            for price, ts in iter_ticks(self._data_dir, symbol):
-                builder.ingest(price, ts)
-                last_ts = ts
+            # backfill_tail читает только нужный хвост архива, а не все месяцы
+            # тиков (R:10 — доли секунды вместо ~11 с полного прогона).
+            builder, last_ts = backfill_tail(self._data_dir, symbol, rsize,
+                                             max_bars=self._keep_bars)
         except Exception as err:
             # Архива может не быть (свежий инстанс) — отдаём что успели.
             print("[hub] бэкфил рэндж %s:%s R=%s: %r"

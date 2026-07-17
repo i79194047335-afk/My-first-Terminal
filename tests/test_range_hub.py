@@ -37,20 +37,24 @@ SYMBOL   = "EUR/USD"
 #   бар2: открыт пробойщиком 1.1005; 1.1007 (h), 1.1003, 1.1002 (l, 50п — закрытие)
 #         o=1.1005 h=1.1007 l=1.1002 c=1.1002 t=1002
 #   живой: открыт от 1.1002; тик 1.1004 → o=1.1002 h=1.1004 l=1.1002 c=1.1004 t=1005
+# ts тиков ДОЛЖНЫ соответствовать дате файла (EURUSD_20260701.csv): backfill_tail
+# отсекает файлы по дате в имени через since_ts, и рассогласование даты и ts
+# выкинуло бы все тики. BASE = 2026-07-01 00:00:00 UTC.
+BASE = 1782864000   # datetime(2026,7,1, tzinfo=utc).timestamp()
 ARCHIVE_TICKS = [
-    (1000.0, 1.1000),
-    (1001.0, 1.1002),
-    (1002.0, 1.1005),
-    (1003.0, 1.1007),
-    (1004.0, 1.1003),
-    (1005.0, 1.1002),
-    (1006.0, 1.1004),
+    (BASE + 0, 1.1000),
+    (BASE + 1, 1.1002),
+    (BASE + 2, 1.1005),
+    (BASE + 3, 1.1007),
+    (BASE + 4, 1.1003),
+    (BASE + 5, 1.1002),
+    (BASE + 6, 1.1004),
 ]
-EXPECTED_BAR1 = {"time": 1000, "open": 1.1000, "high": 1.1005,
+EXPECTED_BAR1 = {"time": BASE + 0, "open": 1.1000, "high": 1.1005,
                  "low": 1.1000, "close": 1.1005}
-EXPECTED_BAR2 = {"time": 1002, "open": 1.1005, "high": 1.1007,
+EXPECTED_BAR2 = {"time": BASE + 2, "open": 1.1005, "high": 1.1007,
                  "low": 1.1002, "close": 1.1002}
-EXPECTED_LIVE = {"time": 1005, "open": 1.1002, "high": 1.1004,
+EXPECTED_LIVE = {"time": BASE + 5, "open": 1.1002, "high": 1.1004,
                  "low": 1.1002, "close": 1.1004}
 
 
@@ -145,8 +149,9 @@ class TestRangeHub(unittest.TestCase):
 
                 # Живой тик-пробойщик: low 1.0999 добивает диапазон живого
                 # бара (h=1.1004) → закрытие, следом update нового current.
+                # ts позже последнего архивного (BASE+6), иначе дедуп отсечёт.
                 bus.send_threadsafe(
-                    make_tick(PROVIDER, SYMBOL, 2000.0, 1.0999))
+                    make_tick(PROVIDER, SYMBOL, BASE + 100, 1.0999))
                 closed_upd = await recv_typed(ws, "update", 7)
                 new_cur    = await recv_typed(ws, "update", 7)
 
@@ -173,11 +178,11 @@ class TestRangeHub(unittest.TestCase):
         self.assertEqual(live["candle"], EXPECTED_LIVE)
 
         # Закрытие живого бара тиком шины: финальное состояние с пробойщиком…
-        self.assertEqual(closed_upd["candle"]["time"],  1005)
+        self.assertEqual(closed_upd["candle"]["time"],  BASE + 5)
         self.assertEqual(closed_upd["candle"]["low"],   1.0999)
         self.assertEqual(closed_upd["candle"]["close"], 1.0999)
-        # …и новый current с непрерывным open.
-        self.assertEqual(new_cur["candle"]["time"], 2000)
+        # …и новый current, открытый гэп-тиком от своей цены.
+        self.assertEqual(new_cur["candle"]["time"], BASE + 100)
         self.assertEqual(new_cur["candle"]["open"], 1.0999)
 
         # Кэш: во второй истории 3 закрытых бара (третий закрыт живьём).

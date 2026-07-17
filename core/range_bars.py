@@ -242,6 +242,10 @@ def backfill(data_dir, symbol, range_size, max_bars=2000, since_ts=None):
     Якорь — начало доступного архива (или since_ts); наружу отдаётся хвост
     max_bars, как у свечных ТФ хаба.
 
+    Читает архив ЦЕЛИКОМ. Для боевого пути (нужен лишь хвост max_bars) это
+    расточительно — см. backfill_tail, который читает только нужные последние
+    файлы. Эта функция остаётся для явного since_ts и полного прогона в тестах.
+
     Args:
         data_dir:   Каталог тикового архива.
         symbol:     Инструмент ("EUR/USD").
@@ -257,6 +261,125 @@ def backfill(data_dir, symbol, range_size, max_bars=2000, since_ts=None):
     for price, ts in iter_ticks(data_dir, symbol, since_ts=since_ts):
         builder.ingest(price, ts)
     return builder
+
+
+def _archive_days(data_dir, symbol):
+    """Отсортированный список дат (YYYYMMDD) файлов архива инструмента.
+
+    Args:
+        data_dir: Каталог архива.
+        symbol:   Инструмент.
+
+    Returns:
+        List строк дат, старые первыми ([] если файлов нет).
+    """
+    prefix = symbol.replace("/", "")
+    files  = glob.glob(os.path.join(data_dir, "%s_*.csv" % prefix))
+    days   = [os.path.basename(f).rsplit("_", 1)[-1][:8] for f in files]
+    return sorted(days)
+
+
+def backfill_tail(data_dir, symbol, range_size, max_bars=2000):
+    """Как backfill, но читает ТОЛЬКО хвост архива, нужный для max_bars баров.
+
+    Рэндж-бары строятся вперёд, а хабу нужен только последний хвост в max_bars
+    баров — читать весь архив (месяцы, миллионы тиков) ради баров за пару дней
+    расточительно (боевой бэкфил был ~11 с вместо долей секунды). Идём по
+    файлам-дням С КОНЦА, расширяя окно, пока не наберётся с запасом больше
+    max_bars закрытых баров; лишние отсекает штатное окно max_bars самого
+    билдера.
+
+    Запас (BARS_MARGIN) нужен, потому что рэндж-бар path-dependent: тот же
+    range_size от РАЗНОГО якоря даёт слегка разные бары. Лишний день истории
+    в якоре двигает границы всех баров; берём кратно больше нужного и режем с
+    конца, чтобы хвост совпал с тем, что дал бы полный прогон.
+
+    Args:
+        data_dir:   Каталог тикового архива.
+        symbol:     Инструмент.
+        range_size: Диапазон в абсолютных единицах цены.
+        max_bars:   Сколько закрытых баров нужно на выходе.
+
+    Returns:
+        Кортеж (builder, last_ts): RangeBarBuilder с историей (<= max_bars) и
+        живым баром, и ts последнего прочитанного тика (None, если архив пуст) —
+        для дедупа буфера живых тиков на стыке бэкфила и потока.
+    """
+    days = _archive_days(data_dir, symbol)
+    if not days:
+        return RangeBarBuilder(range_size, max_bars=max_bars), None
+
+    # Пробуем с конца растущее окно дней, но НЕ перечитывая архив помногу раз:
+    # берём несколько «прицельных» размеров окна и на первом же, где набралось
+    # max_bars с запасом (×2 — на путь-зависимость якоря), останавливаемся.
+    # Если ни одно не набрало (крупный R → баров мало даже на всём архиве) —
+    # последний размер и есть весь архив, читаем его и выходим. Так число
+    # прогонов ограничено списком ниже (≤4), а не log2(дней).
+    total  = len(days)
+    margin = max_bars * 2   # запас на путь-зависимость якоря (хвост стабилен)
+
+    # 1. Пробник: небольшое окно с конца, чтобы измерить ПЛОТНОСТЬ баров
+    #    (баров/день) для этого range_size. Билдер без жёсткого окна (margin
+    #    большой), иначе история упёрлась бы в потолок и плотность занизилась.
+    probe_days = min(4, total)
+    probe, last_ts = _run_backfill(data_dir, symbol, range_size,
+                                   margin * 10, _day_start_ts(days[-probe_days]))
+    got = len(probe.history())
+
+    if got >= margin or probe_days >= total:
+        # Уже хватило (мелкий R) или архив целиком мал — пробник и есть ответ.
+        builder = probe
+    else:
+        # 2. Прицел: из плотности оцениваем, сколько дней нужно на margin баров,
+        #    и читаем ровно их (+2 дня страховки). Один прогон вместо слепого
+        #    геометрического роста — на крупных R это экономит лишние чтения.
+        per_day = got / probe_days
+        need    = min(int(margin / per_day) + 2, total) if per_day else total
+        builder, last_ts = _run_backfill(data_dir, symbol, range_size,
+                                         margin * 10, _day_start_ts(days[-need]))
+
+    # Пережать в билдер с точным окном max_bars: history — хвост, живой бар —
+    # тот же (открыт последним тиком, от окна истории не зависит).
+    result = RangeBarBuilder(range_size, max_bars=max_bars)
+    result.seed_history(builder.history()[-max_bars:])
+    result._current = builder.current()
+    return result, last_ts
+
+
+def _run_backfill(data_dir, symbol, range_size, keep_bars, since_ts):
+    """Один прогон бэкфила от since_ts с окном keep_bars.
+
+    Args:
+        data_dir:   Каталог архива.
+        symbol:     Инструмент.
+        range_size: Диапазон в единицах цены.
+        keep_bars:  Окно ретеншения билдера.
+        since_ts:   Начало прогона (unix-секунды).
+
+    Returns:
+        Кортеж (builder, last_ts): RangeBarBuilder с историей (<= keep_bars) и
+        живым баром, и ts последнего прочитанного тика (None, если тиков нет).
+    """
+    builder = RangeBarBuilder(range_size, max_bars=keep_bars)
+    last_ts = None
+    for price, ts in iter_ticks(data_dir, symbol, since_ts=since_ts):
+        builder.ingest(price, ts)
+        last_ts = ts
+    return builder, last_ts
+
+
+def _day_start_ts(day):
+    """Unix-секунды начала суток UTC для строки YYYYMMDD.
+
+    Args:
+        day: Дата "YYYYMMDD".
+
+    Returns:
+        Float unix-секунд (00:00:00 UTC этого дня).
+    """
+    import datetime
+    return datetime.datetime.strptime(day, "%Y%m%d") \
+        .replace(tzinfo=datetime.timezone.utc).timestamp()
 
 
 def _utc_day(ts):
