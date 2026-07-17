@@ -30,6 +30,7 @@ import websockets
 
 from core.bus import BusServer
 from core.candles import CandleBuilder, aggregate_higher_tf
+from core.range_bars import RangeBarBuilder, iter_ticks
 from core.db import init_db, load_history, load_instruments, trim_window, \
     upsert_candle, upsert_candles_batch, upsert_instrument
 
@@ -94,6 +95,16 @@ class Hub:
         self._briefing        = None
         self._briefing_mtime  = 0
         self._briefing_lock   = threading.Lock()
+
+        # Рэндж-бары: билдеры создаются ЛЕНИВО по set_tf "R:<пипсы>" и живут
+        # только в памяти — источник истины у них один, тиковый архив, и после
+        # рестарта история честно перестраивается из него же (персист в candles
+        # намеренно НЕ делаем: произвольные R замусорили бы таблицу, а шов
+        # «бары из БД + недостроенный из тиков» точно не восстановить —
+        # у рэндж-бара нет вычислимого по часам бакета).
+        self._data_dir       = config.get("data_dir", "data")
+        self._range_builders = {}   # (provider, symbol, pips) -> RangeBarBuilder
+        self._range_pending  = {}   # (provider, symbol, pips) -> {"buffer": [...]}
 
         self._db_queue = queue.Queue(maxsize=5000)
 
@@ -390,6 +401,7 @@ class Hub:
                 del bars[:len(bars) - self._keep_bars]
             self._enqueue_closed(provider, symbol, tf, candle)
 
+        self._range_ingest(provider, symbol, price, msg["ts"])
         self._broadcast_update(provider, symbol)
 
     def _handle_instruments(self, msg):
@@ -525,6 +537,232 @@ class Hub:
         if loop is not None:
             loop.call_soon_threadsafe(self._broadcast, payload)
 
+    # ── рэндж-бары ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def parse_range_tf(tf):
+        """Распознать рэндж-ТФ вида "R:<пипсы>".
+
+        Args:
+            tf: Строка ТФ из set_tf ("M1", "R:5", "R:2.5", …).
+
+        Returns:
+            Диапазон в пипсах (float) или None, если это не рэндж-ТФ либо
+            значение вне здравого смысла (<= 0 или > 10000).
+        """
+        if not isinstance(tf, str) or not tf.startswith("R:"):
+            return None
+        try:
+            pips = float(tf[2:])
+        except ValueError:
+            return None
+        if pips <= 0 or pips > 10000:
+            return None
+        return pips
+
+    def _pip_size(self, provider, symbol):
+        """Размер пипса инструмента в единицах цены.
+
+        Пипс — предпоследний знак котировки: 10^-(price_decimals-1).
+        EUR/USD (5 знаков) → 0.0001, USD/JPY (3 знака) → 0.01.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+
+        Returns:
+            Float; 0.0001, если инструмент в _instruments не найден
+            (форекс-мажоры — подавляющий случай).
+        """
+        for item in self._instruments.get(provider, []):
+            if item.get("symbol") == symbol and item.get("price_decimals"):
+                return 10.0 ** -(item["price_decimals"] - 1)
+        return 0.0001
+
+    def _range_ingest(self, provider, symbol, price, ts):
+        """Прогнать живой тик через рэндж-контур этой пары.
+
+        Пока идёт бэкфил, тики копятся в буфере ожидания — иначе окно бэкфила
+        (секунды чтения архива) стало бы дырой между историей и живым потоком.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+            price:    Цена тика.
+            ts:       Unix-время тика (float).
+
+        Returns:
+            None.
+        """
+        for key, entry in self._range_pending.items():
+            if key[0] == provider and key[1] == symbol:
+                entry["buffer"].append((price, ts))
+        for key, rb in self._range_builders.items():
+            if key[0] == provider and key[1] == symbol:
+                closed = rb.ingest(price, ts)
+                # У рэндж-бара тик-пробойщик МУТИРУЕТ закрывающийся бар и сразу
+                # открывает новый — финальное состояние закрытого без этой
+                # отправки не ушло бы клиенту никогда (broadcast шлёт current).
+                if closed is not None:
+                    self._broadcast_range_closed(provider, symbol, key[2],
+                                                 closed)
+
+    def _broadcast_range_closed(self, provider, symbol, pips, closed):
+        """Разослать финальное состояние закрытого рэндж-бара его подписчикам.
+
+        Уходит ПЕРЕД update с новым current того же тика (ensure_future
+        сохраняет порядок постановки, websockets — порядок отправки).
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+            pips:     Диапазон подписки.
+            closed:   Закрытый бар.
+
+        Returns:
+            None.
+        """
+        for ws, info in list(self._clients.items()):
+            if (info["provider"] == provider and info["symbol"] == symbol
+                    and self.parse_range_tf(info["tf"]) == pips):
+                self._send(ws, json.dumps({
+                    "type":      "update",
+                    "symbol":    symbol,
+                    "tf":        info["tf"],
+                    "requestId": info["requestId"],
+                    "candle":    closed,
+                }))
+
+    async def _on_set_range_tf(self, ws, provider, symbol, tf, pips,
+                               request_id):
+        """Подписать клиента на рэндж-ТФ; при первом запросе — бэкфил в фоне.
+
+        Готовый билдер → история сразу; бэкфил уже идёт → клиент просто ждёт
+        (история уедет всем подписчикам из _finish_range_backfill); иначе —
+        запускаем поток бэкфила, event loop не блокируется.
+
+        Args:
+            ws:         Соединение клиента.
+            provider:   Провайдер.
+            symbol:     Инструмент.
+            tf:         Строка ТФ как прислал фронт ("R:5").
+            pips:       Разобранный диапазон в пипсах.
+            request_id: requestId клиента.
+
+        Returns:
+            None.
+        """
+        self._clients[ws] = {"provider": provider, "symbol": symbol,
+                             "tf": tf, "requestId": request_id}
+        key = (provider, symbol, pips)
+
+        rb = self._range_builders.get(key)
+        if rb is not None:
+            await self._send_range_history(ws, symbol, tf, request_id, rb)
+            return
+
+        if key in self._range_pending:
+            return
+
+        self._range_pending[key] = {"buffer": []}
+        threading.Thread(target=self._range_backfill_worker,
+                         args=(key,), daemon=True).start()
+        print("[hub] рэндж %s:%s R=%s — бэкфил из тикового архива…"
+              % (provider, symbol, pips))
+
+    def _range_backfill_worker(self, key):
+        """Поток: построить историю рэндж-баров из тикового архива.
+
+        Args:
+            key: (provider, symbol, pips).
+
+        Returns:
+            None. Результат уходит в _finish_range_backfill через
+            call_soon_threadsafe (билдер трогает event loop — только оттуда).
+        """
+        provider, symbol, pips = key
+        rsize   = pips * self._pip_size(provider, symbol)
+        builder = RangeBarBuilder(rsize, max_bars=self._keep_bars)
+        last_ts = None
+        try:
+            for price, ts in iter_ticks(self._data_dir, symbol):
+                builder.ingest(price, ts)
+                last_ts = ts
+        except Exception as err:
+            # Архива может не быть (свежий инстанс) — отдаём что успели.
+            print("[hub] бэкфил рэндж %s:%s R=%s: %r"
+                  % (provider, symbol, pips, err))
+
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._finish_range_backfill,
+                                      key, builder, last_ts)
+
+    def _finish_range_backfill(self, key, builder, last_ts):
+        """Влить буфер живых тиков, активировать билдер, раздать историю.
+
+        Исполняется в потоке event loop. CSV пишется тем же потоком данных с
+        лагом меньше секунды, поэтому хвост буфера может дублировать хвост
+        архива — дубли отсекаются по ts (у фида ts тика в CSV и в шине один).
+
+        Args:
+            key:     (provider, symbol, pips).
+            builder: RangeBarBuilder с историей из архива.
+            last_ts: ts последнего тика, прочитанного из архива (или None).
+
+        Returns:
+            None.
+        """
+        provider, symbol, pips = key
+        entry = self._range_pending.pop(key, {"buffer": []})
+        for price, ts in entry["buffer"]:
+            if last_ts is None or ts > last_ts:
+                builder.ingest(price, ts)
+        self._range_builders[key] = builder
+
+        print("[hub] рэндж %s:%s R=%s готов: %d баров (буфер %d тиков)"
+              % (provider, symbol, pips, len(builder.history()),
+                 len(entry["buffer"])))
+
+        for ws, info in list(self._clients.items()):
+            if (info["provider"] == provider and info["symbol"] == symbol
+                    and self.parse_range_tf(info["tf"]) == pips):
+                asyncio.ensure_future(self._send_range_history(
+                    ws, symbol, info["tf"], info["requestId"], builder))
+
+    async def _send_range_history(self, ws, symbol, tf, request_id, builder):
+        """Отдать клиенту историю рэндж-баров и живой бар (контракт set_tf).
+
+        Args:
+            ws:         Соединение клиента.
+            symbol:     Инструмент.
+            tf:         Строка ТФ клиента.
+            request_id: requestId клиента.
+            builder:    Активный RangeBarBuilder.
+
+        Returns:
+            None. Мёртвый сокет молча выбрасывается из клиентов.
+        """
+        try:
+            await ws.send(json.dumps({
+                "type":      "history",
+                "symbol":    symbol,
+                "tf":        tf,
+                "requestId": request_id,
+                "data":      builder.history(),
+            }))
+            current = builder.current()
+            if current:
+                await ws.send(json.dumps({
+                    "type":      "update",
+                    "symbol":    symbol,
+                    "tf":        tf,
+                    "requestId": request_id,
+                    "candle":    current,
+                }))
+        except Exception:
+            self._clients.pop(ws, None)
+
     # ── WebSocket для браузера ──────────────────────────────────────────
 
     def _provider_of(self, symbol):
@@ -610,7 +848,17 @@ class Hub:
         request_id = data.get("requestId", 0)
 
         provider = self._provider_of(symbol)
-        if provider is None or tf not in self._tf_seconds:
+        if provider is None:
+            print("[hub] set_tf на неизвестный символ %s — игнор" % (symbol,))
+            return
+
+        pips = self.parse_range_tf(tf)
+        if pips is not None:
+            await self._on_set_range_tf(ws, provider, symbol, tf, pips,
+                                        request_id)
+            return
+
+        if tf not in self._tf_seconds:
             print("[hub] set_tf на неизвестный %s %s — игнор" % (symbol, tf))
             return
 
@@ -729,7 +977,12 @@ class Hub:
         for ws, info in list(self._clients.items()):
             if info["symbol"] != symbol or info["provider"] != provider:
                 continue
-            candle = builder.current(info["tf"])
+            pips = self.parse_range_tf(info["tf"])
+            if pips is not None:
+                rb     = self._range_builders.get((provider, symbol, pips))
+                candle = rb.current() if rb else None
+            else:
+                candle = builder.current(info["tf"])
             if not candle:
                 continue
             self._send(ws, json.dumps({
@@ -815,6 +1068,7 @@ class Hub:
             "ignored":   self.ticks_ignored,
             "closed":    self.closed_candles,
             "clients":   len(self._clients),
+            "range":     len(self._range_builders),
             "db_queue":  self._db_queue.qsize(),
             "db_dropped": self.db_dropped,
         }
