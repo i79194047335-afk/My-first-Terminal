@@ -648,7 +648,11 @@ class Hub:
         self._broadcast_threadsafe(json.dumps({
             "type":     "large_trade",
             "provider": provider,
-            "symbol":   symbol,
+            # Событие широковещательное, фронт сам решает, его ли это символ.
+            # Шлём в каноническом виде с префиксом: провайдер тут известен
+            # точно, а по голому тикеру фронт не отличил бы USDJPY у Lighter
+            # от USD/JPY у FXCM.
+            "symbol":   "%s:%s" % (provider, symbol),
             "ts":       ts,
             "price":    price,
             "size":     size,
@@ -871,14 +875,15 @@ class Hub:
                     and self.parse_range_tf(info["tf"]) == pips):
                 self._send(ws, json.dumps({
                     "type":      "update",
-                    "symbol":    symbol,
+                    # Под именем, под каким подписался клиент (см. _on_set_tf).
+                    "symbol":    info.get("wire") or symbol,
                     "tf":        info["tf"],
                     "requestId": info["requestId"],
                     "candle":    closed,
                 }))
 
     async def _on_set_range_tf(self, ws, provider, symbol, tf, pips,
-                               request_id):
+                               request_id, wire=None):
         """Подписать клиента на рэндж-ТФ; при первом запросе — бэкфил в фоне.
 
         Готовый билдер → история сразу; бэкфил уже идёт → клиент просто ждёт
@@ -892,11 +897,18 @@ class Hub:
             tf:         Строка ТФ как прислал фронт ("R:5").
             pips:       Разобранный диапазон в поинтах.
             request_id: requestId клиента.
+            wire:       Имя символа, под которым его знает фронт (с префиксом
+                        провайдера или без). None — взять из записи клиента.
 
         Returns:
             None.
         """
+        # wire не теряем: _on_set_tf уже записал сюда имя от фронта, и
+        # рэндж-ветка не должна его затирать — иначе после переключения на
+        # "R:5" обновления пойдут под другим именем и график замрёт.
+        wire = wire or (self._clients.get(ws) or {}).get("wire") or symbol
         self._clients[ws] = {"provider": provider, "symbol": symbol,
+                             "wire": wire,
                              "tf": tf, "requestId": request_id}
         key = (provider, symbol, pips)
 
@@ -987,10 +999,12 @@ class Hub:
         Returns:
             None. Мёртвый сокет молча выбрасывается из клиентов.
         """
+        # Имя берём из записи клиента: там лежит то, под каким он подписался.
+        wire = (self._clients.get(ws) or {}).get("wire") or symbol
         try:
             await ws.send(json.dumps({
                 "type":      "history",
-                "symbol":    symbol,
+                "symbol":    wire,
                 "tf":        tf,
                 "requestId": request_id,
                 "data":      builder.history(),
@@ -999,7 +1013,7 @@ class Hub:
             if current:
                 await ws.send(json.dumps({
                     "type":      "update",
-                    "symbol":    symbol,
+                    "symbol":    wire,
                     "tf":        tf,
                     "requestId": request_id,
                     "candle":    current,
@@ -1009,11 +1023,39 @@ class Hub:
 
     # ── WebSocket для браузера ──────────────────────────────────────────
 
-    def _provider_of(self, symbol):
-        """Найти провайдера, у которого есть такой символ.
+    def resolve_symbol(self, symbol):
+        """Разобрать символ фронта в пару (провайдер, инструмент).
 
-        Временная мера на период миграции: фронт пока шлёт голый "EUR/USD" без
-        провайдера. После Фазы 2.5 символы станут "fxcm:EUR/USD".
+        Основной формат — "provider:symbol" ("fxcm:EUR/USD", "lighter:BTC").
+        Префикс появился в Фазе 3: у Lighter есть USDJPY, USDCAD, AUDUSD —
+        те же пары, что у FXCM, и по голому тикеру их уже не различить.
+
+        Голый символ без префикса тоже принимается: так шлёт фронт, который
+        ещё не обновился, и старые вкладки не должны отваливаться в момент
+        выкатки. Провайдер тогда ищется перебором, как раньше.
+
+        Args:
+            symbol: Строка от фронта.
+
+        Returns:
+            Кортеж (provider, symbol) либо (None, symbol), если инструмент
+            не найден ни у одного провайдера.
+        """
+        markets = (getattr(self, "_config", None) or {}).get("markets") or {}
+
+        if ":" in symbol:
+            provider, _, bare = symbol.partition(":")
+            if bare in (markets.get(provider) or ()):
+                return provider, bare
+            return None, bare
+
+        for provider, symbols in markets.items():
+            if symbol in symbols:
+                return provider, symbol
+        return None, symbol
+
+    def _provider_of(self, symbol):
+        """Найти провайдера по символу (с префиксом или без).
 
         Args:
             symbol: Инструмент.
@@ -1021,10 +1063,7 @@ class Hub:
         Returns:
             Имя провайдера или None.
         """
-        for provider, symbols in self._config["markets"].items():
-            if symbol in symbols:
-                return provider
-        return None
+        return self.resolve_symbol(symbol)[0]
 
     async def ws_handler(self, ws):
         """Обслужить одно браузерное подключение.
@@ -1087,26 +1126,33 @@ class Hub:
         Returns:
             None.
         """
-        symbol     = data["symbol"]
+        requested  = data["symbol"]
         tf         = data["tf"]
         request_id = data.get("requestId", 0)
 
-        provider = self._provider_of(symbol)
+        # Внутри хаба символ ВСЕГДА чистый ("EUR/USD"): ключи истории, БД и
+        # билдеров такие с Фазы 1. Наружу возвращаем ровно то, что прислал
+        # фронт, — иначе он не сопоставит ответ со своим currentSymbol.
+        provider, symbol = self.resolve_symbol(requested)
         if provider is None:
-            log.warning("set_tf на неизвестный символ %s — игнор", symbol)
+            log.warning("set_tf на неизвестный символ %s — игнор", requested)
             return
 
         pips = self.parse_range_tf(tf)
         if pips is not None:
             await self._on_set_range_tf(ws, provider, symbol, tf, pips,
-                                        request_id)
+                                        request_id, wire=requested)
             return
 
         if tf not in self._tf_seconds:
             log.warning("set_tf на неизвестный %s %s — игнор", symbol, tf)
             return
 
+        # wire — как символ зовёт ФРОНТ (с префиксом или без). Живые
+        # обновления обязаны уходить под тем же именем, иначе браузер не
+        # сопоставит их со своим currentSymbol и график замрёт.
         self._clients[ws] = {"provider": provider, "symbol": symbol,
+                             "wire": requested,
                              "tf": tf, "requestId": request_id}
 
         key     = (provider, symbol)
@@ -1114,7 +1160,7 @@ class Hub:
 
         await ws.send(json.dumps({
             "type":      "history",
-            "symbol":    symbol,
+            "symbol":    requested,
             "tf":        tf,
             "requestId": request_id,
             "data":      history,
@@ -1128,7 +1174,7 @@ class Hub:
         if current:
             await ws.send(json.dumps({
                 "type":      "update",
-                "symbol":    symbol,
+                "symbol":    requested,
                 "tf":        tf,
                 "requestId": request_id,
                 "candle":    current,
@@ -1148,7 +1194,11 @@ class Hub:
         Returns:
             None.
         """
-        symbol = data["symbol"]
+        requested = data["symbol"]
+        # Ключ алертов — ЧИСТЫЙ символ: срабатывание проверяется в _check_alerts
+        # по имени из шины, где префикса нет. Клали бы сюда "lighter:BTC" —
+        # алерт создавался бы, но не срабатывал никогда.
+        symbol = self.resolve_symbol(requested)[1]
         price  = round(float(data["price"]), 5)
         alert  = {"id": self._alert_id, "price": price, "triggered": False}
         self._alerts.setdefault(symbol, []).append(alert)
@@ -1156,7 +1206,8 @@ class Hub:
 
         await ws.send(json.dumps({
             "type":   "alert_created",
-            "symbol": symbol,
+            # Наружу — как прислал фронт: он ищет свой алерт по symbol+id.
+            "symbol": requested,
             "price":  price,
             "id":     alert["id"],
         }))
@@ -1175,6 +1226,8 @@ class Hub:
         price    = data.get("price")
         if symbol is None or alert_id is None or price is None:
             return
+        # Ключ алертов чистый — см. _on_add_alert.
+        symbol = self.resolve_symbol(symbol)[1]
         price = round(float(price), 5)
         for alert in self._alerts.get(symbol, []):
             if alert["id"] == alert_id:
@@ -1196,6 +1249,8 @@ class Hub:
         alert_id = data.get("id")
         if symbol is None or alert_id is None:
             return
+        # Ключ алертов чистый — см. _on_add_alert.
+        symbol = self.resolve_symbol(symbol)[1]
         alert_id = int(alert_id)
         if symbol in self._alerts:
             self._alerts[symbol] = [a for a in self._alerts[symbol]
@@ -1230,8 +1285,10 @@ class Hub:
             if not candle:
                 continue
             self._send(ws, json.dumps({
+                # Под тем именем, под каким клиент подписался: фронт с
+                # префиксом получит "lighter:BTC", старый — голый "BTC".
+                "symbol":    info.get("wire") or symbol,
                 "type":      "update",
-                "symbol":    symbol,
                 "tf":        info["tf"],
                 "requestId": info["requestId"],
                 "candle":    candle,
@@ -1342,8 +1399,17 @@ class Hub:
         # Возраст последнего РЕАЛЬНОГО тика по каждому символу — фронт красит по
         # нему индикатор рынка выбранного инструмента (крипта 24/7 сама покажет
         # «открыт», форекс на выходных — «закрыт»).
-        symbols_age = {sym: round(now - ts, 1)
-                       for sym, ts in self._last_tick_by_symbol.items()}
+        # Ключи — И чистые, И с префиксом провайдера: фронт после Фазы 3
+        # спрашивает "lighter:BTC", старые вкладки — голый "BTC". Отдать
+        # только один вариант значило бы, что у половины клиентов индикатор
+        # рынка навсегда застынет в положении «закрыт».
+        symbols_age = {}
+        for sym, ts in self._last_tick_by_symbol.items():
+            age_sec = round(now - ts, 1)
+            symbols_age[sym] = age_sec
+            provider = self._provider_of(sym)
+            if provider:
+                symbols_age["%s:%s" % (provider, sym)] = age_sec
 
         return {
             "status":    "stale" if stale else "ok",

@@ -422,11 +422,14 @@
 <div class="column" id="column1">
     <div class="price-pane" id="pane1">
         <div class="toolbar">
+            <!-- Список перестраивается из WS-сообщения instruments
+                 (populateSymbolSelect). Эти опции — только на первый кадр,
+                 до ответа хаба; value несёт ПОЛНЫЙ символ с провайдером. -->
             <select id="symbolSelect" class="tb">
-                <option value="AUD/USD">AUD/USD</option>
-                <option value="EUR/USD">EUR/USD</option>
-                <option value="USD/CAD">USD/CAD</option>
-                <option value="USD/JPY">USD/JPY</option>
+                <option value="fxcm:AUD/USD">AUD/USD</option>
+                <option value="fxcm:EUR/USD">EUR/USD</option>
+                <option value="fxcm:USD/CAD">USD/CAD</option>
+                <option value="fxcm:USD/JPY">USD/JPY</option>
             </select>
             <select id="tf1" class="tb"></select>
             <div class="tb-div"></div>
@@ -586,10 +589,51 @@ const CHART_TYPES = ["candles", "bars"];
 // ============================================================================
 // Global state
 // ============================================================================
+// ── Формат символа (Фаза 3) ────────────────────────────────────────────────
+// Символ стал "provider:symbol" ("fxcm:EUR/USD", "lighter:BTC"). Причина: у
+// Lighter есть USDJPY, USDCAD, AUDUSD — те же пары, что у FXCM, и по голому
+// тикеру их не различить. Полный символ уходит на сервер и служит ключом;
+// пользователю показывается короткое имя.
+const SYMBOL_SCHEMA = 3;
+
+/**
+ * Короткое имя символа для показа пользователю.
+ * @param {string} sym Полный символ ("lighter:BTC") или уже короткий.
+ * @returns {string} Имя без префикса провайдера ("BTC").
+ */
+function displaySymbol(sym) {
+    if (!sym) return "";
+    const i = sym.indexOf(":");
+    return i === -1 ? sym : sym.slice(i + 1);
+}
+
+/**
+ * Имя символа, пригодное для имени файла.
+ * Убирает и префикс, и слэш: двоеточие в имени файла запрещено в Windows,
+ * а слэш — во всех ОС.
+ * @param {string} sym Полный символ.
+ * @returns {string} Например "EURUSD" или "BTC".
+ */
+function fileSafeSymbol(sym) {
+    return displaySymbol(sym).replace(/\//g, "");
+}
+
 const layout = StorageLayer.loadLayout(DEFAULT_COLORS);
 const panes  = [1, 2];
 
-if (!layout.symbol)     layout.symbol = "AUD/USD";
+// Разовый сброс сохранённого состояния при переходе на новый формат символа.
+// Согласовано с владельцем: старые ключи (layout.symbol, layout.drawings[sym])
+// содержат голые имена, и держать код, понимающий оба формата, дороже, чем
+// один раз начать чисто.
+if ((layout.symbolSchema || 0) < SYMBOL_SCHEMA) {
+    try { localStorage.removeItem("layoutState"); } catch (e) {}
+    for (const k of Object.keys(layout)) delete layout[k];
+    Object.assign(layout, StorageLayer.loadLayout(DEFAULT_COLORS));
+    layout.symbolSchema = SYMBOL_SCHEMA;
+    console.info("layoutState сброшен: символы перешли в формат provider:symbol");
+}
+
+if (!layout.symbol)     layout.symbol = "fxcm:AUD/USD";
 if (!layout.indicators) layout.indicators = {};
 
 let currentSymbol = layout.symbol;
@@ -598,6 +642,11 @@ let currentSymbol = layout.symbol;
 // шлёт хаб по данным брокера). Раньше precision был захардкожен 5 для всех, а у
 // USD/JPY на самом деле 3 знака — цена рисовалась с двумя лишними нулями.
 let instrumentPrecision = {};
+
+// Символы, у которых есть НАСТОЯЩИЙ биржевой объём (Lighter). У FXCM его нет:
+// там поток котировок, а не сделок. По этому набору решается, показывать ли
+// гистограмму объёма и ленту крупных сделок.
+const instrumentsWithVolume = new Set();
 function applyPriceFormat(id) {
     const st = panesState[id];
     if (!st || !st.series) return;
@@ -624,7 +673,9 @@ function populateSymbolSelect(symbols) {
     select.innerHTML = "";
     for (const sym of symbols) {
         const opt = document.createElement("option");
-        opt.value = sym; opt.text = sym;
+        // value — полный символ (уходит на сервер), text — короткий (виден
+        // пользователю). Префикс провайдера в интерфейсе не показываем.
+        opt.value = sym; opt.text = displaySymbol(sym);
         select.appendChild(opt);
     }
     // Сохраняем текущий выбор, если он ещё есть в новом списке.
@@ -675,9 +726,9 @@ function updateConnDot() {
     if (noLink) {
         cls = "conn-down";  tip = "Связь с сервером потеряна";
     } else if (age != null && age < MARKET_SILENCE) {
-        cls = "conn-live";  tip = currentSymbol + " — рынок открыт (идут котировки)";
+        cls = "conn-live";  tip = displaySymbol(currentSymbol) + " — рынок открыт (идут котировки)";
     } else {
-        cls = "conn-idle";  tip = currentSymbol + " — рынок закрыт (нет котировок)";
+        cls = "conn-idle";  tip = displaySymbol(currentSymbol) + " — рынок закрыт (нет котировок)";
     }
     dot.className = "conn-dot " + cls;
     dot.setAttribute("data-tip", tip);
@@ -888,9 +939,14 @@ function handleMessage(id, state, msg) {
         const symbols = [];
         for (const provider in msg.data) {
             for (const inst of msg.data[provider]) {
+                // Хаб отдаёт инструменты сгруппированными по провайдеру, а
+                // symbol внутри — голый. Полный символ собираем здесь: дальше
+                // по фронту он живёт только в виде "provider:symbol".
+                const full = provider + ":" + inst.symbol;
                 const d = (inst.price_decimals == null) ? 5 : inst.price_decimals;
-                instrumentPrecision[inst.symbol] = { precision: d, minMove: Math.pow(10, -d) };
-                symbols.push(inst.symbol);
+                instrumentPrecision[full] = { precision: d, minMove: Math.pow(10, -d) };
+                if (inst.has_volume) instrumentsWithVolume.add(full);
+                symbols.push(full);
             }
         }
         Object.keys(panesState).forEach(id => applyPriceFormat(id));
@@ -900,7 +956,7 @@ function handleMessage(id, state, msg) {
 
     if (msg.type === "alert" && msg.symbol === currentSymbol) {
         playAlertSound();
-        showAlertPopup(msg.symbol + " @ " + msg.price);
+        showAlertPopup(displaySymbol(msg.symbol) + " @ " + msg.price);
         panes.forEach(paneId => {
             drawings[paneId].forEach(obj => {
                 if (obj.type === "alert" && obj.id === msg.id) {
@@ -1824,7 +1880,7 @@ function exportLayout() {
     const now = new Date();
     const pad = n => String(n).padStart(2,'0');
     const date = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-    const filename = `${currentSymbol.replace("/","")}_${layout.pane1.tf||"M1"}_${layout.pane2.tf||"M1"}_${layout.split}_${date}.json`;
+    const filename = `${fileSafeSymbol(currentSymbol)}_${layout.pane1.tf||"M1"}_${layout.pane2.tf||"M1"}_${layout.split}_${date}.json`;
     const blob = new Blob([JSON.stringify(layout, null, 2)], { type: "application/json" });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
@@ -2148,11 +2204,14 @@ function renderBriefing() {
         return;
     }
 
-    const pairData = lastBriefingData.pairs[currentSymbol];
+    // Брифинг пишет pre_session_brief.py со СВОИМИ ключами — голыми парами
+    // ("EUR/USD"). Менять его формат ради префикса незачем: ищем по
+    // короткому имени.
+    const pairData = lastBriefingData.pairs[displaySymbol(currentSymbol)];
     if (!pairData) {
         content.innerHTML =
             "<div style='color:#888;text-align:center;margin-top:40px'>" +
-            "Нет брифинга для " + currentSymbol + "</div>";
+            "Нет брифинга для " + displaySymbol(currentSymbol) + "</div>";
         return;
     }
 
@@ -2207,7 +2266,7 @@ function renderBriefing() {
         " | Риск: " + (globalCtx.risk_appetite || "N/A") +
         "</div>";
 
-    html += "<h2>" + currentSymbol +
+    html += "<h2>" + displaySymbol(currentSymbol) +
         " <span class='" + dirClass + "' style='font-size:16px;margin-left:8px'>" +
         arrow + " " + dirLabel + " (conf: " + (pairData.direction_confidence || "?") + "/5)" +
         "</span></h2>";
@@ -2268,7 +2327,7 @@ function renderBriefing() {
 
     // Накопленный контекст
     const accCtx = lastBriefingData.accumulated_context || {};
-    const pairCtx = accCtx[currentSymbol];
+    const pairCtx = accCtx[displaySymbol(currentSymbol)];
     if (pairCtx && pairCtx.length > 0) {
         html += "<div class='section'>" +
             "<div class='section-title'>Накопленный контекст</div><ul style='color:#aaa;font-size:11px'>" +
