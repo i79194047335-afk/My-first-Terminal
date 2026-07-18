@@ -49,6 +49,7 @@ class TestHubHealth(unittest.TestCase):
         hub.db_dropped      = 0
         hub._started_ts     = time.time() - 10
         hub._last_tick_ts   = 0.0
+        hub._last_tick_by_symbol = {}
 
         class _Q:
             def qsize(self):
@@ -76,6 +77,18 @@ class TestHubHealth(unittest.TestCase):
         h = hub.health()
         self.assertEqual(h["status"], "ok")
         self.assertLess(h["data_age"], 10)
+
+    def test_symbols_age_per_symbol(self):
+        """symbols_age отдаёт возраст последнего тика по каждому символу."""
+        hub = self._hub()
+        now = time.time()
+        hub._last_tick_by_symbol = {"EUR/USD": now - 3, "USD/JPY": now - 100}
+        h = hub.health()
+        self.assertIn("EUR/USD", h["symbols_age"])
+        self.assertLess(h["symbols_age"]["EUR/USD"], 10)
+        self.assertGreater(h["symbols_age"]["USD/JPY"], 50)
+        # символ без тиков в словаре отсутствует (фронт трактует как «закрыт»)
+        self.assertNotIn("AUD/USD", h["symbols_age"])
 
     def test_stale_only_when_market_open(self):
         """Старый тик: stale в открытый рынок, ok в закрытый.

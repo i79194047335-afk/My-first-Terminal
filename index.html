@@ -649,6 +649,7 @@ let ws1 = null, ws2 = null;
 let _lastHeartbeat = 0;
 let _lastHealth    = null;
 const HEARTBEAT_TIMEOUT = 25000;   // >2 периодов хаба (10 с) с запасом
+const MARKET_SILENCE    = 20;      // сек тишины по инструменту → «рынок закрыт»
 
 function onHeartbeat(health) {
     _lastHeartbeat = Date.now();
@@ -656,22 +657,27 @@ function onHeartbeat(health) {
     updateConnDot();
 }
 
+// Смена инструмента только перерисовывает индикатор — свежесть считает хаб
+// (symbols_age по РЕАЛЬНЫМ тикам), фронт лишь читает по currentSymbol.
+function resetMarketDot() { updateConnDot(); }
+
+// Индикатор состояния ВЫБРАННОГО инструмента (как «часы рынка» у TradingView),
+// с приоритетом связи: нет связи — важнее любого статуса рынка. Свежесть берём
+// из heartbeat (symbols_age), а НЕ из фронтового счётчика: одноразовый
+// init-update при подписке — не реальный тик, и хаб его не учитывает.
 function updateConnDot() {
     const dot = document.getElementById("connDot");
     if (!dot) return;
-    const silent = Date.now() - _lastHeartbeat;
+    const noLink = _lastHeartbeat === 0 || Date.now() - _lastHeartbeat > HEARTBEAT_TIMEOUT;
+    const age    = _lastHealth?.symbols_age?.[currentSymbol];  // сек, или undefined
 
     let cls, tip;
-    if (_lastHeartbeat === 0 || silent > HEARTBEAT_TIMEOUT) {
+    if (noLink) {
         cls = "conn-down";  tip = "Связь с сервером потеряна";
-    } else if (_lastHealth?.status === "stale") {
-        cls = "conn-stale"; tip = "Рынок открыт, но данные не поступают";
-    } else if (_lastHealth && _lastHealth.market_open === false) {
-        cls = "conn-idle";  tip = "Связь есть, рынок закрыт";
+    } else if (age != null && age < MARKET_SILENCE) {
+        cls = "conn-live";  tip = currentSymbol + " — рынок открыт (идут котировки)";
     } else {
-        cls = "conn-live";
-        const age = _lastHealth?.data_age;
-        tip = "Данные в реальном времени" + (age != null ? ` (${age}s)` : "");
+        cls = "conn-idle";  tip = currentSymbol + " — рынок закрыт (нет котировок)";
     }
     dot.className = "conn-dot " + cls;
     dot.setAttribute("data-tip", tip);
@@ -1709,6 +1715,7 @@ function setTF(paneId, tf) {
 // ============================================================================
 function switchSymbol(symbol) {
     currentSymbol = symbol;
+    resetMarketDot();   // индикатор рынка — заново с тиков нового инструмента
 
     [1, 2].forEach(paneId => {
         const st = panesState[paneId];

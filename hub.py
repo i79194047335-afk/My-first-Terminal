@@ -120,6 +120,7 @@ class Hub:
         # Для health-эндпоинта: когда стартовали и когда пришёл последний тик.
         self._started_ts   = time.time()
         self._last_tick_ts = 0.0
+        self._last_tick_by_symbol = {}   # symbol -> ts последнего РЕАЛЬНОГО тика
 
     # ── восстановление после рестарта ───────────────────────────────────
 
@@ -391,7 +392,11 @@ class Hub:
             return
 
         self.ticks_received += 1
-        self._last_tick_ts = time.time()
+        now = time.time()
+        self._last_tick_ts = now
+        # Свежесть по символу — для индикатора «рынок открыт» на фронте. Только
+        # реальные тики из шины; init-update при подписке сюда НЕ попадает.
+        self._last_tick_by_symbol[symbol] = now
         price = msg["price"]
 
         # Алерты — до нарезки: нужен prev_price для проверки пересечения уровня.
@@ -1105,11 +1110,18 @@ class Hub:
         open_now = market_open(now)
         stale    = bool(open_now and (age is None or age > 180))
 
+        # Возраст последнего РЕАЛЬНОГО тика по каждому символу — фронт красит по
+        # нему индикатор рынка выбранного инструмента (крипта 24/7 сама покажет
+        # «открыт», форекс на выходных — «закрыт»).
+        symbols_age = {sym: round(now - ts, 1)
+                       for sym, ts in self._last_tick_by_symbol.items()}
+
         return {
             "status":    "stale" if stale else "ok",
             "uptime":    int(now - self._started_ts),
             "market_open": open_now,
             "data_age":  None if age is None else round(age, 1),
+            "symbols_age": symbols_age,
             "clients":   len(self._clients),
             "ticks":     self.ticks_received,
             "db_queue":  self._db_queue.qsize(),
