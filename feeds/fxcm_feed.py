@@ -57,6 +57,42 @@ CONNECTION = os.getenv("FXCM_CONNECTION", "Demo")
 
 _last_price = {}
 
+# ── watchdog «тихого зависания» FXCM ────────────────────────────────────
+# Брокерская сессия может «повиснуть»: TCP жив, исключения нет, но тики
+# перестали приходить. systemd Restart=always такое не ловит (процесс не упал),
+# и обычный reconnect-по-исключению — тоже. Watchdog следит за временем
+# последнего тика и, если в ОТКРЫТЫЙ рынок тишина дольше порога, форсирует
+# пересоздание сессии.
+_last_tick_ts   = time.time()          # время последнего принятого тика
+_reconnect_flag = threading.Event()    # watchdog просит стриминг переподключиться
+TICK_SILENCE_SEC = 120                 # тишины столько → рынок открыт, но фид завис
+
+
+def market_open(ts=None):
+    """Открыт ли форекс-рынок в момент ts (UTC).
+
+    Форекс работает с воскресенья ~22:00 UTC до пятницы ~22:00 UTC (закрытие в
+    Нью-Йорке). Точные минуты у брокеров плавают; берём консервативно, чтобы
+    watchdog НЕ дёргал реконнекты в честно закрытый рынок (там тиков нет по
+    определению, это не зависание).
+
+    Args:
+        ts: Unix-время (None = сейчас).
+
+    Returns:
+        bool — рынок предположительно открыт.
+    """
+    dt  = datetime.utcfromtimestamp(time.time() if ts is None else ts)
+    wd  = dt.weekday()          # 0=Пн … 6=Вс
+    hr  = dt.hour
+    if wd == 5:                 # суббота — закрыт весь день
+        return False
+    if wd == 4 and hr >= 22:    # пятница после 22:00 UTC — закрыт
+        return False
+    if wd == 6 and hr < 22:     # воскресенье до 22:00 UTC — закрыт
+        return False
+    return True
+
 
 def should_emit(symbol, price):
     """Изменилась ли цена с прошлого тика.
@@ -316,6 +352,10 @@ def fxcm_streaming(bus, tick_queue):
             ts  = time.time()
             dt  = datetime.utcnow()
 
+            # Отметка для watchdog: сессия жива, тики идут.
+            global _last_tick_ts
+            _last_tick_ts = ts
+
             # В шину — КАЖДЫЙ тик, без фильтра: иначе в мёртвом рынке хаб не
             # получит тика и не откроет новую свечу (см. should_emit).
             bus.send_threadsafe(make_tick(PROVIDER, symbol, ts, mid))
@@ -332,6 +372,7 @@ def fxcm_streaming(bus, tick_queue):
         except Exception as err:
             print("[feed] ошибка обработки тика: %r" % (err,))
 
+    global _last_tick_ts
     while True:
         try:
             with ForexConnect() as fx:
@@ -345,13 +386,47 @@ def fxcm_streaming(bus, tick_queue):
                 Common.subscribe_table_updates(
                     offers, on_change_callback=on_offer_changed)
 
+                # Свежая сессия — сбрасываем счётчик тишины и флаг реконнекта,
+                # иначе watchdog сработал бы сразу на «старую» тишину.
+                _last_tick_ts = time.time()
+                _reconnect_flag.clear()
                 print("[feed] стриминг активен, ждём тики")
-                threading.Event().wait()   # держим поток живым
+
+                # Держим поток живым, пока watchdog не попросит переподключиться
+                # (тихое зависание сессии) — тогда выходим из with, ForexConnect
+                # закрывает сессию, и цикл создаёт новую.
+                _reconnect_flag.wait()
+                print("[feed] watchdog: форсированное переподключение FXCM")
 
         except Exception as err:
             print("[feed] обрыв соединения с FXCM: %r — переподключение через 5 с"
                   % (err,))
             time.sleep(5)
+
+
+def fxcm_watchdog():
+    """Поток-демон: ловить «тихое зависание» FXCM-сессии.
+
+    Раз в 30 с проверяет, сколько прошло с последнего тика. Если рынок ОТКРЫТ,
+    а тишина дольше TICK_SILENCE_SEC — сессия жива по TCP, но данных нет:
+    выставляем флаг, стриминг-цикл пересоздаёт сессию. В закрытый рынок
+    (выходные) тишина легитимна — не трогаем.
+
+    Args:
+        None.
+
+    Returns:
+        None (бесконечный цикл).
+    """
+    while True:
+        time.sleep(30)
+        if _reconnect_flag.is_set():
+            continue   # переподключение уже запрошено — ждём, не дублируем
+        silence = time.time() - _last_tick_ts
+        if silence > TICK_SILENCE_SEC and market_open():
+            print("[feed] watchdog: тишина %.0f с в открытый рынок — реконнект"
+                  % silence)
+            _reconnect_flag.set()
 
 
 async def _stats_loop(bus, every=60):
@@ -386,6 +461,7 @@ async def main():
     threading.Thread(target=tick_writer, args=(tick_queue,), daemon=True).start()
     threading.Thread(target=fxcm_streaming, args=(bus, tick_queue),
                      daemon=True).start()
+    threading.Thread(target=fxcm_watchdog, daemon=True).start()
 
     asyncio.ensure_future(_stats_loop(bus))
     await bus.run()   # вечный цикл: коннект к хабу + отправка очереди
