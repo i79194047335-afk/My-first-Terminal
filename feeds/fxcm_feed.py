@@ -31,6 +31,7 @@ from forexconnect import Common, ForexConnect
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.bus import BusClient, make_candles, make_instruments, make_tick
+from core.market_hours import forex_open as market_open
 
 PROVIDER      = "fxcm"
 SYMBOLS       = ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"]
@@ -66,32 +67,7 @@ _last_price = {}
 _last_tick_ts   = time.time()          # время последнего принятого тика
 _reconnect_flag = threading.Event()    # watchdog просит стриминг переподключиться
 TICK_SILENCE_SEC = 120                 # тишины столько → рынок открыт, но фид завис
-
-
-def market_open(ts=None):
-    """Открыт ли форекс-рынок в момент ts (UTC).
-
-    Форекс работает с воскресенья ~22:00 UTC до пятницы ~22:00 UTC (закрытие в
-    Нью-Йорке). Точные минуты у брокеров плавают; берём консервативно, чтобы
-    watchdog НЕ дёргал реконнекты в честно закрытый рынок (там тиков нет по
-    определению, это не зависание).
-
-    Args:
-        ts: Unix-время (None = сейчас).
-
-    Returns:
-        bool — рынок предположительно открыт.
-    """
-    dt  = datetime.utcfromtimestamp(time.time() if ts is None else ts)
-    wd  = dt.weekday()          # 0=Пн … 6=Вс
-    hr  = dt.hour
-    if wd == 5:                 # суббота — закрыт весь день
-        return False
-    if wd == 4 and hr >= 22:    # пятница после 22:00 UTC — закрыт
-        return False
-    if wd == 6 and hr < 22:     # воскресенье до 22:00 UTC — закрыт
-        return False
-    return True
+# market_open импортирован из core.market_hours (forex_open) — общий с хабом.
 
 
 def should_emit(symbol, price):

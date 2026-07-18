@@ -30,6 +30,7 @@ import websockets
 
 from core.bus import BusServer
 from core.candles import CandleBuilder, aggregate_higher_tf
+from core.market_hours import forex_open as market_open
 from core.range_bars import RangeBarBuilder, backfill_tail
 from core.db import init_db, load_history, load_instruments, trim_window, \
     upsert_candle, upsert_candles_batch, upsert_instrument
@@ -112,6 +113,10 @@ class Hub:
         self.ticks_ignored  = 0
         self.closed_candles = 0
         self.db_dropped     = 0
+
+        # Для health-эндпоинта: когда стартовали и когда пришёл последний тик.
+        self._started_ts   = time.time()
+        self._last_tick_ts = 0.0
 
     # ── восстановление после рестарта ───────────────────────────────────
 
@@ -383,6 +388,7 @@ class Hub:
             return
 
         self.ticks_received += 1
+        self._last_tick_ts = time.time()
         price = msg["price"]
 
         # Алерты — до нарезки: нужен prev_price для проверки пересечения уровня.
@@ -1076,6 +1082,39 @@ class Hub:
             "db_dropped": self.db_dropped,
         }
 
+    def health(self):
+        """Снимок здоровья контура для health-эндпоинта и heartbeat.
+
+        `status`: "ok" — данные свежие или рынок закрыт (тишина легитимна);
+        "stale" — рынок открыт, но тиков давно нет (фид/брокер завис).
+        `data_age` — секунд с последнего тика (None, если тиков ещё не было).
+
+        Args:
+            None.
+
+        Returns:
+            Dict статуса (JSON-сериализуемый).
+        """
+        now = time.time()
+        age = (now - self._last_tick_ts) if self._last_tick_ts else None
+
+        # «Свежесть» оцениваем только в открытый рынок: на выходных тиков нет
+        # по определению, и это не деградация. Порог щедрый — даже тихая пара
+        # тикает чаще; 180 с покрывает и паузу реконнекта фида (watchdog 120 с).
+        open_now = market_open(now)
+        stale    = bool(open_now and (age is None or age > 180))
+
+        return {
+            "status":    "stale" if stale else "ok",
+            "uptime":    int(now - self._started_ts),
+            "market_open": open_now,
+            "data_age":  None if age is None else round(age, 1),
+            "clients":   len(self._clients),
+            "ticks":     self.ticks_received,
+            "db_queue":  self._db_queue.qsize(),
+            "db_dropped": self.db_dropped,
+        }
+
 
 async def _stats_loop(hub, every=60):
     """Печатать статистику хаба раз в минуту.
@@ -1090,6 +1129,37 @@ async def _stats_loop(hub, every=60):
     while True:
         await asyncio.sleep(every)
         print("[hub] %s" % hub.stats)
+
+
+async def start_health_server(hub, port):
+    """Поднять HTTP health-эндпоинт на отдельном порту.
+
+    Отдельный лёгкий сервер (aiohttp), НЕ трогает боевой WS 8765 — health не
+    может задеть поток данных. `/health` отдаёт JSON hub.health(); код 200 при
+    status="ok", 503 при "stale" (рынок открыт, а тиков нет) — чтобы внешний
+    мониторинг/аптайм-чекер видел деградацию по HTTP-коду.
+
+    Args:
+        hub:  Экземпляр Hub.
+        port: Порт health-сервера.
+
+    Returns:
+        None.
+    """
+    from aiohttp import web
+
+    async def handle(_request):
+        h    = hub.health()
+        code = 200 if h["status"] == "ok" else 503
+        return web.json_response(h, status=code)
+
+    app = web.Application()
+    app.router.add_get("/health", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print("[hub] health-эндпоинт: http://0.0.0.0:%d/health" % port)
 
 
 async def main():
@@ -1113,6 +1183,8 @@ async def main():
     await websockets.serve(hub.ws_handler, "0.0.0.0", config["ws_port"])
     print("[hub] WebSocket для браузера: 0.0.0.0:%d, база %s"
           % (config["ws_port"], config["db_path"]))
+
+    await start_health_server(hub, config.get("health_port", 8787))
 
     asyncio.ensure_future(_stats_loop(hub))
     await asyncio.Future()

@@ -12,6 +12,7 @@
   },
   "broker_tf": ["H1", "H4", "D1"],
   "data_dir": "data",
+  "health_port": 8787,
   "briefing_file": "/root/projects/terminal/briefing.json",
   "markets": {
     "fxcm": ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"]
