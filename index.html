@@ -2234,6 +2234,35 @@ function renderBriefing() {
         "<div>" + (pairData.technical_summary || "Нет данных.") + "</div>" +
         "</div>";
 
+    // Консенсус аналитиков и мысль DeepSeek — раздельно (новый формат брифинга).
+    // Показываем, только если движок их дал (старый формат их не имеет).
+    const biasBadge = function(d) {
+        const x = (d || "NEUTRAL").toUpperCase();
+        const cls = x === "UP" ? "bias-up" : x === "DOWN" ? "bias-down" : "bias-neutral";
+        const ar  = x === "UP" ? "▲" : x === "DOWN" ? "▼" : "◆";
+        const lbl = x === "UP" ? "BULLISH" : x === "DOWN" ? "BEARISH" : "NEUTRAL";
+        return "<span class='" + cls + "'>" + ar + " " + lbl + "</span>";
+    };
+    if (pairData.consensus_view || pairData.consensus_direction) {
+        html += "<div class='section'>" +
+            "<div class='section-title'>Консенсус аналитиков " +
+            biasBadge(pairData.consensus_direction) + "</div>" +
+            "<div>" + (pairData.consensus_view || "—") + "</div>" +
+            "</div>";
+    }
+    if (pairData.deepseek_view) {
+        // Согласие/расхождение подсвечиваем по тексту мысли модели.
+        const dv = pairData.deepseek_view;
+        const disagree = /расхожден|не согла/i.test(dv);
+        const tag = disagree
+            ? "<span style='color:#ffa726'>⚠ расхождение</span>"
+            : "<span style='color:#26a69a'>✓ согласие</span>";
+        html += "<div class='section'>" +
+            "<div class='section-title'>🤖 Мысль DeepSeek " + tag + "</div>" +
+            "<div>" + dv + "</div>" +
+            "</div>";
+    }
+
     html += "<div class='section'>" +
         "<div class='section-title'>Ключевые уровни</div>" +
         "<div><span style='color:#ef5350'>Resistance:</span> " +
@@ -2284,6 +2313,26 @@ function renderBriefing() {
             "<div class='section-title'>Рекомендация</div>" +
             "<div>" + globalCtx.recommendation + "</div>" +
             "</div>";
+    }
+
+    // Трек-рекорд «кто чаще прав» — общий для всех пар, внизу брифинга.
+    const tr = lastBriefingData.track_record;
+    if (tr && (tr.deepseek?.total || tr.consensus?.total)) {
+        const pct = function(x) {
+            return x.total ? Math.round(100 * x.hit / x.total) + "%" : "—";
+        };
+        html += "<div class='section' style='border-top:1px solid var(--divider);padding-top:8px'>" +
+            "<div class='section-title'>Трек-рекорд (7 дней)</div>" +
+            "<div style='font-size:12px'>" +
+            "Аналитики: <b>" + tr.consensus.hit + "/" + tr.consensus.total +
+            "</b> (" + pct(tr.consensus) + ")<br>" +
+            "🤖 DeepSeek: <b>" + tr.deepseek.hit + "/" + tr.deepseek.total +
+            "</b> (" + pct(tr.deepseek) + ")";
+        if (tr.disagreements) {
+            html += "<br><span style='color:#aaa'>Расхождений: " + tr.disagreements +
+                ", из них DeepSeek прав в " + tr.disagree_ds_right + "</span>";
+        }
+        html += "</div></div>";
     }
 
     content.innerHTML = html;
