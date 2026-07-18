@@ -1,0 +1,86 @@
+"""
+Агент брифинга: вызов DeepSeek и разбор ответа.
+
+Слой 3 подпроекта briefing/. Единственное место, где ходим в LLM. Отделено от
+сборки промпта (prompt.py) и источников (sources.py): модель/ключ/парсинг —
+одна ответственность, промпт — другая.
+
+Модель — DeepSeek напрямую (openai SDK, base_url api.deepseek.com), ключ
+DEEPSEEK_API_KEY из окружения. Смена модели/канала — только здесь.
+"""
+
+import json
+import os
+
+from openai import OpenAI
+
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE    = "https://api.deepseek.com"
+DEEPSEEK_MODEL   = "deepseek-chat"
+
+
+class AgentError(Exception):
+    """Ошибка вызова LLM или разбора её ответа."""
+
+
+def generate(system_prompt, user_prompt, max_tokens=4000, temperature=0.3):
+    """Отправить промпты в DeepSeek и вернуть разобранный JSON брифинга.
+
+    Args:
+        system_prompt: Системный промпт (роль, формат).
+        user_prompt:   Пользовательский промпт (данные).
+        max_tokens:    Потолок ответа (нарративные брифинги объёмны).
+        temperature:   Низкая — брифинг аналитический, не творческий.
+
+    Returns:
+        Dict разобранного ответа модели.
+
+    Raises:
+        AgentError: нет ключа, ошибка API, или ответ — не валидный JSON.
+    """
+    if not DEEPSEEK_API_KEY:
+        raise AgentError("нет DEEPSEEK_API_KEY в окружении")
+
+    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE)
+    try:
+        resp = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        raw = resp.choices[0].message.content.strip()
+    except Exception as err:
+        raise AgentError("DeepSeek API: %r" % (err,))
+
+    return _parse_json(raw)
+
+
+def _parse_json(raw):
+    """Разобрать JSON из ответа модели, сняв markdown-обёртку при наличии.
+
+    Модель иногда оборачивает JSON в ```json … ``` вопреки инструкции — снимаем.
+
+    Args:
+        raw: Сырой текст ответа.
+
+    Returns:
+        Dict.
+
+    Raises:
+        AgentError: если после очистки это не JSON.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        # ```json\n{...}\n```  →  {...}
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as err:
+        raise AgentError("ответ не JSON: %s | начало: %s" % (err, text[:300]))
