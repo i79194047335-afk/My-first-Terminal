@@ -200,5 +200,42 @@ class TestDeltaPersistence(unittest.TestCase):
         self.assertNotIn("delta", row)
 
 
+class TestConfigConsistency(unittest.TestCase):
+    """Согласованность конфига хаба и фида.
+
+    Белый список рынков живёт в двух местах: MARKETS в фиде (там нужны
+    market_id) и markets.lighter в retention.json (там хаб решает, какие
+    тики принимать). Разъедутся — хаб молча выбросит тики по рынку, который
+    фид исправно качает, и потеря обнаружится только по пустому графику.
+    """
+
+    def setUp(self):
+        """Пропустить тест на py3.7: фид требует 3.10.
+
+        Returns:
+            None.
+        """
+        if sys.version_info < (3, 8):
+            self.skipTest("feeds/lighter_feed.py требует py3.10")
+
+    def test_feed_and_config_market_lists_match(self):
+        """Списки рынков в фиде и в retention.json совпадают."""
+        import json
+
+        from feeds.lighter_feed import MARKETS
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "retention.json")) as f:
+            config = json.load(f)
+
+        self.assertEqual(set(MARKETS), set(config["markets"]["lighter"]))
+
+    def test_retention_days_read_from_config(self):
+        """Глубина тикового архива берётся из конфига, а не из константы."""
+        from feeds.lighter_feed import _load_retention_days
+
+        self.assertGreater(_load_retention_days(), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

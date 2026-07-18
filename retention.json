@@ -14,7 +14,12 @@
   "data_dir": "data",
   "health_port": 8787,
   "briefing_file": "/root/projects/terminal/briefing.json",
+  "tick_retention_days": {
+    "lighter": 14
+  },
   "markets": {
-    "fxcm": ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"]
+    "fxcm": ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"],
+    "lighter": ["BTC", "ETH", "HYPE", "SOL", "WTI", "LIT",
+                "ZEC", "XAU", "BNB", "SPCX", "MU", "XAG"]
   }
 }

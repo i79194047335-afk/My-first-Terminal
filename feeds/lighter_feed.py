@@ -73,7 +73,37 @@ MARKET_TO_SYMBOL = {mid: sym for sym, mid in MARKETS.items()}
 
 # Кольцевой буфер сырых тиков. Согласовано с владельцем: глубже рэндж-бар
 # другого размера уже не построить, это осознанный размен диска на гибкость.
+# Значение берётся из retention.json (tick_retention_days.lighter), чтобы
+# глубина не разъезжалась между фидом и остальной системой.
 TICK_RETENTION_DAYS = 14
+
+
+def _load_retention_days(default=TICK_RETENTION_DAYS):
+    """Прочитать глубину тикового архива из retention.json.
+
+    Конфиг общий с хабом, но фид читает его сам: отдельный процесс, к хабу
+    за настройками не ходит. Любая проблема с файлом — не повод падать,
+    берём умолчание и пишем в лог.
+
+    Args:
+        default: Значение, если конфига нет или в нём нет нашего ключа.
+
+    Returns:
+        Число дней (int).
+    """
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "retention.json")
+    try:
+        with open(path, "r") as f:
+            value = (json.load(f).get("tick_retention_days") or {}).get(PROVIDER)
+    except (OSError, ValueError) as err:
+        log.warning("не прочитать retention.json (%s), глубина тиков = %d дней",
+                    err, default)
+        return default
+
+    if not isinstance(value, int) or value <= 0:
+        return default
+    return value
 
 # Бэкфил при старте: 2000 баров M1 ≈ 4 запроса по 500 (потолок API — 500).
 BACKFILL_TF        = "1m"
@@ -251,7 +281,8 @@ def _purge_old_ticks():
     Returns:
         None.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=TICK_RETENTION_DAYS)
+    days = _load_retention_days()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     try:
         names = os.listdir(DATA_DIR)
     except OSError as err:
@@ -282,7 +313,7 @@ def _purge_old_ticks():
 
     if removed:
         log.info("ротация тиков: удалено файлов старше %d дней: %d",
-                 TICK_RETENTION_DAYS, removed)
+                 days, removed)
 
 
 def tick_writer(tick_queue):
