@@ -33,6 +33,7 @@ from core.candles import CandleBuilder, aggregate_higher_tf
 from core.db import init_db, load_history, load_instruments, \
     load_volume_profile, save_volume_profile, trim_window, \
     upsert_candle, upsert_candles_batch, upsert_instrument
+from core.large_trades import LargeTradeFilter
 from core.logfmt import setup as _log_setup
 from core.market_hours import forex_open as market_open
 from core.range_bars import RangeBarBuilder, backfill_tail
@@ -125,6 +126,11 @@ class Hub:
         self._profiles = {}
         self._profile_dirty = set()
         self._profile_flush_ts = 0.0
+
+        # Лента крупных сделок: (provider, symbol) -> LargeTradeFilter.
+        # НЕ хранится: это живой поток, интересный в момент события. Порог —
+        # 95-й процентиль за скользящий час, свой у каждого инструмента.
+        self._large_filters = {}
 
         self._db_queue = queue.Queue(maxsize=5000)
 
@@ -436,6 +442,8 @@ class Hub:
 
         self._profile_ingest(provider, symbol, price, msg.get("size"),
                              msg.get("side"), msg["ts"])
+        self._large_trade_check(provider, symbol, price, msg.get("size"),
+                                msg.get("side"), msg["ts"])
         self._range_ingest(provider, symbol, price, msg["ts"])
         self._broadcast_update(provider, symbol)
 
@@ -603,6 +611,54 @@ class Hub:
             if state is not None:
                 self._flush_profile(key, state)
         self._profile_dirty.clear()
+
+    # ── лента крупных сделок ────────────────────────────────────────────
+
+    def _large_trade_check(self, provider, symbol, price, size, side, ts):
+        """Проверить сделку на «крупность» и разослать, если да.
+
+        Порог — 95-й процентиль размера за скользящий час, свой у каждого
+        инструмента. Ничего не хранится: лента интересна в момент события,
+        а история крупных сделок восстановима из тикового архива.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+            price:    Цена сделки.
+            size:     Размер в базовых единицах или None (FXCM — не лента).
+            side:     Сторона агрессора или None.
+            ts:       Время сделки, unix-секунды.
+
+        Returns:
+            None.
+        """
+        if not size:
+            return
+
+        key = (provider, symbol)
+        flt = self._large_filters.get(key)
+        if flt is None:
+            flt = LargeTradeFilter()
+            self._large_filters[key] = flt
+
+        is_large, level = flt.add(size, ts)
+        if not is_large:
+            return
+
+        self._broadcast_threadsafe(json.dumps({
+            "type":     "large_trade",
+            "provider": provider,
+            "symbol":   symbol,
+            "ts":       ts,
+            "price":    price,
+            "size":     size,
+            "side":     side,
+            "quote":    size * price,
+            # Порог, ПО КОТОРОМУ принято решение (не текущий): по нему на
+            # фронте видно, насколько сделка крупная, и size > threshold
+            # выполняется всегда.
+            "threshold": level,
+        }))
 
     # ── запись в SQLite (отдельный поток) ───────────────────────────────
 
