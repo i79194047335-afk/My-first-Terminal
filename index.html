@@ -2193,9 +2193,15 @@ function renderBriefing() {
         timeStr = hh + ":" + mm + " UTC+5 (" + dd + "." + MM + ")";
     }
 
+    // Сессия: в открытый рынок — «Лондонская (08:00–17:00 UTC)»; в закрытый
+    // (выходные) — честная пометка «рынок закрыт — обзор к открытию» вместо
+    // ложной «текущей сессии», которой в выходные нет.
+    const sessionLabel = (meta.market_open === false)
+        ? "🔒 Рынок закрыт — обзор к открытию"
+        : "📅 " + (meta.session_label_ru || meta.session_label || meta.session || "") +
+          " (" + (meta.session_start_utc || "") + "–" + (meta.session_end_utc || "") + " UTC)";
     html += "<div class='meta'>" +
-        "📅 " + (meta.session_label_ru || meta.session_label || meta.session || "") +
-        " (" + (meta.session_start_utc || "") + "–" + (meta.session_end_utc || "") + " UTC)" +
+        sessionLabel +
         " | 🕐 Составлен: " + timeStr +
         " | Волатильность: " + (globalCtx.session_volatility || "N/A") +
         " | Риск: " + (globalCtx.risk_appetite || "N/A") +
@@ -2208,26 +2214,9 @@ function renderBriefing() {
 
     html += staleHtml;
 
-    // Currency bias — показываем валюты пары
-    const currencies = currentSymbol.split("/");
-    const currencyBias = lastBriefingData.currency_bias || {};
-    if (currencies.length === 2) {
-        const c1 = currencies[0], c2 = currencies[1];
-        const b1 = currencyBias[c1] || "?";
-        const b2 = currencyBias[c2] || "?";
-        const biasColor = function(b) {
-            if (b === "BULLISH") return "#26a69a";
-            if (b === "BEARISH") return "#ef5350";
-            return "#ffa726";
-        };
-        html += "<div class='section'>" +
-            "<div class='section-title'>Повалютный bias</div>" +
-            "<div style='font-size:13px'>" +
-            "<span style='color:" + biasColor(b1) + ";font-weight:bold'>" + c1 + ": " + b1 + "</span>" +
-            " → " +
-            "<span style='color:" + biasColor(b2) + ";font-weight:bold'>" + c2 + ": " + b2 + "</span>" +
-            "</div></div>";
-    }
+    // Повалютный bias убран: дублировал попарные направления и путал
+    // (обе валюты пары могли выйти BULLISH одновременно). Направление теперь
+    // ясно из «Консенсус аналитиков» + «Мысль DeepSeek».
 
     html += "<div class='section'>" +
         "<div class='section-title'>Технический анализ</div>" +

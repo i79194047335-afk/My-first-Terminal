@@ -34,20 +34,25 @@ SESSION_CONTEXTS = {
 SYMBOLS = ["EUR/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
 
 
-def build_system_prompt(session_key, session_label_ru):
+def build_system_prompt(session_key, session_label_ru, market_open=True):
     """Системный промпт: роль, сессия, СТРУКТУРА картина/консенсус/мысль.
 
     Args:
         session_key:      "asia"/"london"/"ny".
         session_label_ru: Русское имя сессии для роли.
+        market_open:      Открыт ли форекс. В закрытый рынок брифинг — обзор
+                          К ОТКРЫТИЮ (выходные), а не описание идущей сессии.
 
     Returns:
         Строка системного промпта.
     """
     ctx = SESSION_CONTEXTS.get(session_key, SESSION_CONTEXTS["asia"])
     pairs = ", ".join(SYMBOLS)
+    role = ("макро-аналитик %s торговой сессии" % session_label_ru if market_open
+            else "макро-аналитик; РЫНОК ЗАКРЫТ (выходные) — дай ОБЗОР к открытию "
+                 "рынка, а не описание идущей сессии; картина по последним данным")
 
-    return """Ты — макро-аналитик %s торговой сессии. Пары: %s.
+    return """Ты — %s. Пары: %s.
 
 %s
 
@@ -71,7 +76,6 @@ def build_system_prompt(session_key, session_label_ru):
 ФОРМАТ — строгий JSON (без markdown):
 
 {
-  "currency_bias": {"USD":"BULLISH|BEARISH|NEUTRAL", "EUR":"...", "JPY":"...", "AUD":"...", "CAD":"..."},
   "pairs": {
     "EUR/USD": {
       "technical_summary": "техкартина 180-240 симв: цена, D1/сессия диапазон, H4 тренд, позиция, уровни, волатильность",
@@ -97,7 +101,7 @@ def build_system_prompt(session_key, session_label_ru):
     "session_volatility": "LOW|NORMAL|HIGH",
     "recommendation": "180-280 симв: общая картина сессии, где сильнее конвикшен, что игнорировать"
   }
-}""" % (session_label_ru, pairs, ctx)
+}""" % (role, pairs, ctx)
 
 
 def _fmt_technical(sym, t):

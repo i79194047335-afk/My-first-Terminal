@@ -25,6 +25,7 @@ from briefing import memory, sources
 from briefing.agent import AgentError, generate
 from briefing.prompt import build_system_prompt, build_user_prompt
 from briefing.technical import get_technical_context, SYMBOLS
+from core.market_hours import forex_open
 
 load_dotenv()
 
@@ -76,7 +77,13 @@ def main():
     session_key, cfg = detect_session()
     now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
-    print("[brief] сессия: %s" % cfg["label_ru"])
+    is_open = forex_open(now_ts)
+    # В закрытый рынок (выходные) «текущей сессии» нет — брифинг становится
+    # обзором К ОТКРЫТИЮ, а не описанием идущей сессии. detect_session даёт
+    # ближайшую сессию по часу для контекста, но помечаем реальность.
+    session_note = ("" if is_open
+                    else " (рынок закрыт — обзор к открытию)")
+    print("[brief] сессия: %s%s" % (cfg["label_ru"], session_note))
 
     # 1. Данные.
     technical = get_technical_context()
@@ -97,7 +104,8 @@ def main():
                    for sym in SYMBOLS}
 
     # 3. Промпт → DeepSeek.
-    system_prompt = build_system_prompt(session_key, cfg["label_ru"])
+    system_prompt = build_system_prompt(session_key, cfg["label_ru"],
+                                        market_open=is_open)
     user_prompt = build_user_prompt(technical, news, diag, calendar, assessments)
     print("[brief] промпт %d символов, вызываю DeepSeek…" % len(user_prompt))
     try:
@@ -118,6 +126,8 @@ def main():
         "session_end_utc":   cfg["end_utc"],
         "generated_at":   now.strftime("%Y-%m-%d %H:%M UTC"),
         "generated_ts":   now_ts,
+        "market_open":    is_open,
+        "session_note":   session_note.strip(" ()") or None,
         "news_total":     total,
         "news_low":       low,
         "news_by_feed":   line,
