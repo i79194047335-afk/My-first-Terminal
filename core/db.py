@@ -8,8 +8,9 @@ Schema:
 All times are Unix SECONDS. Volumes are nullable (FXCM doesn't provide them).
 """
 
-import sqlite3
+import json
 import os
+import sqlite3
 
 KEEP_BARS = 2000
 
