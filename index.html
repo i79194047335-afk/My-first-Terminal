@@ -113,6 +113,15 @@
     .tb-txt:hover { border-color:var(--accent); }
     .tb-txt svg { width:15px; height:15px; }
     .tb-txt.on { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); }
+    /* индикатор связи с сервером (heartbeat) */
+    .conn-dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; margin:0 4px;
+        display:inline-block; transition:background .3s, box-shadow .3s; }
+    .conn-live  { background:#26a69a; box-shadow:0 0 5px #26a69a; }   /* данные свежие */
+    .conn-idle  { background:#b0b0b0; }                               /* рынок закрыт — тишина норма */
+    .conn-stale { background:#f5a623; box-shadow:0 0 5px #f5a623; }   /* рынок открыт, данных нет */
+    .conn-down  { background:#ef5350; box-shadow:0 0 6px #ef5350;     /* связь с хабом потеряна */
+        animation:conn-blink 1s steps(2) infinite; }
+    @keyframes conn-blink { 50% { opacity:.35; } }
     /* разделитель и распорка */
     .tb-div { width:1px; height:20px; background:var(--divider); margin:0 2px; flex-shrink:0; }
     .tb-spacer { flex:1; }
@@ -466,6 +475,7 @@
             <button id="posBtn2" class="tb-ic" onclick="togglePositionDropdown(2, event)" data-tip="Позиция"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4v16M6 9l6-5 6 5"/></svg></button>
             <button id="indBtn2" class="tb-ic" onclick="openIndicatorsPanel(2, event)" data-tip="Индикаторы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17l5-6 4 4 5-8 4 5"/></svg></button>
             <div class="tb-spacer"></div>
+            <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
             <button id="signalLogBtn" class="tb-txt" onclick="toggleSignalPanel()" data-tip="Сигналы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
         </div>
@@ -631,6 +641,76 @@ const drawings    = { 1: [], 2: [] };
 const pendingAlerts = {};
 
 let ws1 = null, ws2 = null;
+
+// ── Heartbeat / индикатор связи ─────────────────────────────────────────
+// Хаб шлёт {type:"heartbeat", data:health()} раз в ~10 с. Если heartbeat не
+// приходит дольше HEARTBEAT_TIMEOUT — считаем связь потерянной (точка мигает
+// красным). health.status "stale" (рынок открыт, а тиков нет) — жёлтый.
+let _lastHeartbeat = 0;
+let _lastHealth    = null;
+const HEARTBEAT_TIMEOUT = 25000;   // >2 периодов хаба (10 с) с запасом
+
+function onHeartbeat(health) {
+    _lastHeartbeat = Date.now();
+    _lastHealth    = health;
+    updateConnDot();
+}
+
+function updateConnDot() {
+    const dot = document.getElementById("connDot");
+    if (!dot) return;
+    const silent = Date.now() - _lastHeartbeat;
+
+    let cls, tip;
+    if (_lastHeartbeat === 0 || silent > HEARTBEAT_TIMEOUT) {
+        cls = "conn-down";  tip = "Связь с сервером потеряна";
+    } else if (_lastHealth?.status === "stale") {
+        cls = "conn-stale"; tip = "Рынок открыт, но данные не поступают";
+    } else if (_lastHealth && _lastHealth.market_open === false) {
+        cls = "conn-idle";  tip = "Связь есть, рынок закрыт";
+    } else {
+        cls = "conn-live";
+        const age = _lastHealth?.data_age;
+        tip = "Данные в реальном времени" + (age != null ? ` (${age}s)` : "");
+    }
+    dot.className = "conn-dot " + cls;
+    dot.setAttribute("data-tip", tip);
+}
+
+// Тик-таймер: даже без новых heartbeat пересчитываем индикатор, чтобы «связь
+// потеряна» зажглась по таймауту, а не только на следующем сообщении.
+setInterval(updateConnDot, 3000);
+
+// Привязать обработчики к сокету панели + автопереподключение при разрыве.
+// Раньше onclose/onerror не было вовсе — при обрыве вкладка молча висела на
+// мёртвом сокете до ручного F5. Теперь пересоздаём сокет с нарастающей паузой.
+function wireSocket(id, state, els) {
+    const ws = state.ws;
+    ws.onopen = () => {
+        state._reconnectDelay = 1000;   // успешный коннект — сброс backoff
+        const tf = els ? els.tfSelect.value : (layout[`pane${id}`]?.tf || "M1");
+        setTF(id, tf);
+        ws.send(JSON.stringify({ type: "get_instruments" }));
+        if (id === 1) ws.send(JSON.stringify({ type: "get_signals" }));
+    };
+    ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
+    ws.onclose   = () => scheduleReconnect(id, state);
+    ws.onerror   = () => { try { ws.close(); } catch (e) {} };  // → onclose
+}
+
+function scheduleReconnect(id, state) {
+    updateConnDot();   // сокет мёртв — индикатор сразу перечитает таймаут
+    const delay = state._reconnectDelay || 1000;
+    state._reconnectDelay = Math.min(delay * 2, 15000);  // 1→2→4→…→15 с
+    setTimeout(() => {
+        // Символ мог смениться, пока были в оффлайне — onopen возьмёт из layout.
+        state.ws = new WebSocket(WS_URL);
+        if (id === 1) ws1 = state.ws;
+        if (id === 2) ws2 = state.ws;
+        wireSocket(id, state, getPaneElements(id));
+    }, delay);
+}
+
 let isDragging         = false;
 let contextLinePane    = null;
 let contextLineObject  = null;
@@ -709,6 +789,8 @@ function isDrawingActive() {
 // ============================================================================
 function handleMessage(id, state, msg) {
     const els = getPaneElements(id);
+
+    if (msg.type === "heartbeat") { onHeartbeat(msg.data); return; }
 
     if (
         msg.type !== "alert" &&
@@ -882,17 +964,7 @@ function createPane(id) {
     ensureTfOption(els.tfSelect, layout[`pane${id}`]?.tf);
     els.tfSelect.value = layout[`pane${id}`]?.tf || "M1";
 
-    state.ws.onopen    = () => {
-        setTF(id, els.tfSelect.value);
-        // Запрашиваем instruments явно: хаб шлёт их при коннекте только если уже
-        // получил от фида, а браузер может подключиться раньше. Без запроса
-        // селектор и precision остались бы на HTML-fallback.
-        state.ws.send(JSON.stringify({ type: "get_instruments" }));
-        // Подтянуть недавние сигналы сессии, чтобы стрелки переживали
-        // перезагрузку страницы. Запрос один (из панели 1) — _signalLog общий.
-        if (id === 1) state.ws.send(JSON.stringify({ type: "get_signals" }));
-    };
-    state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
+    wireSocket(id, state, els);
 
     els.tfSelect.onchange = () => {
         let v = els.tfSelect.value;
@@ -1668,10 +1740,9 @@ function switchSymbol(symbol) {
         } else {
             // Только если сокет закрыт/закрывается — создаём заново.
             state.ws = new WebSocket(WS_URL);
-            state.ws.onopen    = () => setTF(id, layout[`pane${id}`]?.tf || "M1");
-            state.ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
             if (id === 1) ws1 = state.ws;
             if (id === 2) ws2 = state.ws;
+            wireSocket(id, state, getPaneElements(id));
         }
     });
     refreshSignalMarkers();

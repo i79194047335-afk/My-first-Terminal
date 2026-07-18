@@ -1131,6 +1131,26 @@ async def _stats_loop(hub, every=60):
         print("[hub] %s" % hub.stats)
 
 
+async def _heartbeat_loop(hub, every=10):
+    """Слать всем клиентам heartbeat со снимком здоровья.
+
+    Браузер по нему понимает, что хаб жив и данные свежие; отсутствие
+    heartbeat дольше нескольких периодов = связь потеряна (фронт покажет это).
+    Снимок тот же, что у /health — вкладке не нужен отдельный HTTP-запрос.
+
+    Args:
+        hub:   Экземпляр Hub.
+        every: Период в секундах.
+
+    Returns:
+        None (бесконечный цикл).
+    """
+    while True:
+        await asyncio.sleep(every)
+        payload = json.dumps({"type": "heartbeat", "data": hub.health()})
+        hub._broadcast(payload)
+
+
 async def start_health_server(hub, port):
     """Поднять HTTP health-эндпоинт на отдельном порту.
 
@@ -1187,6 +1207,7 @@ async def main():
     await start_health_server(hub, config.get("health_port", 8787))
 
     asyncio.ensure_future(_stats_loop(hub))
+    asyncio.ensure_future(_heartbeat_loop(hub))
     await asyncio.Future()
 
 
