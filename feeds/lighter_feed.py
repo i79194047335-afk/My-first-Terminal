@@ -429,7 +429,8 @@ async def _consume(ws, bus, tick_queue, dedupers, stats):
             ts_sec = rec["t"] / 1000.0
 
             bus.send_threadsafe(
-                make_tick(PROVIDER, symbol, ts_sec, rec["p"], size=rec["s"])
+                make_tick(PROVIDER, symbol, ts_sec, rec["p"],
+                          size=rec["s"], side=rec["side"])
             )
             try:
                 tick_queue.put_nowait({

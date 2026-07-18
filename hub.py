@@ -403,7 +403,10 @@ class Hub:
         self._check_alerts(symbol, self._last_price.get(symbol, price), price)
         self._last_price[symbol] = price
 
-        closed = builder.ingest(price, msg["ts"])
+        # size/side есть только у бирж с настоящим объёмом (Lighter). У FXCM
+        # size=None, и свеча остаётся чистым OHLC, как была до Фазы 3.
+        closed = builder.ingest(price, msg["ts"],
+                                size=msg.get("size"), side=msg.get("side"))
 
         for tf, candle in closed.items():
             self.closed_candles += 1
