@@ -28,10 +28,15 @@ websockets.connect, handler с одним аргументом, `async for` по
 
 import asyncio
 import json
+import logging
 import threading
 import time
 
 import websockets
+
+# Логгер шины. Настройку root-логгера делает процесс-хозяин (hub/feed) через
+# core.logfmt.setup при импорте; здесь только берём именованный логгер.
+log = logging.getLogger("bus")
 
 BUS_HOST = "127.0.0.1"
 BUS_PORT = 8766
@@ -279,7 +284,7 @@ class BusServer:
                 except (ValueError, BusError) as err:
                     # ValueError покрывает json.JSONDecodeError.
                     self._dropped += 1
-                    print("[bus] отброшено: %s" % err)
+                    log.warning("отброшено: %s", err)
                     continue
 
                 self._received += 1
@@ -288,9 +293,9 @@ class BusServer:
                 except Exception as err:
                     # Ошибка ПОТРЕБИТЕЛЯ (хаба), не шины: логируем и живём дальше.
                     self._dropped += 1
-                    print("[bus] on_message упал: %r" % (err,))
+                    log.error("on_message упал: %r", err)
         except websockets.ConnectionClosed:
-            print("[bus] фид отключился")
+            log.info("фид отключился")
         finally:
             self._clients -= 1
 
@@ -310,7 +315,7 @@ class BusServer:
         """
         self._server = await websockets.serve(self._handler, self._host, self._port,
                                               max_size=MAX_MESSAGE_BYTES)
-        print("[bus] слушаю %s:%d" % (self._host, self._port))
+        log.info("слушаю %s:%d", self._host, self._port)
 
     async def serve(self):
         """Поднять сервер и работать вечно.
@@ -424,7 +429,7 @@ class BusClient:
             validate(msg)
         except BusError as err:
             self._dropped += 1
-            print("[bus:%s] не отправлено: %s" % (self._provider, err))
+            log.warning("[%s] не отправлено: %s", self._provider, err)
             return False
 
         loop = self._loop
@@ -480,11 +485,11 @@ class BusClient:
                 async with websockets.connect(self._url) as ws:
                     self._connected = True
                     backoff = 1
-                    print("[bus:%s] подключён к %s" % (self._provider, self._url))
+                    log.info("[%s] подключён к %s", self._provider, self._url)
                     await self._pump(ws)
             except _NET_ERRORS as err:
-                print("[bus:%s] обрыв (%s), переподключение через %d с"
-                      % (self._provider, type(err).__name__, backoff))
+                log.warning("[%s] обрыв (%s), переподключение через %d с",
+                            self._provider, type(err).__name__, backoff)
             finally:
                 if self._connected:
                     self._reconnects += 1

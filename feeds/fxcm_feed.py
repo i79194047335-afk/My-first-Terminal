@@ -31,7 +31,10 @@ from forexconnect import Common, ForexConnect
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.bus import BusClient, make_candles, make_instruments, make_tick
+from core.logfmt import setup as _log_setup
 from core.market_hours import forex_open as market_open
+
+log = _log_setup("feed")
 
 PROVIDER      = "fxcm"
 SYMBOLS       = ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"]
@@ -248,13 +251,13 @@ def send_instruments(fx, bus):
     except Exception as err:
         # Метаданные — не повод ронять соединение: без них фронт просто
         # останется на прежнем хардкоде.
-        print("[feed] не смог прочитать офферы: %r" % (err,))
+        log.error("не смог прочитать офферы: %r", err)
         return 0
 
     if data:
         bus.send_threadsafe(make_instruments(PROVIDER, data))
-        print("[feed] инструменты: %s"
-              % ", ".join("%s(%d)" % (d["symbol"], d["price_decimals"]) for d in data))
+        log.info("инструменты: %s",
+             ", ".join("%s(%d)" % (d["symbol"], d["price_decimals"]) for d in data))
     return len(data)
 
 
@@ -273,22 +276,22 @@ def load_history(fx, bus):
         None.
     """
     now = datetime.utcnow()
-    print("[feed] загрузка истории…")
+    log.info("загрузка истории…")
 
     for symbol in SYMBOLS:
         # M1: 30 дней — как в монолите; лишнее подрежет окно ретеншена в хабе.
         raw  = fx.get_history(symbol, "m1", now - timedelta(days=30), now)
         bars = _rows_to_candles(raw[-HISTORY_COUNT:])
         sent = _send_candles(bus, symbol, "M1", bars)
-        print("[feed] %s M1: %d баров" % (symbol, sent))
+        log.info("%s M1: %d баров", symbol, sent)
 
         for tf, (fx_tf, days) in DIRECT_LOAD_TF.items():
             raw  = fx.get_history(symbol, fx_tf, now - timedelta(days=days), now)
             bars = _rows_to_candles(raw)
             sent = _send_candles(bus, symbol, tf, bars)
-            print("[feed] %s %s: %d баров" % (symbol, tf, sent))
+            log.info("%s %s: %d баров", symbol, tf, sent)
 
-    print("[feed] история отправлена в шину")
+    log.info("история отправлена в шину")
 
 
 def fxcm_streaming(bus, tick_queue):
@@ -346,14 +349,14 @@ def fxcm_streaming(bus, tick_queue):
                     pass
 
         except Exception as err:
-            print("[feed] ошибка обработки тика: %r" % (err,))
+            log.error("ошибка обработки тика: %r", err)
 
     global _last_tick_ts
     while True:
         try:
             with ForexConnect() as fx:
                 fx.login(LOGIN, PASSWORD, URL, CONNECTION)
-                print("[feed] подключён к FXCM (%s)" % CONNECTION)
+                log.info("подключён к FXCM (%s)", CONNECTION)
 
                 send_instruments(fx, bus)
                 load_history(fx, bus)
@@ -366,17 +369,16 @@ def fxcm_streaming(bus, tick_queue):
                 # иначе watchdog сработал бы сразу на «старую» тишину.
                 _last_tick_ts = time.time()
                 _reconnect_flag.clear()
-                print("[feed] стриминг активен, ждём тики")
+                log.info("стриминг активен, ждём тики")
 
                 # Держим поток живым, пока watchdog не попросит переподключиться
                 # (тихое зависание сессии) — тогда выходим из with, ForexConnect
                 # закрывает сессию, и цикл создаёт новую.
                 _reconnect_flag.wait()
-                print("[feed] watchdog: форсированное переподключение FXCM")
+                log.warning("watchdog: форсированное переподключение FXCM")
 
         except Exception as err:
-            print("[feed] обрыв соединения с FXCM: %r — переподключение через 5 с"
-                  % (err,))
+            log.error("обрыв соединения с FXCM: %r — переподключение через 5 с", err)
             time.sleep(5)
 
 
@@ -400,8 +402,7 @@ def fxcm_watchdog():
             continue   # переподключение уже запрошено — ждём, не дублируем
         silence = time.time() - _last_tick_ts
         if silence > TICK_SILENCE_SEC and market_open():
-            print("[feed] watchdog: тишина %.0f с в открытый рынок — реконнект"
-                  % silence)
+            log.warning("watchdog: тишина %.0f с в открытый рынок — реконнект", silence)
             _reconnect_flag.set()
 
 
@@ -417,7 +418,7 @@ async def _stats_loop(bus, every=60):
     """
     while True:
         await asyncio.sleep(every)
-        print("[feed] %s" % bus.stats)
+        log.info("%s", bus.stats)
 
 
 async def main():

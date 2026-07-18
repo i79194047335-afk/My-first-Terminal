@@ -30,10 +30,13 @@ import websockets
 
 from core.bus import BusServer
 from core.candles import CandleBuilder, aggregate_higher_tf
-from core.market_hours import forex_open as market_open
-from core.range_bars import RangeBarBuilder, backfill_tail
 from core.db import init_db, load_history, load_instruments, trim_window, \
     upsert_candle, upsert_candles_batch, upsert_instrument
+from core.logfmt import setup as _log_setup
+from core.market_hours import forex_open as market_open
+from core.range_bars import RangeBarBuilder, backfill_tail
+
+log = _log_setup("hub")
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "retention.json")
@@ -139,8 +142,8 @@ class Hub:
             saved = load_instruments(self._conn, provider)
             if saved:
                 self._instruments[provider] = saved
-                print("[restore] %s — инструменты: %s"
-                      % (provider, ", ".join(i["symbol"] for i in saved)))
+                log.info("[restore] %s — инструменты: %s",
+                     provider, ", ".join(i["symbol"] for i in saved))
 
             for symbol in symbols:
                 key  = (provider, symbol)
@@ -165,8 +168,8 @@ class Hub:
                 self._restore_forming(provider, symbol, now)
 
                 total = sum(len(b) for b in hist.values())
-                print("[restore] %s:%s — %d баров, смещения %s"
-                      % (provider, symbol, total, offsets or "{}"))
+                log.info("[restore] %s:%s — %d баров, смещения %s",
+                     provider, symbol, total, offsets or "{}")
 
     def _restore_forming(self, provider, symbol, now_ts, quiet=False):
         """Восстановить незакрытую свечу текущего бакета для всех ТФ >= 1 мин.
@@ -239,8 +242,8 @@ class Hub:
             seeded += 1
 
         if not quiet:
-            print("[restore] %s:%s — живая свеча восстановлена на %d ТФ"
-                  % (provider, symbol, seeded))
+            log.info("[restore] %s:%s — живая свеча восстановлена на %d ТФ",
+                 provider, symbol, seeded)
 
     # ── приём из шины ───────────────────────────────────────────────────
 
@@ -264,7 +267,7 @@ class Hub:
             elif msg["type"] == "instruments":
                 self._handle_instruments(msg)
         except Exception as err:
-            print("[hub] ошибка на сообщении шины: %r" % (err,))
+            log.error("ошибка на сообщении шины: %r", err)
 
     def _handle_candles(self, msg):
         """Влить историческую пачку баров от провайдера.
@@ -338,8 +341,8 @@ class Hub:
         self._restore_forming(provider, symbol, now, quiet=True)
 
         total = sum(len(self._history[key][t]) for t in touched)
-        print("[hub] %s:%s догружено %s → %d баров"
-              % (provider, symbol, ", ".join(touched), total))
+        log.info("%s:%s догружено %s → %d баров",
+             provider, symbol, ", ".join(touched), total)
 
     def _merge_history(self, key, tf, bars):
         """Влить бары в историю: upsert по времени, порядок и окно сохраняются.
@@ -455,8 +458,7 @@ class Hub:
             self._db_queue.put_nowait((provider, symbol, tf, candle))
         except queue.Full:
             self.db_dropped += 1
-            print("[hub] очередь БД полна — свеча %s %s %s потеряна"
-                  % (provider, symbol, tf))
+            log.warning("очередь БД полна — свеча %s %s %s потеряна", provider, symbol, tf)
 
     def db_writer(self):
         """Поток-демон: писать закрытые свечи в SQLite.
@@ -487,7 +489,7 @@ class Hub:
                                 trim_window(conn, prov, sym, tf_name,
                                             self._keep_bars)
             except Exception as err:
-                print("[hub] db_writer: %r — свеча пропущена" % (err,))
+                log.warning("db_writer: %r — свеча пропущена", err)
 
     # ── брифинг ─────────────────────────────────────────────────────────
 
@@ -520,11 +522,11 @@ class Hub:
                             self._briefing       = data
                             self._briefing_mtime = mtime
                         session = data.get("meta", {}).get("session", "?")
-                        print("[hub] брифинг обновлён (session=%s)" % session)
+                        log.info("брифинг обновлён (session=%s)", session)
                         self._broadcast_threadsafe(json.dumps(
                             {"type": "briefing", "data": data}))
             except Exception as err:
-                print("[hub] briefing_watcher: %r" % (err,))
+                log.error("briefing_watcher: %r", err)
             time.sleep(5)
 
     def _broadcast_threadsafe(self, payload):
@@ -675,8 +677,8 @@ class Hub:
         self._range_pending[key] = {"buffer": []}
         threading.Thread(target=self._range_backfill_worker,
                          args=(key,), daemon=True).start()
-        print("[hub] рэндж %s:%s R=%s — бэкфил из тикового архива…"
-              % (provider, symbol, pips))
+        log.info("рэндж %s:%s R=%s — бэкфил из тикового архива…",
+                 provider, symbol, pips)
 
     def _range_backfill_worker(self, key):
         """Поток: построить историю рэндж-баров из тикового архива.
@@ -699,8 +701,7 @@ class Hub:
                                              max_bars=self._keep_bars)
         except Exception as err:
             # Архива может не быть (свежий инстанс) — отдаём что успели.
-            print("[hub] бэкфил рэндж %s:%s R=%s: %r"
-                  % (provider, symbol, points, err))
+            log.error("бэкфил рэндж %s:%s R=%s: %r", provider, symbol, points, err)
 
         loop = self._loop
         if loop is not None:
@@ -729,9 +730,9 @@ class Hub:
                 builder.ingest(price, ts)
         self._range_builders[key] = builder
 
-        print("[hub] рэндж %s:%s R=%s готов: %d баров (буфер %d тиков)"
-              % (provider, symbol, pips, len(builder.history()),
-                 len(entry["buffer"])))
+        log.info("рэндж %s:%s R=%s готов: %d баров (буфер %d тиков)",
+                 provider, symbol, pips, len(builder.history()),
+                 len(entry["buffer"]))
 
         for ws, info in list(self._clients.items()):
             if (info["provider"] == provider and info["symbol"] == symbol
@@ -858,7 +859,7 @@ class Hub:
 
         provider = self._provider_of(symbol)
         if provider is None:
-            print("[hub] set_tf на неизвестный символ %s — игнор" % (symbol,))
+            log.warning("set_tf на неизвестный символ %s — игнор", symbol)
             return
 
         pips = self.parse_range_tf(tf)
@@ -868,7 +869,7 @@ class Hub:
             return
 
         if tf not in self._tf_seconds:
-            print("[hub] set_tf на неизвестный %s %s — игнор" % (symbol, tf))
+            log.warning("set_tf на неизвестный %s %s — игнор", symbol, tf)
             return
 
         self._clients[ws] = {"provider": provider, "symbol": symbol,
@@ -1024,8 +1025,8 @@ class Hub:
             level = alert["price"]
             if (prev_price <= level <= price) or (price <= level <= prev_price):
                 alert["triggered"] = True
-                print("[hub] ALERT %s id=%s level=%s tick=%s"
-                      % (symbol, alert["id"], level, price))
+                log.info("ALERT %s id=%s level=%s tick=%s",
+                     symbol, alert["id"], level, price)
                 # Событие срабатывания — ВСЕМ клиентам (фронт принимает его
                 # независимо от requestId и подписки на символ).
                 self._broadcast(json.dumps({
@@ -1128,7 +1129,7 @@ async def _stats_loop(hub, every=60):
     """
     while True:
         await asyncio.sleep(every)
-        print("[hub] %s" % hub.stats)
+        log.info("%s", hub.stats)
 
 
 async def _heartbeat_loop(hub, every=10):
@@ -1179,7 +1180,7 @@ async def start_health_server(hub, port):
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print("[hub] health-эндпоинт: http://0.0.0.0:%d/health" % port)
+    log.info("health-эндпоинт: http://0.0.0.0:%d/health", port)
 
 
 async def main():
@@ -1201,8 +1202,8 @@ async def main():
     await bus.start()
 
     await websockets.serve(hub.ws_handler, "0.0.0.0", config["ws_port"])
-    print("[hub] WebSocket для браузера: 0.0.0.0:%d, база %s"
-          % (config["ws_port"], config["db_path"]))
+    log.info("WebSocket для браузера: 0.0.0.0:%d, база %s",
+             config["ws_port"], config["db_path"])
 
     await start_health_server(hub, config.get("health_port", 8787))
 
