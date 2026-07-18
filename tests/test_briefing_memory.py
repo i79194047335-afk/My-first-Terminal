@@ -109,6 +109,59 @@ class TestAssessmentVerdicts(unittest.TestCase):
     def test_no_history(self):
         self.assertIsNone(memory.assess_previous("EUR/USD", 9999))
 
+    def test_two_sided_verdict(self):
+        """assess_previous судит и DeepSeek, и консенсус раздельно."""
+        b = {
+            "meta": {"generated_ts": 1000, "session": "ny"},
+            "pairs": {"USD/JPY": {
+                "direction": "UP", "consensus_direction": "DOWN",
+                "direction_confidence": 3,
+                "technical_summary": "Цена 162.00000",
+                "support_levels": [], "resistance_levels": [],
+            }},
+        }
+        memory.record_briefing(b)
+        memory._fact_since = lambda s, t0, t1: (162.20, 162.20, 162.20)  # +20п
+        a = memory.assess_previous("USD/JPY", 9999)
+        self.assertEqual(a["verdict"], "сбылось")            # DeepSeek UP — прав
+        self.assertEqual(a["consensus_verdict"], "не сбылось")  # консенсус DOWN — нет
+
+
+class TestTrackRecord(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._origf = memory.JOURNAL_FILE
+        self._origfact = memory._fact_since
+        memory.JOURNAL_FILE = os.path.join(self._tmp, "j.json")
+
+    def tearDown(self):
+        memory.JOURNAL_FILE = self._origf
+        memory._fact_since = self._origfact
+
+    def test_counts_both_sides(self):
+        """Трек-рекорд считает попадания обеих сторон и расхождения."""
+        base = 2_000_000_000   # свежий ts (в окне 7 дней от now ниже)
+        # запись: DeepSeek UP, консенсус DOWN — расхождение
+        b = {
+            "meta": {"generated_ts": base, "session": "asia"},
+            "pairs": {"EUR/USD": {
+                "direction": "UP", "consensus_direction": "DOWN",
+                "direction_confidence": 4,
+                "technical_summary": "Цена 1.10000",
+                "support_levels": [], "resistance_levels": [],
+            }},
+        }
+        memory.record_briefing(b)
+        # факт: цена выросла на +20 пипс → DeepSeek прав, консенсус нет
+        memory._fact_since = lambda s, t0, t1: (1.10200, 1.10200, 1.10000)
+        now = base + 8 * 3600
+        tr = memory.track_record(["EUR/USD"], now, days=7)
+        self.assertEqual(tr["deepseek"], {"hit": 1, "total": 1})
+        self.assertEqual(tr["consensus"], {"hit": 0, "total": 1})
+        self.assertEqual(tr["disagreements"], 1)
+        self.assertEqual(tr["disagree_ds_right"], 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

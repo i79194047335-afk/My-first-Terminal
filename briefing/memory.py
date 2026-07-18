@@ -85,7 +85,12 @@ def record_briefing(briefing):
         entry = {
             "ts":         ts,
             "session":    session,
-            "direction":  pair.get("direction", "?"),
+            # Два независимых прогноза для трек-рекорда «кто чаще прав»:
+            # deepseek — мнение модели, consensus — что закладывают агентства.
+            # Старое поле direction = deepseek (обратная совместимость журнала).
+            "direction":           pair.get("direction", "?"),
+            "deepseek_direction":  pair.get("direction", "?"),
+            "consensus_direction": pair.get("consensus_direction", "?"),
             "confidence": pair.get("direction_confidence", "?"),
             "price_at":   _price_from_summary(pair.get("technical_summary", "")),
             "support":    pair.get("support_levels", []),
@@ -153,27 +158,106 @@ def assess_previous(symbol, now_ts):
 
     pip = _pip_size(symbol)
     moved = (price_now - price_at) / pip          # знак = направление
-    direction = prev.get("direction", "?")
-
-    # Вердикт по направлению.
-    if direction == "UP" and moved >= HIT_PIPS:
-        verdict = "сбылось"
-    elif direction == "DOWN" and moved <= -HIT_PIPS:
-        verdict = "сбылось"
-    elif abs(moved) < HIT_PIPS:
-        verdict = "нейтрально"
-    else:
-        verdict = "не сбылось"
 
     return {
         "session":    prev.get("session"),
-        "direction":  direction,
+        "direction":  prev.get("deepseek_direction", prev.get("direction", "?")),
+        "consensus":  prev.get("consensus_direction", "?"),
         "confidence": prev.get("confidence"),
         "price_at":   price_at,
         "price_now":  price_now,
         "moved_pips": round(moved, 1),
-        "verdict":    verdict,
+        "verdict":    _verdict(prev.get("deepseek_direction",
+                                        prev.get("direction", "?")), moved),
+        "consensus_verdict": _verdict(prev.get("consensus_direction", "?"), moved),
         "level_note": _level_note(symbol, prev, hi, lo, pip),
+    }
+
+
+def _verdict(direction, moved_pips):
+    """Вердикт прогноза по фактическому движению цены.
+
+    Args:
+        direction:  "UP" / "DOWN" / "?".
+        moved_pips: Движение цены в пипсах (знак = направление).
+
+    Returns:
+        "сбылось" | "не сбылось" | "нейтрально".
+    """
+    if abs(moved_pips) < HIT_PIPS:
+        return "нейтрально"
+    if direction == "UP" and moved_pips >= HIT_PIPS:
+        return "сбылось"
+    if direction == "DOWN" and moved_pips <= -HIT_PIPS:
+        return "сбылось"
+    if direction in ("UP", "DOWN"):
+        return "не сбылось"
+    return "нейтрально"   # неизвестное направление не штрафуем
+
+
+def track_record(symbols, now_ts, days=7):
+    """Накопительный счёт «кто чаще прав»: аналитики vs DeepSeek.
+
+    Проходит журнал за последние `days` дней, для каждой ЗАКРЫТОЙ записи
+    (есть следующий прогноз или прошло достаточно времени) сверяет оба
+    направления с фактом. Нейтральные исходы в знаменатель не идут — считаем
+    только записи, где рынок реально двинулся и прогноз можно судить.
+
+    Args:
+        symbols: Список пар.
+        now_ts:  Текущее время (unix-секунды).
+        days:    Глубина окна.
+
+    Returns:
+        Dict {deepseek:{hit,total}, consensus:{hit,total}, disagreements,
+              disagree_ds_right}.
+    """
+    journal = load_journal()
+    since = now_ts - days * 86400
+    ds = {"hit": 0, "total": 0}
+    cs = {"hit": 0, "total": 0}
+    disagreements = 0
+    disagree_ds_right = 0
+
+    for sym in symbols:
+        hist = journal.get("pairs", {}).get(sym, [])
+        for i, rec in enumerate(hist):
+            t0 = rec.get("ts")
+            price_at = rec.get("price_at")
+            if not t0 or price_at is None or t0 < since:
+                continue
+            # Верхняя граница факта — следующий прогноз, иначе now.
+            t1 = hist[i + 1]["ts"] if i + 1 < len(hist) else now_ts
+            fact = _fact_since(sym, int(t0), int(t1))
+            if not fact:
+                continue
+            price_now = fact[0]
+            moved = (price_now - price_at) / _pip_size(sym)
+
+            d_dir = rec.get("deepseek_direction", rec.get("direction", "?"))
+            c_dir = rec.get("consensus_direction", "?")
+            d_v = _verdict(d_dir, moved)
+            c_v = _verdict(c_dir, moved)
+
+            if d_v != "нейтрально":
+                ds["total"] += 1
+                if d_v == "сбылось":
+                    ds["hit"] += 1
+            if c_v != "нейтрально":
+                cs["total"] += 1
+                if c_v == "сбылось":
+                    cs["hit"] += 1
+            # Расхождения: направления разные и оба заданы.
+            if d_dir in ("UP", "DOWN") and c_dir in ("UP", "DOWN") and d_dir != c_dir:
+                disagreements += 1
+                if d_v == "сбылось":
+                    disagree_ds_right += 1
+
+    return {
+        "deepseek": ds,
+        "consensus": cs,
+        "disagreements": disagreements,
+        "disagree_ds_right": disagree_ds_right,
     }
 
 
