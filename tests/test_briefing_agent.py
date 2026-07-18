@@ -70,6 +70,23 @@ class TestPromptStructure(unittest.TestCase):
         self.assertIn("ПРОВЕРКА ПРОШЛЫХ ПРОГНОЗОВ", p)
         self.assertIn("сбылось", p)
 
+    def test_analysis_included(self):
+        """Полнотекстовая аналитика попадает в промпт отдельным блоком."""
+        analysis = [{"source": "ING THINK", "title": "FX Daily: low-vol puzzle",
+                     "text": "DXY implied volatility broke below 5.50...",
+                     "time_display": "18.07 10:00 UTC+5", "ts": 1, "url": "x"}]
+        p = prompt.build_user_prompt(
+            {"symbols": {}}, [], [], [], assessments={},
+            analysis_items=analysis)
+        self.assertIn("ГЛУБОКАЯ АНАЛИТИКА", p)
+        self.assertIn("ING THINK", p)
+        self.assertIn("low-vol puzzle", p)
+
+    def test_analysis_optional(self):
+        """Без аналитики блок отсутствует, промпт не падает."""
+        p = prompt.build_user_prompt({"symbols": {}}, [], [], [], assessments={})
+        self.assertNotIn("ГЛУБОКАЯ АНАЛИТИКА", p)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

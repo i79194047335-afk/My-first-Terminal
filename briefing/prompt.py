@@ -122,16 +122,18 @@ def _fmt_technical(sym, t):
 
 
 def build_user_prompt(technical, news_items, news_diag, calendar,
-                      assessments):
-    """Пользовательский промпт: техника + лента + календарь + самооценка.
+                      assessments, analysis_items=None):
+    """Пользовательский промпт: техника + аналитика + лента + календарь + оценка.
 
     Args:
-        technical:   get_technical_context() → {"symbols": {...}}.
-        news_items:  Список новостей из sources.fetch_news()[0].
-        news_diag:   Диагностика фидов (для флага «мало новостей»).
-        calendar:    События из sources.fetch_calendar()[0].
-        assessments: Dict {symbol: строка format_assessment_for_prompt} —
-                     блоки самооценки прошлых прогнозов.
+        technical:      get_technical_context() → {"symbols": {...}}.
+        news_items:     Список новостей из sources.fetch_news()[0].
+        news_diag:      Диагностика фидов (для флага «мало новостей»).
+        calendar:       События из sources.fetch_calendar()[0].
+        assessments:    Dict {symbol: строка самооценки прошлого прогноза}.
+        analysis_items: Полнотекстовая аналитика из sources.fetch_analysis()[0]
+                        (weekly forecasts, house views). Даётся ВЫШЕ ленты —
+                        консенсус строится на разборах, а не заголовках.
 
     Returns:
         Строка пользовательского промпта.
@@ -150,6 +152,16 @@ def build_user_prompt(technical, news_items, news_diag, calendar,
         parts.append("\nПРОВЕРКА ПРОШЛЫХ ПРОГНОЗОВ (факт из БД):")
         for a in prev:
             parts.append("  " + a)
+
+    # Глубокая аналитика (полнотекстовые разборы) — ПЕРЕД лентой заголовков.
+    # Это главный источник консенсуса аналитиков: house views с уровнями и
+    # обоснованием, а не строчки. Именно отсюда модель берёт consensus_view.
+    if analysis_items:
+        parts.append("\nГЛУБОКАЯ АНАЛИТИКА (полные разборы — основа консенсуса):")
+        for a in analysis_items:
+            when = a.get("time_display") or "?"
+            parts.append("  ─── [%s | %s] %s" % (a["source"], when, a["title"]))
+            parts.append("  " + a["text"].replace("\n", " "))
 
     # Новостная лента с источником и временем (UTC+5).
     line, total, low = news_summary(news_diag)

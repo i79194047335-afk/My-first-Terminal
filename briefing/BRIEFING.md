@@ -6,9 +6,15 @@
 
 ## Модули
 
-- `sources.py` — новостные RSS (живые: FXStreet/ForexLive/ActionForex + Bloomberg/
-  WSJ/CNBC/FT) с диагностикой по каждому фиду + порог «мало новостей»; календарь
-  напрямую с ForexFactory (`ff_calendar_thisweek.json`). Время в **UTC+5**.
+- `sources.py` — три вида источников:
+  - **RSS** (`fetch_news`): живые фиды FXStreet/ForexLive/ActionForex + Bloomberg/
+    WSJ/CNBC/FT, диагностика по каждому + порог «мало новостей». Заголовки.
+  - **Аналитика** (`fetch_analysis`): полнотекстовые разборы через **newspaper3k**
+    из разделов /analysis/ (FXStreet weekly forecasts, ING THINK house views) —
+    невидимы для RSS. Даётся модели ВЫШЕ ленты как основа консенсуса. Точечно
+    (3 статьи/источник), с fallback: сбой скрапинга → работаем на RSS. +~10с.
+  - **Календарь** (`fetch_calendar`): ForexFactory `ff_calendar_thisweek.json`.
+  Время везде в **UTC+5**.
 - `technical.py` — техкартина из `market.db` (цена, диапазоны, тренд, уровни,
   волатильность). Read-only, перенос из старого движка 1:1.
 - `memory.py` — журнал прогнозов (`data/briefing_journal.json`, окно 30 записей)

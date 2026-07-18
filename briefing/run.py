@@ -99,6 +99,12 @@ def main():
     print("[brief] календарь: %d событий%s"
           % (len(calendar), " (ошибка: %s)" % cal_err if cal_err else ""))
 
+    # Глубокая аналитика (полнотекстовые разборы) — необязательная, с fallback.
+    analysis, an_diag = sources.fetch_analysis()
+    an_line = ", ".join("%s %s/%s" % (d["source"], d["fetched"], d["found"])
+                        for d in an_diag)
+    print("[brief] аналитика: %s (всего %d статей)" % (an_line, len(analysis)))
+
     # 2. Самооценка прошлых прогнозов (до генерации — модель учтёт).
     assessments = {sym: memory.format_assessment_for_prompt(sym, now_ts)
                    for sym in SYMBOLS}
@@ -106,7 +112,8 @@ def main():
     # 3. Промпт → DeepSeek.
     system_prompt = build_system_prompt(session_key, cfg["label_ru"],
                                         market_open=is_open)
-    user_prompt = build_user_prompt(technical, news, diag, calendar, assessments)
+    user_prompt = build_user_prompt(technical, news, diag, calendar,
+                                    assessments, analysis_items=analysis)
     print("[brief] промпт %d символов, вызываю DeepSeek…" % len(user_prompt))
     try:
         data = generate(system_prompt, user_prompt)
@@ -131,6 +138,8 @@ def main():
         "news_total":     total,
         "news_low":       low,
         "news_by_feed":   line,
+        "analysis_count": len(analysis),
+        "analysis_by_source": an_line,
         "calendar_events": len(calendar),
         "calendar_error": cal_err,
         "display_tz":     sources.DISPLAY_TZ_LABEL,

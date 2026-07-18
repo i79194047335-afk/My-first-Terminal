@@ -249,3 +249,85 @@ def fetch_calendar(window_hours=36):
 
     events.sort(key=lambda x: x["ts_utc"])
     return events, None
+
+
+# ── полнотекстовая аналитика (newspaper) ────────────────────────────────
+# RSS даёт только заголовки-новости; глубокая аналитика (weekly forecasts,
+# house views) живёт в разделах /analysis/, невидимых для RSS. newspaper
+# скрапит главную источника, находит такие статьи и достаёт ПОЛНЫЙ текст —
+# DeepSeek получает разбор целиком, а не строчку. Точечно и с fallback:
+# скрапинг медленнее/хрупче RSS, поэтому любой сбой → пустой список, брифинг
+# работает на RSS. newspaper импортируется ЛЕНИВО (необязательная зависимость).
+
+# Источники аналитики: (url, фильтр-подстрока для отбора аналитических статей).
+# Проверено живьём 2026-07-18: FXStreet /analysis/ = weekly forecasts,
+# ING THINK = банковские house views (в RSS оба пусты/бедны).
+ANALYSIS_SOURCES = [
+    {"name": "FXStreet",  "url": "https://www.fxstreet.com", "match": "/analysis/"},
+    {"name": "ING THINK", "url": "https://think.ing.com/market/fx/", "match": "think.ing.com"},
+]
+
+# Сколько полнотекстовых статей брать с одного источника. Мало — чтобы не
+# раздуть промпт (одна статья ~6К символов) и время (скрапинг по статье ~1-2с).
+ANALYSIS_PER_SOURCE = 3
+# Обрезка текста статьи для промпта: хватает вводной части с тезисом и уровнями.
+ANALYSIS_TEXT_LIMIT = 1200
+
+
+def fetch_analysis():
+    """Достать полнотекстовую аналитику из разделов /analysis/ источников.
+
+    Скрапит главную каждого источника (newspaper.build), отбирает статьи по
+    match-подстроке, качает первые ANALYSIS_PER_SOURCE и достаёт текст. Любой
+    сбой (нет newspaper, сеть, вёрстка) не фатален — источник просто даёт 0.
+
+    Args:
+        None.
+
+    Returns:
+        Tuple (items, diag):
+          items — список dict {source, title, text, url, ts, time_display};
+          diag  — список dict {source, found, fetched, ok, error} по источнику.
+    """
+    try:
+        import newspaper
+        from newspaper import Article
+    except Exception as err:
+        return [], [{"source": "newspaper", "found": 0, "fetched": 0,
+                     "ok": False, "error": "не установлен: %r" % (err,)}]
+
+    items = []
+    diag = []
+    for src in ANALYSIS_SOURCES:
+        name = src["name"]
+        try:
+            paper = newspaper.build(src["url"], memoize_articles=False,
+                                    request_timeout=15)
+            urls = [a.url for a in paper.articles if src["match"] in a.url]
+            fetched = 0
+            for url in urls[:ANALYSIS_PER_SOURCE]:
+                try:
+                    a = Article(url)
+                    a.download()
+                    a.parse()
+                    if not a.text or len(a.text) < 300:
+                        continue   # пустышка/заглушка — пропускаем
+                    ts = int(a.publish_date.timestamp()) if a.publish_date else None
+                    items.append({
+                        "source": name,
+                        "title":  (a.title or "").strip(),
+                        "text":   a.text.strip()[:ANALYSIS_TEXT_LIMIT],
+                        "url":    url,
+                        "ts":     ts,
+                        "time_display": _fmt_display(ts),
+                    })
+                    fetched += 1
+                except Exception:
+                    continue   # одна статья упала — не роняем источник
+            diag.append({"source": name, "found": len(urls),
+                         "fetched": fetched, "ok": True, "error": None})
+        except Exception as err:
+            diag.append({"source": name, "found": 0, "fetched": 0,
+                         "ok": False, "error": repr(err)[:120]})
+
+    return items, diag
