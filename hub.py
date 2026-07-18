@@ -30,16 +30,23 @@ import websockets
 
 from core.bus import BusServer
 from core.candles import CandleBuilder, aggregate_higher_tf
-from core.db import init_db, load_history, load_instruments, trim_window, \
+from core.db import init_db, load_history, load_instruments, \
+    load_volume_profile, save_volume_profile, trim_window, \
     upsert_candle, upsert_candles_batch, upsert_instrument
 from core.logfmt import setup as _log_setup
 from core.market_hours import forex_open as market_open
 from core.range_bars import RangeBarBuilder, backfill_tail
+from core.volume_profile import VolumeProfile
 
 log = _log_setup("hub")
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "retention.json")
+
+# Как часто сбрасывать профили объёма в БД. На пике по BTC идёт ~15 сделок
+# в секунду; писать все корзины на каждой — впустую жечь диск, картина
+# меняется постепенно.
+PROFILE_FLUSH_SEC = 60
 
 
 def load_config(path=CONFIG_PATH):
@@ -109,6 +116,15 @@ class Hub:
         self._data_dir       = config.get("data_dir", "data")
         self._range_builders = {}   # (provider, symbol, pips) -> RangeBarBuilder
         self._range_pending  = {}   # (provider, symbol, pips) -> {"buffer": [...]}
+
+        # Профиль объёма: (provider, symbol) -> {"period": ключ, "profile": VP}.
+        # Копится ТОЛЬКО из тиков — свеча не помнит, на каких ценах внутри неё
+        # прошёл объём, поэтому задним числом профиль не восстановить. Пишется
+        # периодически (не на каждом тике) и хранится вечно: корзина стоит
+        # десяток чисел, а тиков через 14 дней уже не будет.
+        self._profiles = {}
+        self._profile_dirty = set()
+        self._profile_flush_ts = 0.0
 
         self._db_queue = queue.Queue(maxsize=5000)
 
@@ -418,6 +434,8 @@ class Hub:
                 del bars[:len(bars) - self._keep_bars]
             self._enqueue_closed(provider, symbol, tf, candle)
 
+        self._profile_ingest(provider, symbol, price, msg.get("size"),
+                             msg.get("side"), msg["ts"])
         self._range_ingest(provider, symbol, price, msg["ts"])
         self._broadcast_update(provider, symbol)
 
@@ -447,6 +465,144 @@ class Hub:
 
         self._broadcast(json.dumps({"type": "instruments",
                                     "data": self._instruments}))
+
+    # ── профиль объёма ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _profile_period(ts):
+        """Ключ периода профиля по времени тика.
+
+        Период — сутки UTC. Это НЕ идеально для синтетики на традиционные
+        рынки (XAG/MU/SPCX/XAU): они живут по расписанию базового актива, и
+        календарные сутки смешивают активную сессию с почти пустыми
+        выходными. Замер 2026-07-18: XAG в субботу торгуется 19% минуток
+        против 76% в пятницу. Профиль по сессиям — задача отдельного слоя;
+        сутки UTC выбраны как честный первый шаг, совпадающий с ротацией
+        тиковых файлов.
+
+        Args:
+            ts: Время тика, unix-секунды.
+
+        Returns:
+            Строка вида "20260718".
+        """
+        return time.strftime("%Y%m%d", time.gmtime(ts))
+
+    def _profile_ingest(self, provider, symbol, price, size, side, ts):
+        """Учесть тик в профиле объёма инструмента.
+
+        Тик без объёма (FXCM) игнорируется: профиль строится по
+        ИСПОЛНЕННОМУ объёму, а поток котировок его не несёт.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+            price:    Цена сделки.
+            size:     Объём в базовых единицах или None.
+            side:     Сторона агрессора ("buy"/"sell") или None.
+            ts:       Время тика, unix-секунды.
+
+        Returns:
+            None.
+        """
+        if not size:
+            return
+
+        key = (provider, symbol)
+        period = self._profile_period(ts)
+        state = self._profiles.get(key)
+
+        if state is None or state["period"] != period:
+            # Сутки сменились — прошлый профиль дописываем и начинаем новый.
+            # Восстановление из БД: рестарт в середине дня не должен обнулять
+            # уже накопленное.
+            if state is not None:
+                self._flush_profile(key, state)
+            profile = VolumeProfile()
+            saved = self._profile_saved_rows(provider, symbol, period)
+            if saved:
+                profile.load_rows(saved)
+            state = {"period": period, "profile": profile}
+            self._profiles[key] = state
+
+        try:
+            state["profile"].add(price, size, side)
+        except ValueError as err:
+            # Цена <= 0 в логарифмической сетке не имеет смысла. Тик уже
+            # учтён в свече, поэтому здесь достаточно не уронить нарезку.
+            log.warning("профиль %s:%s — тик пропущен (%s)", provider, symbol, err)
+            return
+
+        self._profile_dirty.add(key)
+
+    def _profile_saved_rows(self, provider, symbol, period):
+        """Прочитать ранее сохранённые корзины периода.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+            period:   Ключ периода.
+
+        Returns:
+            Список кортежей (bucket, vol_buy, vol_sell, vol_quote); пустой,
+            если ничего не сохранено или чтение не удалось.
+        """
+        conn = getattr(self, "_conn", None)
+        if conn is None:
+            return []
+        try:
+            rows = load_volume_profile(conn, provider, symbol, period)
+        except Exception as err:
+            log.warning("профиль %s:%s — не прочитать сохранённое (%r)",
+                        provider, symbol, err)
+            return []
+        return [(r["bucket"], r["vol_buy"], r["vol_sell"], r["vol_quote"])
+                for r in rows]
+
+    def _flush_profile(self, key, state):
+        """Записать один профиль в БД.
+
+        Args:
+            key:   Кортеж (provider, symbol).
+            state: Словарь {"period": ..., "profile": VolumeProfile}.
+
+        Returns:
+            None.
+        """
+        rows = state["profile"].to_rows()
+        if not rows:
+            return
+        try:
+            self._db_queue.put_nowait(
+                ("__profile__", key[0], key[1], state["period"], rows))
+        except queue.Full:
+            self.db_dropped += 1
+            log.warning("очередь БД полна — профиль %s:%s потерян", *key)
+
+    def flush_profiles(self, force=False):
+        """Сбросить изменившиеся профили в БД.
+
+        Пишем раз в PROFILE_FLUSH_SEC, а не на каждом тике: на пике по BTC
+        это ~15 сделок в секунду, и запись всех корзин на каждой из них
+        просто съела бы диск ради данных, которые всё равно меняются
+        постепенно.
+
+        Args:
+            force: Писать независимо от того, прошёл ли интервал.
+
+        Returns:
+            None.
+        """
+        now = time.time()
+        if not force and now - self._profile_flush_ts < PROFILE_FLUSH_SEC:
+            return
+        self._profile_flush_ts = now
+
+        for key in list(self._profile_dirty):
+            state = self._profiles.get(key)
+            if state is not None:
+                self._flush_profile(key, state)
+        self._profile_dirty.clear()
 
     # ── запись в SQLite (отдельный поток) ───────────────────────────────
 
@@ -485,7 +641,21 @@ class Hub:
         count = 0
 
         while True:
-            provider, symbol, tf, candle = self._db_queue.get()
+            item = self._db_queue.get()
+
+            # Профили едут по той же очереди, что и свечи: одна коннекция,
+            # один поток, никакой межпоточной возни с sqlite3. Различаем по
+            # маркеру в первом поле — он не может совпасть с провайдером.
+            if item[0] == "__profile__":
+                _, provider, symbol, period, rows = item
+                try:
+                    save_volume_profile(conn, provider, symbol, period, rows)
+                except Exception as err:
+                    log.warning("db_writer: профиль %s:%s — %r",
+                                provider, symbol, err)
+                continue
+
+            provider, symbol, tf, candle = item
             try:
                 upsert_candle(conn, provider, symbol, tf, candle)
                 count += 1
@@ -1147,6 +1317,29 @@ async def _stats_loop(hub, every=60):
         log.info("%s", hub.stats)
 
 
+async def _profile_flush_loop(hub, every=PROFILE_FLUSH_SEC):
+    """Периодически сбрасывать профили объёма в БД.
+
+    Отдельным циклом, а не внутри обработки тика: сброс не должен зависеть
+    от того, идут ли сделки. Иначе профиль неликвидного инструмента (XAG
+    в выходные — 19% активных минуток) висел бы в памяти незаписанным и
+    терялся при рестарте.
+
+    Args:
+        hub:   Экземпляр Hub.
+        every: Период в секундах.
+
+    Returns:
+        None (бесконечный цикл).
+    """
+    while True:
+        await asyncio.sleep(every)
+        try:
+            hub.flush_profiles(force=True)
+        except Exception as err:
+            log.warning("сброс профилей не удался: %r", err)
+
+
 async def _heartbeat_loop(hub, every=10):
     """Слать всем клиентам heartbeat со снимком здоровья.
 
@@ -1223,6 +1416,7 @@ async def main():
     await start_health_server(hub, config.get("health_port", 8787))
 
     asyncio.ensure_future(_stats_loop(hub))
+    asyncio.ensure_future(_profile_flush_loop(hub))
     asyncio.ensure_future(_heartbeat_loop(hub))
     await asyncio.Future()
 

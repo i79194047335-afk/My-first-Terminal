@@ -8,8 +8,9 @@ Schema:
 All times are Unix SECONDS. Volumes are nullable (FXCM doesn't provide them).
 """
 
-import sqlite3
+import json
 import os
+import sqlite3
 
 KEEP_BARS = 2000
 
@@ -29,6 +30,19 @@ CREATE TABLE IF NOT EXISTS candles (
     vol_quote REAL,
     delta     REAL,               -- агрессорный дисбаланс (Фаза 3)
     PRIMARY KEY (provider, symbol, tf, time)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS volume_profile (
+    provider  TEXT NOT NULL,
+    symbol    TEXT NOT NULL,
+    period    TEXT NOT NULL,     -- ключ периода, напр. "20260718" (сутки UTC)
+    bucket    INTEGER NOT NULL,  -- индекс корзины (логарифмическая сетка)
+    price_low  REAL NOT NULL,
+    price_high REAL NOT NULL,
+    vol_buy   REAL NOT NULL,     -- агрессивные покупки, базовые единицы
+    vol_sell  REAL NOT NULL,     -- агрессивные продажи, базовые единицы
+    vol_quote REAL NOT NULL,     -- оборот в котируемой валюте
+    PRIMARY KEY (provider, symbol, period, bucket)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS instruments (
@@ -254,6 +268,71 @@ def vacuum(conn: sqlite3.Connection) -> None:
     """
     conn.commit()          # VACUUM cannot run inside a transaction
     conn.execute("VACUUM")
+
+
+def save_volume_profile(conn: sqlite3.Connection, provider: str, symbol: str,
+                        period: str, rows) -> None:
+    """Persist one period's volume profile, replacing what was there.
+
+    Called repeatedly for the period still in progress, so it must be
+    idempotent: INSERT OR REPLACE on the full primary key overwrites the
+    bucket rather than accumulating a second copy of it.
+
+    Args:
+        conn:     Open SQLite connection.
+        provider: Feed identifier.
+        symbol:   Instrument.
+        period:   Period key (e.g. "20260718" for a UTC day).
+        rows:     Sequence of (bucket, price_low, price_high, vol_buy,
+                  vol_sell, vol_quote) — the output of VolumeProfile.to_rows().
+
+    Returns:
+        None.
+    """
+    with conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO volume_profile
+               (provider, symbol, period, bucket,
+                price_low, price_high, vol_buy, vol_sell, vol_quote)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(provider, symbol, period, r[0], r[1], r[2], r[3], r[4], r[5])
+             for r in rows],
+        )
+
+
+def load_volume_profile(conn: sqlite3.Connection, provider: str, symbol: str,
+                        period: str) -> list:
+    """Read one period's volume profile, cheapest price first.
+
+    Args:
+        conn:     Open SQLite connection.
+        provider: Feed identifier.
+        symbol:   Instrument.
+        period:   Period key.
+
+    Returns:
+        List of dicts: bucket, price_low, price_high, vol_buy, vol_sell,
+        vol_quote.
+    """
+    rows = conn.execute(
+        """SELECT bucket, price_low, price_high, vol_buy, vol_sell, vol_quote
+           FROM volume_profile
+           WHERE provider=? AND symbol=? AND period=?
+           ORDER BY bucket ASC""",
+        (provider, symbol, period),
+    ).fetchall()
+
+    return [
+        {
+            "bucket":     row[0],
+            "price_low":  row[1],
+            "price_high": row[2],
+            "vol_buy":    row[3],
+            "vol_sell":   row[4],
+            "vol_quote":  row[5],
+        }
+        for row in rows
+    ]
 
 
 def upsert_instrument(conn: sqlite3.Connection, provider: str, symbol: str,
