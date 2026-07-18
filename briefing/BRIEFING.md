@@ -19,7 +19,9 @@
   консенсус аналитиков (`consensus_direction`+`consensus_view`), мысль DeepSeek
   (`direction`+`deepseek_view`, согласен/расхождение).
 - `agent.py` — вызов DeepSeek (openai SDK, `api.deepseek.com`, ключ
-  `DEEPSEEK_API_KEY`) + разбор JSON. Смена модели/канала — только здесь.
+  `DEEPSEEK_API_KEY`) + разбор JSON. Модель — **`deepseek-v4-pro`** (умнее flash:
+  тоньше видит расхождения, глубже reasoning; ~80с/прогон, `max_tokens`=7500).
+  Смена модели/канала — только здесь.
 - `run.py` — точка входа. Запуск: `python3 -m briefing.run` из корня проекта.
 
 ## Формат briefing.json (ключевое)

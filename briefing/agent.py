@@ -16,20 +16,27 @@ from openai import OpenAI
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE    = "https://api.deepseek.com"
-DEEPSEEK_MODEL   = "deepseek-chat"
+# deepseek-v4-pro — умнее flash (=алиас deepseek-chat): тоньше видит расхождения
+# консенсуса с техникой, глубже reasoning (сравнение 2026-07-18). Медленнее
+# (~80с vs 18с), но для крон-задачи 3×/сутки это неважно; токены дешёвые.
+DEEPSEEK_MODEL   = "deepseek-v4-pro"
+# Потолок ответа. Pro реально пишет ~7000 токенов на 4 пары (finish_reason=stop);
+# 7500 — запас от обрыва JSON, не цель. Платим за реально сгенерированное.
+DEFAULT_MAX_TOKENS = 7500
 
 
 class AgentError(Exception):
     """Ошибка вызова LLM или разбора её ответа."""
 
 
-def generate(system_prompt, user_prompt, max_tokens=4000, temperature=0.3):
+def generate(system_prompt, user_prompt, max_tokens=DEFAULT_MAX_TOKENS,
+             temperature=0.3):
     """Отправить промпты в DeepSeek и вернуть разобранный JSON брифинга.
 
     Args:
         system_prompt: Системный промпт (роль, формат).
         user_prompt:   Пользовательский промпт (данные).
-        max_tokens:    Потолок ответа (нарративные брифинги объёмны).
+        max_tokens:    Потолок ответа (страховка от обрыва JSON, не цель).
         temperature:   Низкая — брифинг аналитический, не творческий.
 
     Returns:
