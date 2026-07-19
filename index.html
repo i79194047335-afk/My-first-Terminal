@@ -954,10 +954,25 @@ function handleMessage(id, state, msg) {
     if (msg.type === "history") {
         if (!state.chart) createChartInternal(id, state.tfSeconds);
 
+        // Сброс перекрестия перед самой подменой данных — на случай, если
+        // курсор успел «залочить» точку, пока грузилась история (см. setTF).
+        try { state.chart.clearCrosshairPosition(); } catch (e) {}
+
+        // ПУСТАЯ история тоже обязана очистить серию. Раньше весь блок стоял
+        // под `if (msg.data?.length)`, и при переключении на инструмент, чья
+        // история ещё не готова (рэндж-бары строятся бэкфилом в фоне), на
+        // графике оставались бары ПРЕДЫДУЩЕЙ пары. Дальше приходили живые
+        // бары нового инструмента — с временем раньше оставшихся, и LWC падал
+        // с "Cannot update oldest data", а график показывал два ряда разом.
+        if (!msg.data?.length) {
+            state.data = [];
+            state.lastCandle = null;
+            try { state.series.setData([]); } catch (e) {}
+            setVolumeData(id, []);
+            renderVolumeLegend(id, null);
+        }
+
         if (msg.data?.length) {
-            // Сброс перекрестия перед самой подменой данных — на случай, если
-            // курсор успел «залочить» точку, пока грузилась история (см. setTF).
-            try { state.chart.clearCrosshairPosition(); } catch (e) {}
             state.data = msg.data;
             state.series.setData(state.data);
             setVolumeData(id, state.data);
@@ -1886,6 +1901,16 @@ function setTF(paneId, tf) {
         // меньшим числом баров LWC дёргает устаревший логический индекс курсора
         // во время рассинхрона и бросает "Value is null" на каждое движение мыши.
         try { st.chart.clearCrosshairPosition(); } catch (e) {}
+
+        // Бары старого ТФ убираем сразу: при переходе на рэндж-ТФ история
+        // строится бэкфилом в фоне, и до её прихода на графике оставался бы
+        // прежний ряд — с ним LWC роняет "Cannot update oldest data" на
+        // первом же живом баре (см. switchSymbol).
+        st.data = [];
+        st.lastCandle = null;
+        try { st.series?.setData([]); } catch (e) {}
+        if (st.volumeSeries) { try { st.volumeSeries.setData([]); } catch (e) {} }
+        renderVolumeLegend(paneId, null);
         st.chart.applyOptions({ timeScale:
             { secondsVisible: !st.tfSeconds || st.tfSeconds < 60 } });
     }
@@ -1911,6 +1936,19 @@ function switchSymbol(symbol) {
         if (!st) return;
         drawings[paneId].forEach(obj => { if (obj.line) st.series.removePriceLine(obj.line); });
         if (st.drawingEngine) { st.drawingEngine.drawings = []; st.drawingEngine.render(); }
+
+        // Данные ПРЕДЫДУЩЕГО инструмента убираем сразу, не дожидаясь истории
+        // нового. На обычных ТФ история приходит мгновенно и подменяет их, а
+        // рэндж-бары строятся бэкфилом в фоне — секунды, за которые на графике
+        // висели чужие бары. Дальше приходил живой бар нового инструмента со
+        // временем раньше оставшихся, и LWC падал с "Cannot update oldest
+        // data", рисуя два ряда сразу.
+        st.data = [];
+        st.lastCandle = null;
+        try { st.chart?.clearCrosshairPosition(); } catch (e) {}
+        try { st.series?.setData([]); } catch (e) {}
+        if (st.volumeSeries) { try { st.volumeSeries.setData([]); } catch (e) {} }
+        renderVolumeLegend(paneId, null);
     });
     drawings[1] = []; drawings[2] = [];
 
