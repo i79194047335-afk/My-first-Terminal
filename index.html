@@ -80,13 +80,14 @@
     .chart-wrapper { position:relative; flex:1; overflow:hidden; }
     .chart { width:100%; height:100%; }
 
-    .expand, .scrollRight, .resetZoom {
+    /* Верхний правый угол: только «домой» и «на весь экран». Сброс масштаба
+       переехал вниз к кнопкам зума (⟲ в .zoomCenter). */
+    .expand, .scrollRight {
         position:absolute; top:8px; z-index:1000; cursor:pointer;
         background:var(--btn); color:var(--text); border:1px solid var(--btn-border); padding:3px 7px; border-radius:3px;
     }
     .expand      { right:8px; }
     .scrollRight { right:38px; }
-    .resetZoom   { right:68px; }
 
     .tv-countdown {
         position:absolute; right:6px; padding:3px 7px; font-size:11px; font-weight:bold;
@@ -94,7 +95,10 @@
     }
 
     /* Легенда объёма и дельты. Цвет столбца показывает ЗНАК дельты,
-       а величину видно только числом — отсюда эта строка. */
+       а величину видно только числом — отсюда эта строка.
+       Позиционируется ПОД легендой индикаторов (та живёт на left:8px/top:4px
+       в js/indicators.js:_createLegend) — иначе строки налезают друг на друга.
+       Отступ сверху пересчитывается по фактической высоте легенды индикаторов. */
     .vol-legend {
         position:absolute; left:8px; top:6px; font-size:11px;
         pointer-events:none; z-index:1000; color:var(--muted);
@@ -166,16 +170,41 @@
 
     .menu-item { cursor:pointer; padding:4px 0; }
 
-    .zoomCenter {
-        position:absolute; bottom:6px; left:50%; transform:translateX(-50%);
-        display:flex; gap:4px; z-index:1200;
+    /* Зона наведения для кнопок масштаба.
+       Кнопки висели прямо на графике и мешали читать цену. Теперь они
+       проявляются, только когда курсор входит в эту зону.
+
+       Зона привязана к ЦЕНТРУ обёртки панели (left:50% + translateX), а не к
+       краю окна: при разворачивании панели на весь экран она остаётся
+       по центру графика, а не уезжает вбок.
+
+       bottom:34px — над временной шкалой LWC (~26px), чтобы кнопки её
+       не перекрывали. */
+    .zoomZone {
+        position:absolute; bottom:0; left:50%; transform:translateX(-50%);
+        width:200px; height:64px; z-index:1200;
+        /* Пустая зона не должна перехватывать колесо и протяжку графика —
+           события ловят только сами кнопки (pointer-events на .zoomCenter). */
+        pointer-events:none;
     }
+    .zoomCenter {
+        position:absolute; bottom:34px; left:50%; transform:translateX(-50%);
+        display:flex; gap:4px;
+        opacity:0; transition:opacity .15s ease;
+        pointer-events:auto;
+    }
+    /* Проявляем при наведении на зону И при наведении на сами кнопки —
+       без второго условия кнопки гасли бы, пока до них ведёшь курсор. */
+    .zoomZone:hover .zoomCenter,
+    .zoomCenter:hover { opacity:1; }
     .zoomBtn {
         width:22px; height:22px; display:flex; align-items:center; justify-content:center;
         background:var(--btn); color:var(--text); border:1px solid var(--btn-border); border-radius:3px;
         cursor:pointer; font-size:14px; font-weight:bold; user-select:none;
     }
     .zoomBtn:hover { background:var(--accent-soft); }
+    /* Круговая стрелка сброса масштаба — тоньше цифр, поэтому свой размер. */
+    .zoomBtn.zoom-reset { font-size:13px; font-weight:normal; }
 
     #signalPanel {
         position: absolute; left: 8px; top: 8px;
@@ -336,7 +365,7 @@
         .toolbar select, .toolbar button {
             font-size: 11px; padding: 2px 6px; white-space: nowrap; flex-shrink: 0; height: 26px;
         }
-        .expand, .scrollRight, .resetZoom { padding: 5px 10px; font-size: 14px; }
+        .expand, .scrollRight { padding: 5px 10px; font-size: 14px; }
         .zoomBtn { width: 28px; height: 28px; font-size: 16px; }
     }
 </style>
@@ -524,11 +553,13 @@
             <div class="chart" id="chart1"></div>
             <div class="tv-countdown" id="countdown1"></div>
             <div class="vol-legend" id="volLegend1"></div>
-            <div class="zoomCenter">
-                <div class="zoomBtn" onclick="zoomChart(1,-1)">−</div>
-                <div class="zoomBtn" onclick="zoomChart(1,1)">+</div>
+            <div class="zoomZone">
+                <div class="zoomCenter">
+                    <div class="zoomBtn" onclick="zoomChart(1,-1)" title="Отдалить">−</div>
+                    <div class="zoomBtn" onclick="zoomChart(1,1)" title="Приблизить">+</div>
+                    <div class="zoomBtn zoom-reset" onclick="autoScaleChart(1)" title="Сбросить масштаб">⟲</div>
+                </div>
             </div>
-            <div class="resetZoom" onclick="autoScaleChart(1)">A</div>
             <div class="scrollRight" onclick="homeChart(1)">⌂</div>
             <div class="expand" onclick="toggleFull(1)">⛶</div>
         </div>
@@ -569,11 +600,13 @@
             <div class="chart" id="chart2"></div>
             <div class="tv-countdown" id="countdown2"></div>
             <div class="vol-legend" id="volLegend2"></div>
-            <div class="zoomCenter">
-                <div class="zoomBtn" onclick="zoomChart(2,-1)">−</div>
-                <div class="zoomBtn" onclick="zoomChart(2,1)">+</div>
+            <div class="zoomZone">
+                <div class="zoomCenter">
+                    <div class="zoomBtn" onclick="zoomChart(2,-1)" title="Отдалить">−</div>
+                    <div class="zoomBtn" onclick="zoomChart(2,1)" title="Приблизить">+</div>
+                    <div class="zoomBtn zoom-reset" onclick="autoScaleChart(2)" title="Сбросить масштаб">⟲</div>
+                </div>
             </div>
-            <div class="resetZoom" onclick="autoScaleChart(2)">A</div>
             <div class="scrollRight" onclick="homeChart(2)">⌂</div>
             <div class="expand" onclick="toggleFull(2)">⛶</div>
         </div>
@@ -2253,6 +2286,15 @@ function renderVolumeLegend(paneId, bar) {
     el.innerHTML = html;
     el.title = title;
     el.classList.add("on");
+
+    // Встаём ПОД легендой индикаторов: она живёт в том же углу и растёт
+    // вниз по числу индикаторов (js/indicators.js:_createLegend). Без этого
+    // строки накладываются — видно на графике с любым добавленным
+    // индикатором.
+    const indLegend = st.indicatorManager?._legendEl;
+    const offset = (indLegend && indLegend.offsetHeight)
+        ? indLegend.offsetHeight + 8 : 6;
+    el.style.top = offset + "px";
 }
 
 /**
