@@ -2192,15 +2192,34 @@ function renderVolumeLegend(paneId, bar) {
     }
 
     let html = "Vol <b>" + formatTapeSize(bar.vol_base) + "</b>";
+    let title = "Объём бара в базовых единицах";
+
     if (bar.delta != null) {
-        const cls  = bar.delta >= 0 ? "d-pos" : "d-neg";
-        const sign = bar.delta >= 0 ? "+" : "−";
+        const buyers = bar.delta >= 0;
+        const cls  = buyers ? "d-pos" : "d-neg";
+        const sign = buyers ? "+" : "−";
         const share = bar.vol_base
             ? Math.round(100 * Math.abs(bar.delta) / bar.vol_base) : 0;
         html += '  Δ <span class="' + cls + '">' + sign +
                 formatTapeSize(Math.abs(bar.delta)) + " (" + share + "%)</span>";
+
+        // Расхождение дельты и свечи — самое ценное, что показывает дельта,
+        // и заметить его по одному цвету столбца трудно. Помечаем явно.
+        const priceUp = bar.close >= bar.open;
+        if (buyers !== priceUp) {
+            html += ' <span class="' + cls + '" title="Цена и давление разошлись">⚠</span>';
+            title = priceUp
+                ? "Цена выросла, но преобладали агрессивные ПРОДАЖИ — рост без покупателей"
+                : "Цена упала, но преобладали агрессивные ПОКУПКИ — падение вопреки покупкам";
+        } else {
+            title = buyers
+                ? "Покупатели давили и цена росла — согласованно"
+                : "Продавцы давили и цена падала — согласованно";
+        }
+        title += ". Цвет столбца объёма = знак дельты, не направление свечи.";
     }
     el.innerHTML = html;
+    el.title = title;
     el.classList.add("on");
 }
 
