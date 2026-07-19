@@ -196,11 +196,15 @@ class TestBackfillRealTicks(unittest.TestCase):
 
     def test_since_ts_filters(self):
         """since_ts режет старые тики (и целые файлы — по имени)."""
+        # iter_ticks отдаёт (price, ts, size, side): size/side есть в архиве
+        # СДЕЛОК (Lighter) и равны None в архиве котировок (FXCM).
         all_ticks = iter_ticks(self.data_dir, "EUR/USD")
-        first_price, first_ts = next(all_ticks)
+        first_price, first_ts, first_size, first_side = next(all_ticks)
+        self.assertIsNone(first_size)
+        self.assertIsNone(first_side)
         later = iter_ticks(self.data_dir, "EUR/USD",
                            since_ts=first_ts + 3600)
-        _, ts = next(later)
+        _, ts, _, _ = next(later)
         self.assertGreaterEqual(ts, first_ts + 3600)
 
     def test_backfill_tail_matches_full(self):

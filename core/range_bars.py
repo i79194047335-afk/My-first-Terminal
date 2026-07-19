@@ -36,6 +36,32 @@ import glob
 import os
 
 
+def _add_volume(bar, price, size, side):
+    """Накопить объём одной сделки в рэндж-баре.
+
+    Зеркалит core.candles._add_volume: vol_quote копится ПОСДЕЛОЧНО
+    (size * price), а не выводится потом из vol_base * close — сделки внутри
+    бара идут по разным ценам, и произведение итогов дало бы не тот оборот.
+    Дельта — агрессорный дисбаланс в базовых единицах.
+
+    Ключи создаются лениво, поэтому бар провайдера без объёма (FXCM) остаётся
+    ровно тем же чистым OHLC, что и до Фазы 3.
+
+    Args:
+        bar:   Бар, обновляется на месте.
+        price: Цена сделки.
+        size:  Объём в базовых единицах.
+        side:  Сторона агрессора ("buy"/"sell") или None.
+
+    Returns:
+        None.
+    """
+    bar["vol_base"]  = bar.get("vol_base", 0.0) + size
+    bar["vol_quote"] = bar.get("vol_quote", 0.0) + size * price
+    if side is not None:
+        bar["delta"] = bar.get("delta", 0.0) + (size if side == "buy" else -size)
+
+
 class RangeBarBuilder:
     """Стейт-машина одного (инструмент, диапазон): тики → рэндж-бары.
 
@@ -75,22 +101,31 @@ class RangeBarBuilder:
 
     # ── public API ──────────────────────────────────────────────────────
 
-    def ingest(self, price, ts):
+    def ingest(self, price, ts, size=None, side=None):
         """Обработать один тик.
 
         Args:
-            price: Цена тика (mid).
+            price: Цена тика (mid для форекса, цена сделки для биржи).
             ts:    Unix-время тика в секундах (float допустим).
+            size:  Объём сделки в базовых единицах или None, если провайдер
+                   его не даёт (FXCM). None оставляет бар чистым OHLC.
+            side:  Сторона агрессора ("buy"/"sell") или None — для дельты.
 
         Returns:
-            Закрытый бар (dict time/open/high/low/close), если этот тик
-            довёл диапазон до range_size, иначе None.
+            Закрытый бар (dict time/open/high/low/close, плюс vol_base/
+            vol_quote/delta у провайдеров с объёмом), если этот тик довёл
+            диапазон до range_size, иначе None.
         """
         if self._current is None:
-            self._open_bar(price, ts)
+            self._open_bar(price, ts, size, side)
             return None
 
         c = self._current
+        # Объём тика принадлежит бару, в котором тик ТОРГОВАЛСЯ. Тик-пробойщик
+        # ниже открывает следующий бар, и его объём уйдёт туда — как в
+        # CandleBuilder, где объём закрывающего тика достаётся новой свече.
+        if size is not None and abs(price - c["close"]) <= self.range_size + 1e-12:
+            _add_volume(c, price, size, side)
 
         # Гэп: ОДИН тик двигает цену от текущего close бара БОЛЬШЕ чем на R —
         # перепрыгивает весь диапазон разом (закрытие рынка на выходные,
@@ -101,7 +136,7 @@ class RangeBarBuilder:
         # этого закрываем текущий бар КАК ЕСТЬ (до скачка) и открываем новый от
         # цены тика — разрыв остаётся честным гэпом, а бары держат размах ≈ R.
         if abs(price - c["close"]) > self.range_size + 1e-12:
-            return self._close_and_reopen(price, ts)
+            return self._close_and_reopen(price, ts, size, side)
 
         c["high"]  = max(c["high"], price)
         c["low"]   = min(c["low"],  price)
@@ -120,15 +155,17 @@ class RangeBarBuilder:
 
         # Тик-пробойщик открывает следующий бар от СВОЕЙ цены (не от close
         # закрытого) — разрыв рынка остаётся честным гэпом, см. _open_bar.
-        self._open_bar(price, ts)
+        self._open_bar(price, ts, size, side)
         return closed
 
-    def _close_and_reopen(self, price, ts):
+    def _close_and_reopen(self, price, ts, size=None, side=None):
         """Закрыть текущий бар без гэп-тика, открыть новый от цены тика.
 
         Args:
             price: Цена гэп-тика (open нового бара).
             ts:    Его unix-время.
+            size:  Объём гэп-тика — уходит в НОВЫЙ бар (тик торговался уже там).
+            side:  Сторона агрессора гэп-тика.
 
         Returns:
             Закрытый бар (тот, что был живым до гэпа).
@@ -138,7 +175,7 @@ class RangeBarBuilder:
         if self._max_bars is not None and len(self._history) > self._max_bars:
             del self._history[:len(self._history) - self._max_bars]
         self._last_time = closed["time"]
-        self._open_bar(price, ts)
+        self._open_bar(price, ts, size, side)
         return closed
 
     def current(self):
@@ -170,7 +207,7 @@ class RangeBarBuilder:
 
     # ── internals ───────────────────────────────────────────────────────
 
-    def _open_bar(self, price, ts):
+    def _open_bar(self, price, ts, size=None, side=None):
         """Открыть новый бар от ЦЕНЫ ТИКА-пробойщика (с бампом времени).
 
         Бар открывается ровно от цены тика, а НЕ подтягивается к close
@@ -183,6 +220,8 @@ class RangeBarBuilder:
         Args:
             price: Цена открывающего тика.
             ts:    Его unix-время в секундах.
+            size:  Объём открывающего тика или None.
+            side:  Сторона агрессора или None.
 
         Returns:
             None.
@@ -193,6 +232,8 @@ class RangeBarBuilder:
 
         self._current = {"time": t, "open": price,
                          "high": price, "low": price, "close": price}
+        if size is not None:
+            _add_volume(self._current, price, size, side)
 
 
 # ── бэкфил из тикового архива ───────────────────────────────────────────
@@ -230,7 +271,21 @@ def iter_ticks(data_dir, symbol, since_ts=None):
                     ts = float(row["timestamp_utc"])
                     if since_ts is not None and ts < since_ts:
                         continue
-                    yield float(row["mid"]), ts
+                    # Два формата архива. FXCM пишет котировки (bid/ask/mid) —
+                    # там цена в "mid". Lighter пишет СДЕЛКИ, у них колонка
+                    # "price", а mid не существует. Раньше читалось только
+                    # "mid", и KeyError ниже молча съедал КАЖДЫЙ тик крипты:
+                    # бэкфил рэндж-баров возвращал 0 баров при живом архиве.
+                    price = row.get("mid")
+                    if price is None:
+                        price = row["price"]
+                    # Объём и сторона есть только в архиве сделок (Lighter).
+                    # У FXCM этих колонок нет — отдаём None, и бары остаются
+                    # чистым OHLC, как раньше.
+                    raw_size = row.get("size")
+                    size = float(raw_size) if raw_size not in (None, "") else None
+                    side = row.get("side") or None
+                    yield float(price), ts, size, side
                 except (KeyError, ValueError, TypeError):
                     continue
 
@@ -258,8 +313,8 @@ def backfill(data_dir, symbol, range_size, max_bars=2000, since_ts=None):
         готов принимать тики шины без шва.
     """
     builder = RangeBarBuilder(range_size, max_bars=max_bars)
-    for price, ts in iter_ticks(data_dir, symbol, since_ts=since_ts):
-        builder.ingest(price, ts)
+    for price, ts, size, side in iter_ticks(data_dir, symbol, since_ts=since_ts):
+        builder.ingest(price, ts, size, side)
     return builder
 
 
@@ -362,8 +417,8 @@ def _run_backfill(data_dir, symbol, range_size, keep_bars, since_ts):
     """
     builder = RangeBarBuilder(range_size, max_bars=keep_bars)
     last_ts = None
-    for price, ts in iter_ticks(data_dir, symbol, since_ts=since_ts):
-        builder.ingest(price, ts)
+    for price, ts, size, side in iter_ticks(data_dir, symbol, since_ts=since_ts):
+        builder.ingest(price, ts, size, side)
         last_ts = ts
     return builder, last_ts
 

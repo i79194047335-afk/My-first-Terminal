@@ -444,7 +444,8 @@ class Hub:
                              msg.get("side"), msg["ts"])
         self._large_trade_check(provider, symbol, price, msg.get("size"),
                                 msg.get("side"), msg["ts"])
-        self._range_ingest(provider, symbol, price, msg["ts"])
+        self._range_ingest(provider, symbol, price, msg["ts"],
+                           msg.get("size"), msg.get("side"))
         self._broadcast_update(provider, symbol)
 
     def _handle_instruments(self, msg):
@@ -827,7 +828,7 @@ class Hub:
                 return 10.0 ** -item["price_decimals"]
         return 0.00001
 
-    def _range_ingest(self, provider, symbol, price, ts):
+    def _range_ingest(self, provider, symbol, price, ts, size=None, side=None):
         """Прогнать живой тик через рэндж-контур этой пары.
 
         Пока идёт бэкфил, тики копятся в буфере ожидания — иначе окно бэкфила
@@ -838,16 +839,18 @@ class Hub:
             symbol:   Инструмент.
             price:    Цена тика.
             ts:       Unix-время тика (float).
+            size:     Объём сделки или None (у FXCM объёма нет).
+            side:     Сторона агрессора или None.
 
         Returns:
             None.
         """
         for key, entry in self._range_pending.items():
             if key[0] == provider and key[1] == symbol:
-                entry["buffer"].append((price, ts))
+                entry["buffer"].append((price, ts, size, side))
         for key, rb in self._range_builders.items():
             if key[0] == provider and key[1] == symbol:
-                closed = rb.ingest(price, ts)
+                closed = rb.ingest(price, ts, size, side)
                 # У рэндж-бара тик-пробойщик МУТИРУЕТ закрывающийся бар и сразу
                 # открывает новый — финальное состояние закрытого без этой
                 # отправки не ушло бы клиенту никогда (broadcast шлёт current).
@@ -971,9 +974,9 @@ class Hub:
         """
         provider, symbol, pips = key
         entry = self._range_pending.pop(key, {"buffer": []})
-        for price, ts in entry["buffer"]:
+        for price, ts, size, side in entry["buffer"]:
             if last_ts is None or ts > last_ts:
-                builder.ingest(price, ts)
+                builder.ingest(price, ts, size, side)
         self._range_builders[key] = builder
 
         log.info("рэндж %s:%s R=%s готов: %d баров (буфер %d тиков)",
