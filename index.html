@@ -189,6 +189,47 @@
         z-index: 2001; box-sizing: border-box; overflow-y: auto;
         padding: 14px 16px; display: none;
     }
+
+    /* Лента крупных сделок. Узкая панель справа, а не поверх графика:
+       смотреть её надо ОДНОВРЕМЕННО с ценой, иначе смысла нет. */
+    #tapePanel {
+        position: absolute; right: 0; top: 0; width: 268px; height: 100%;
+        /* Непрозрачный var(--panel), а не rgba: сквозь полупрозрачную панель
+           просвечивают свечи и ленту невозможно читать. */
+        background: var(--panel);
+        border-left: 1px solid var(--btn-border);
+        color: var(--text); font-size: 11px;
+        z-index: 2000; box-sizing: border-box; display: none;
+        flex-direction: column;
+    }
+    #tapePanel.on { display: flex; }
+    #tapeHead {
+        padding: 7px 10px; border-bottom: 1px solid var(--btn-border);
+        display: flex; align-items: center; justify-content: space-between;
+        font-size: 11px; color: var(--muted); flex: 0 0 auto;
+    }
+    #tapeHead b { color: var(--text); font-size: 12px; }
+    #tapeRows { overflow-y: auto; flex: 1 1 auto; }
+    .tape-row {
+        display: grid; grid-template-columns: 46px 1fr auto;
+        gap: 6px; padding: 3px 10px; align-items: baseline;
+        border-bottom: 1px solid rgba(128,128,128,0.12);
+        font-variant-numeric: tabular-nums;
+    }
+    .tape-row.buy  { border-left: 3px solid #26a69a; }
+    .tape-row.sell { border-left: 3px solid #ef5350; }
+    .tape-time { color: var(--muted); font-size: 10px; }
+    .tape-price { text-align: left; }
+    .tape-quote { font-weight: bold; text-align: right; }
+    .tape-row.buy  .tape-quote { color: #26a69a; }
+    .tape-row.sell .tape-quote { color: #ef5350; }
+    /* Свежая сделка коротко подсвечивается — глаз ловит появление. */
+    .tape-row.fresh { animation: tapeFlash 1.1s ease-out; }
+    @keyframes tapeFlash {
+        from { background: rgba(41,98,255,0.28); }
+        to   { background: transparent; }
+    }
+    #tapeEmpty { padding: 14px 10px; color: var(--muted); line-height: 1.5; }
     #briefContent { line-height: 1.6; }
     #briefContent h2 {
         font-size: 15px; color: #fff; margin: 0 0 10px 0;
@@ -497,11 +538,21 @@
             <div class="tb-spacer"></div>
             <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
             <button id="signalLogBtn" class="tb-txt" onclick="toggleSignalPanel()" data-tip="Сигналы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
+            <button id="tapeBtn" class="tb-ic" onclick="toggleTape()" data-tip="Лента крупных сделок"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
         </div>
         <div class="chart-wrapper" id="wrapper2">
             <div id="signalPanel"></div>
             <div id="briefPanel" style="display:none;"><div id="briefContent"></div></div>
+            <!-- Лента крупных сделок: только для инструментов с биржевым
+                 объёмом, порог — 95-й процентиль за скользящий час. -->
+            <div id="tapePanel">
+                <div id="tapeHead">
+                    <span><b>Лента</b> <span id="tapeSymbol"></span></span>
+                    <span id="tapeThreshold"></span>
+                </div>
+                <div id="tapeRows"></div>
+            </div>
             <div class="chart" id="chart2"></div>
             <div class="tv-countdown" id="countdown2"></div>
             <div class="zoomCenter">
@@ -958,6 +1009,10 @@ function handleMessage(id, state, msg) {
         if (_signalsVisible && isNewBar) refreshSignalMarkers();
     }
 
+    // Лента живёт на панели 2, но событие приходит в обе — обрабатываем один
+    // раз, иначе каждая сделка добавлялась бы дважды.
+    if (msg.type === "large_trade" && id === 1) addTapeTrade(msg);
+
     if (msg.type === "analysis") updateMarketEngine(msg);
     if (msg.type === "signal")   showSignal(msg);
     if (msg.type === "briefing") { lastBriefingData = msg.data; if (briefVisible) renderBriefing(); }
@@ -990,6 +1045,15 @@ function handleMessage(id, state, msg) {
             if (st.volumeSeries && st.data?.length) setVolumeData(id, st.data);
         });
         syncVolumeButtons();
+        // Заглушку ленты тоже надо переписать: resetTape() на старте отработал
+        // с ПУСТЫМ instrumentsWithVolume и написал «нет биржевого объёма» даже
+        // для крипты. Обновляем, только если сделок ещё не было — иначе
+        // затёрли бы уже накопленную ленту.
+        {
+            const rows = document.getElementById("tapeRows");
+            if (rows && !rows.querySelector(".tape-row")) resetTape();
+            else renderTapeHeader();
+        }
     }
 
     if (msg.type === "alert" && msg.symbol === currentSymbol) {
@@ -1810,6 +1874,7 @@ function setTF(paneId, tf) {
 function switchSymbol(symbol) {
     currentSymbol = symbol;
     resetMarketDot();   // индикатор рынка — заново с тиков нового инструмента
+    resetTape();        // лента чужого инструмента к новому отношения не имеет
 
     [1, 2].forEach(paneId => {
         const st = panesState[paneId];
@@ -2317,6 +2382,137 @@ function showSignal(data) {
 }
 
 // ===== BRIEFING PANEL =====
+
+// ── Лента крупных сделок ───────────────────────────────────────────────────
+// Хаб шлёт large_trade широковещательно по всем инструментам; фильтруем по
+// текущему символу — смотрят всегда один. Порог считает сервер (95-й
+// процентиль за скользящий час), фронт его только показывает.
+let tapeVisible = false;
+const TAPE_MAX_ROWS = 60;
+let _tapeLastThreshold = null;
+
+/**
+ * Показать или скрыть панель ленты.
+ * @returns {void}
+ */
+function toggleTape() {
+    tapeVisible = !tapeVisible;
+    layout.showTape = tapeVisible;
+    StorageLayer.autoSave(layout);
+    applyTapeVisibility();
+}
+
+/**
+ * Привести панель и кнопку в соответствие состоянию.
+ * @returns {void}
+ */
+function applyTapeVisibility() {
+    const panel = document.getElementById("tapePanel");
+    const btn   = document.getElementById("tapeBtn");
+    if (!panel) return;
+    panel.classList.toggle("on", tapeVisible);
+    if (btn) btn.classList.toggle("on", tapeVisible);
+    if (tapeVisible) renderTapeHeader();
+}
+
+/**
+ * Обновить шапку ленты: символ и текущий порог.
+ * @returns {void}
+ */
+function renderTapeHeader() {
+    const sym = document.getElementById("tapeSymbol");
+    const thr = document.getElementById("tapeThreshold");
+    if (sym) sym.textContent = displaySymbol(currentSymbol);
+    if (!thr) return;
+    if (!instrumentsWithVolume.has(currentSymbol)) {
+        thr.textContent = "";
+    } else if (_tapeLastThreshold == null) {
+        thr.textContent = "ждёт данных";
+    } else {
+        thr.textContent = "> " + formatTapeSize(_tapeLastThreshold);
+    }
+}
+
+/**
+ * Компактно отформатировать размер сделки.
+ * @param {number} v Размер в базовых единицах.
+ * @returns {string}
+ */
+function formatTapeSize(v) {
+    if (v >= 1000) return v.toFixed(0);
+    if (v >= 1)    return v.toFixed(2);
+    return v.toPrecision(3);
+}
+
+/**
+ * Компактно отформатировать оборот в долларах.
+ * @param {number} v Оборот.
+ * @returns {string}
+ */
+function formatTapeQuote(v) {
+    if (v >= 1e6) return "$" + (v / 1e6).toFixed(2) + "M";
+    if (v >= 1e3) return "$" + (v / 1e3).toFixed(1) + "k";
+    return "$" + v.toFixed(0);
+}
+
+/**
+ * Добавить сделку в ленту.
+ * Чужие инструменты игнорируются: события приходят по всем 12 сразу.
+ * @param {object} msg Сообщение large_trade от хаба.
+ * @returns {void}
+ */
+function addTapeTrade(msg) {
+    if (msg.symbol !== currentSymbol) return;
+    _tapeLastThreshold = msg.threshold;
+    if (!tapeVisible) return;
+
+    const rows = document.getElementById("tapeRows");
+    if (!rows) return;
+
+    const empty = document.getElementById("tapeEmpty");
+    if (empty) empty.remove();
+
+    const d = new Date((msg.ts + TZ_OFFSET * 3600) * 1000);
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    const ss = String(d.getUTCSeconds()).padStart(2, "0");
+
+    const row = document.createElement("div");
+    row.className = "tape-row fresh " + (msg.side === "buy" ? "buy" : "sell");
+    row.innerHTML =
+        '<span class="tape-time">' + hh + ":" + mm + ":" + ss + '</span>' +
+        '<span class="tape-price">' + msg.price + '</span>' +
+        '<span class="tape-quote">' + formatTapeQuote(msg.quote) + '</span>';
+    row.title = (msg.side === "buy" ? "Покупка" : "Продажа") +
+                " " + formatTapeSize(msg.size) +
+                " по " + msg.price;
+
+    rows.prepend(row);
+    // Лента растёт бесконечно, если её не подрезать: по BTC это ~7500
+    // событий за 8 часов, и DOM распух бы до неработоспособности.
+    while (rows.childElementCount > TAPE_MAX_ROWS) rows.lastElementChild.remove();
+
+    renderTapeHeader();
+}
+
+/**
+ * Очистить ленту (смена символа) и показать поясняющую заглушку.
+ * @returns {void}
+ */
+function resetTape() {
+    _tapeLastThreshold = null;
+    const rows = document.getElementById("tapeRows");
+    if (rows) {
+        rows.innerHTML = "";
+        const note = document.createElement("div");
+        note.id = "tapeEmpty";
+        note.textContent = instrumentsWithVolume.has(currentSymbol)
+            ? "Ждём крупных сделок. Порог — крупнее 95% сделок за последний час; пока статистика не набрана, лента молчит."
+            : "У этого инструмента нет биржевого объёма — лента доступна только на Lighter.";
+        rows.appendChild(note);
+    }
+    renderTapeHeader();
+}
 
 function toggleBriefing() {
     briefVisible = !briefVisible;
@@ -3129,6 +3325,11 @@ function initialize() {
     // Sync btn initial state
     const syncBtn = document.getElementById("chartSyncBtn");
     if (syncBtn && syncEnabled) syncBtn.classList.add("on");
+
+    // Лента — состояние из сохранённого layout.
+    tapeVisible = layout.showTape === true;
+    applyTapeVisibility();
+    resetTape();
 
     // Symbol selector
     const symbolSelect = document.getElementById("symbolSelect");
