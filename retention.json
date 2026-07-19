@@ -1,6 +1,9 @@
 {
   "db_path": "/root/projects/terminal/market.db",
   "keep_bars": 2000,
+  "keep_bars_by_tf": {
+    "M1": 10080
+  },
   "ws_port": 8765,
   "bus_host": "127.0.0.1",
   "bus_port": 8766,

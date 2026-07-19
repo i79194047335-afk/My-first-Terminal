@@ -85,6 +85,10 @@ class Hub:
         self._tf_seconds = config["tf_seconds"]
         self._broker_tf  = tuple(config.get("broker_tf", ("H1", "H4", "D1")))
         self._keep_bars  = config["keep_bars"]
+        # Глубина окна по ТФ. Одно число на все таймфреймы неудобно: 2000
+        # баров — это 5 лет на D1 и всего 33 часа на M1. keep_bars_by_tf
+        # переопределяет глубину точечно, остальные ТФ живут на keep_bars.
+        self._keep_bars_by_tf = config.get("keep_bars_by_tf") or {}
 
         self._conn        = None
         self._builders    = {}   # (provider, symbol) -> CandleBuilder
@@ -143,6 +147,17 @@ class Hub:
         self._started_ts   = time.time()
         self._last_tick_ts = 0.0
         self._last_tick_by_symbol = {}   # symbol -> ts последнего РЕАЛЬНОГО тика
+
+    def keep_bars_for(self, tf):
+        """Глубина окна для таймфрейма.
+
+        Args:
+            tf: Таймфрейм ("M1", "H4", …).
+
+        Returns:
+            Int: сколько баров хранить. keep_bars_by_tf[tf], иначе keep_bars.
+        """
+        return self._keep_bars_by_tf.get(tf, self._keep_bars)
 
     # ── восстановление после рестарта ───────────────────────────────────
 
@@ -383,14 +398,15 @@ class Hub:
             merged[c["time"]] = c
 
         out = [merged[t] for t in sorted(merged)]
-        if len(out) > self._keep_bars:
-            out = out[-self._keep_bars:]
+        keep = self.keep_bars_for(tf)
+        if len(out) > keep:
+            out = out[-keep:]
         self._history[key][tf] = out
 
         # В БД — той же коннекцией главного потока: пачка приходит раз в старт,
         # через очередь db_writer (maxsize=5000) 10 000 минуток не пролезли бы.
         upsert_candles_batch(self._conn, key[0], key[1], tf, out)
-        trim_window(self._conn, key[0], key[1], tf, self._keep_bars)
+        trim_window(self._conn, key[0], key[1], tf, self.keep_bars_for(tf))
 
     def _handle_tick(self, msg):
         """Нарезать тик в свечи, сохранить закрытые, разослать живую.
@@ -434,10 +450,11 @@ class Hub:
             self.closed_candles += 1
             bars = self._history[key].setdefault(tf, [])
             bars.append(candle)
+            keep = self.keep_bars_for(tf)
             # Держим в памяти ровно окно ретеншена: в server.py этот список рос
             # без границ.
-            if len(bars) > self._keep_bars:
-                del bars[:len(bars) - self._keep_bars]
+            if len(bars) > keep:
+                del bars[:len(bars) - keep]
             self._enqueue_closed(provider, symbol, tf, candle)
 
         self._profile_ingest(provider, symbol, price, msg.get("size"),
@@ -726,7 +743,7 @@ class Hub:
                         for sym in syms:
                             for tf_name in self._tf_seconds:
                                 trim_window(conn, prov, sym, tf_name,
-                                            self._keep_bars)
+                                            self.keep_bars_for(tf_name))
             except Exception as err:
                 log.warning("db_writer: %r — свеча пропущена", err)
 

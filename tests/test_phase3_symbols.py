@@ -163,6 +163,50 @@ class TestAlertKeyNormalisation(unittest.TestCase):
         self.assertEqual(len(sent), 1)
 
 
+class TestKeepBarsByTf(unittest.TestCase):
+    """Глубина окна, настраиваемая по таймфрейму."""
+
+    def setUp(self):
+        """Создать хаб.
+
+        Returns:
+            None.
+        """
+        self.hub, self.path = _make_hub()
+
+    def tearDown(self):
+        """Удалить временную БД.
+
+        Returns:
+            None.
+        """
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.path + suffix)
+            except OSError:
+                pass
+
+    def test_override_applies(self):
+        """ТФ из keep_bars_by_tf получает свою глубину.
+
+        Одно число на все ТФ неудобно: 2000 баров — это 5 лет на D1 и
+        всего 33 часа на M1.
+        """
+        self.hub._keep_bars_by_tf = {"M1": 10080}
+        self.assertEqual(self.hub.keep_bars_for("M1"), 10080)
+
+    def test_fallback_to_global(self):
+        """ТФ без переопределения живёт на общем keep_bars."""
+        self.hub._keep_bars_by_tf = {"M1": 10080}
+        self.assertEqual(self.hub.keep_bars_for("H1"), self.hub._keep_bars)
+        self.assertEqual(self.hub.keep_bars_for("S5"), self.hub._keep_bars)
+
+    def test_missing_section_is_safe(self):
+        """Конфиг без keep_bars_by_tf не ломает хаб."""
+        self.hub._keep_bars_by_tf = {}
+        self.assertEqual(self.hub.keep_bars_for("M1"), self.hub._keep_bars)
+
+
 class TestHealthSymbolsAge(unittest.TestCase):
     """symbols_age отдаётся под обоими именами."""
 
