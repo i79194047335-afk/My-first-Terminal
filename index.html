@@ -93,6 +93,18 @@
         border-radius:3px; pointer-events:none; z-index:1000; color:#fff;
     }
 
+    /* Легенда объёма и дельты. Цвет столбца показывает ЗНАК дельты,
+       а величину видно только числом — отсюда эта строка. */
+    .vol-legend {
+        position:absolute; left:8px; top:6px; font-size:11px;
+        pointer-events:none; z-index:1000; color:var(--muted);
+        font-variant-numeric:tabular-nums; display:none;
+    }
+    .vol-legend.on { display:block; }
+    .vol-legend b { color:var(--text); font-weight:600; }
+    .vol-legend .d-pos { color:#26a69a; font-weight:600; }
+    .vol-legend .d-neg { color:#ef5350; font-weight:600; }
+
     select, button { padding:4px 8px; border:1px solid var(--btn-border); background:var(--btn); color:var(--text); cursor:pointer; }
     button { border-radius:3px; }
 
@@ -511,6 +523,7 @@
         <div class="chart-wrapper" id="wrapper1">
             <div class="chart" id="chart1"></div>
             <div class="tv-countdown" id="countdown1"></div>
+            <div class="vol-legend" id="volLegend1"></div>
             <div class="zoomCenter">
                 <div class="zoomBtn" onclick="zoomChart(1,-1)">−</div>
                 <div class="zoomBtn" onclick="zoomChart(1,1)">+</div>
@@ -555,6 +568,7 @@
             </div>
             <div class="chart" id="chart2"></div>
             <div class="tv-countdown" id="countdown2"></div>
+            <div class="vol-legend" id="volLegend2"></div>
             <div class="zoomCenter">
                 <div class="zoomBtn" onclick="zoomChart(2,-1)">−</div>
                 <div class="zoomBtn" onclick="zoomChart(2,1)">+</div>
@@ -1220,6 +1234,22 @@ function createPane(id) {
         // Движение мыши по одному графику отражается крестиком на другом
         // (по цене и времени курсора). _crosshairSyncing гасит обратный вызов,
         // т.к. setCrosshairPosition сам триггерит subscribeCrosshairMove.
+        // Легенда следует за курсором: под ним показываются объём и дельта
+        // того бара, на который смотришь. Отдельной подпиской, до синхронизации
+        // перекрестий — та завязана на syncEnabled и при выключенной
+        // синхронизации выходит раньше.
+        st.chart.subscribeCrosshairMove(param => {
+            if (!st.volumeSeries) return;
+            if (!param.point || typeof param.time !== "number") {
+                st.legendPinned = false;
+                renderVolumeLegend(paneId, st.data?.[st.data.length - 1]);
+                return;
+            }
+            st.legendPinned = true;
+            const bar = st.data?.find(b => b.time === param.time);
+            if (bar) renderVolumeLegend(paneId, bar);
+        });
+
         st.chart.subscribeCrosshairMove(param => {
             if (_crosshairSyncing || !syncEnabled) return;
             const otherId = paneId === 1 ? 2 : 1;
@@ -2068,13 +2098,26 @@ function ensureVolumeSeries(paneId) {
 }
 
 /**
- * Цвет столбца объёма по направлению свечи.
- * @param {object} bar Свеча с полями open/close.
+ * Цвет столбца объёма — по знаку ДЕЛЬТЫ, а не по направлению свечи.
+ *
+ * Дельта = агрессивные покупки минус продажи. Красить по ней, а не по
+ * телу свечи, — единственный способ увидеть расхождение цены и давления
+ * бесплатно, не занимая места на экране. Пример из живых данных: свеча
+ * падает, а дельта +58.8% — покупатели давили весь бар, но цену не
+ * удержали. По цвету тела свечи этого не видно вообще.
+ *
+ * Провайдер без стороны агрессора дельту не даёт (у FXCM её нет вовсе,
+ * у REST-бэкфила Lighter — тоже: он отдаёт объём без разбивки). Тогда
+ * откатываемся на направление свечи, чтобы бэкфил не выглядел серым
+ * провалом рядом с живыми барами.
+ *
+ * @param {object} bar Свеча с полями open/close и, возможно, delta.
  * @returns {string} Цвет с прозрачностью.
  */
 function volumeBarColor(bar) {
-    const up = bar.close >= bar.open;
-    return up ? "rgba(38,166,154,0.5)" : "rgba(239,83,80,0.5)";
+    const positive = (bar.delta != null) ? (bar.delta >= 0)
+                                         : (bar.close >= bar.open);
+    return positive ? "rgba(38,166,154,0.5)" : "rgba(239,83,80,0.5)";
 }
 
 /**
@@ -2093,6 +2136,37 @@ function volumePoints(bars) {
 }
 
 /**
+ * Обновить легенду объёма и дельты.
+ * Показывает бар под курсором, а без курсора — последний.
+ * @param {number} paneId Номер панели.
+ * @param {object} bar Свеча или null.
+ * @returns {void}
+ */
+function renderVolumeLegend(paneId, bar) {
+    const el = document.getElementById("volLegend" + paneId);
+    if (!el) return;
+
+    const st = panesState[paneId];
+    if (!st || !st.volumeSeries || !bar || bar.vol_base == null) {
+        el.classList.remove("on");
+        el.innerHTML = "";
+        return;
+    }
+
+    let html = "Vol <b>" + formatTapeSize(bar.vol_base) + "</b>";
+    if (bar.delta != null) {
+        const cls  = bar.delta >= 0 ? "d-pos" : "d-neg";
+        const sign = bar.delta >= 0 ? "+" : "−";
+        const share = bar.vol_base
+            ? Math.round(100 * Math.abs(bar.delta) / bar.vol_base) : 0;
+        html += '  Δ <span class="' + cls + '">' + sign +
+                formatTapeSize(Math.abs(bar.delta)) + " (" + share + "%)</span>";
+    }
+    el.innerHTML = html;
+    el.classList.add("on");
+}
+
+/**
  * Записать историю объёма в серию панели.
  * @param {number} paneId Номер панели.
  * @param {Array<object>} bars Свечи.
@@ -2101,8 +2175,12 @@ function volumePoints(bars) {
 function setVolumeData(paneId, bars) {
     ensureVolumeSeries(paneId);
     const st = panesState[paneId];
-    if (!st || !st.volumeSeries) return;
+    if (!st || !st.volumeSeries) {
+        renderVolumeLegend(paneId, null);
+        return;
+    }
     try { st.volumeSeries.setData(volumePoints(bars)); } catch (e) {}
+    renderVolumeLegend(paneId, bars[bars.length - 1]);
 }
 
 /**
@@ -2119,6 +2197,9 @@ function updateVolumeBar(paneId, bar) {
             time: bar.time, value: bar.vol_base, color: volumeBarColor(bar),
         });
     } catch (e) {}
+    // Легенду двигаем только когда курсор не удерживает конкретный бар:
+    // иначе цифры прыгали бы под курсором на каждом тике.
+    if (!st.legendPinned) renderVolumeLegend(paneId, bar);
 }
 
 // Переключить тип отрисовки панели, перенеся данные, цвета, precision,
