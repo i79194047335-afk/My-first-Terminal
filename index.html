@@ -938,6 +938,26 @@ function addHorizontalLine(id, price) {
     return obj;
 }
 
+function moveAlert(paneId, obj, newPrice) {
+    // Хаб на update_alert снимает triggered: уровень новый, алерт снова
+    // заряжен. Не сбросив признак здесь, мы оставим линию красной с 🔕 —
+    // она повторно сработает, но выглядеть будет уже сработавшей, и
+    // отличить заряженный алерт от отработавшего станет невозможно.
+    panesState[paneId].ws.send(JSON.stringify({
+        type: "update_alert", symbol: currentSymbol, id: obj.id, price: newPrice
+    }));
+    // Перерисовка и запись — только если алерт БЫЛ сработавшим: moveAlert
+    // зовётся на каждом mousemove, и трогать localStorage на каждый пиксель
+    // ни к чему.
+    if (obj.triggered) {
+        obj.triggered = false;
+        obj.line.applyOptions({ color: "#2962FF", lineWidth: 1, title: "🔔" });
+        // storage.js восстанавливает цвет и иконку по triggered — без записи
+        // перезагрузка страницы вернула бы линию в «сработавший» вид.
+        StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+    }
+}
+
 function addAlertLine(id, price) {
     const { series } = panesState[id];
     const line = series.createPriceLine({
@@ -1515,7 +1535,7 @@ function setupInteractionHandlers(paneId, st, els) {
                 stLocal.selectedLine.price = newPrice;
                 stLocal.selectedLine.line.applyOptions({ price: newPrice });
                 if (stLocal.selectedLine.type === "alert") {
-                    panesState[id].ws.send(JSON.stringify({ type: "update_alert", symbol: currentSymbol, id: stLocal.selectedLine.id, price: newPrice }));
+                    moveAlert(id, stLocal.selectedLine, newPrice);
                 }
                 return;
             }
@@ -1811,7 +1831,7 @@ function setupInteractionHandlers(paneId, st, els) {
         stLocal.selectedLine.price = newPrice;
         stLocal.selectedLine.line.applyOptions({ price: newPrice });
         if (stLocal.selectedLine.type === "alert") {
-            panesState[id].ws.send(JSON.stringify({ type: "update_alert", symbol: currentSymbol, id: stLocal.selectedLine.id, price: newPrice }));
+            moveAlert(id, stLocal.selectedLine, newPrice);
         }
     }
     els.wrapper.addEventListener("mousemove", onMoveHLine);
