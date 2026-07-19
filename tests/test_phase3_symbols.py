@@ -17,6 +17,7 @@
 """
 
 import copy
+import json
 import os
 import sys
 import tempfile
@@ -155,12 +156,62 @@ class TestAlertKeyNormalisation(unittest.TestCase):
         self.hub._alerts["BTC"] = [{"id": 1, "price": 64000.0,
                                     "triggered": False}]
         sent = []
-        self.hub._broadcast = lambda payload: sent.append(payload)
+        self.hub._clients[object()] = {"wire": "lighter:BTC"}
+        self.hub._send = lambda ws, payload: sent.append(payload)
 
         self.hub._check_alerts("BTC", 63990.0, 64010.0)
 
         self.assertTrue(self.hub._alerts["BTC"][0]["triggered"])
         self.assertEqual(len(sent), 1)
+
+    def _fire_and_collect(self, wires):
+        """Уронить алерт по BTC на клиентов с заданными форматами имени.
+
+        Args:
+            wires: Список значений "wire" (как клиент назвал инструмент).
+
+        Returns:
+            Список разобранных JSON-сообщений, по одному на клиента.
+        """
+        sent = []
+        for i, wire in enumerate(wires):
+            self.hub._clients[i] = {"wire": wire}
+        self.hub._send = lambda ws, payload: sent.append(json.loads(payload))
+        self.hub._alerts["BTC"] = [{"id": 1, "price": 64000.0,
+                                    "triggered": False}]
+        self.hub._check_alerts("BTC", 63990.0, 64010.0)
+        return sent
+
+    def test_fired_alert_matches_each_client_format(self):
+        """Каждый клиент получает символ в СВОЁМ формате.
+
+        Стык, на котором ловилось молчание алертов. Фронт сверяет
+        msg.symbol с currentSymbol: обновлённая вкладка ждёт "lighter:BTC",
+        старая — голое "BTC". Общий на всех JSON промахнётся мимо одной из
+        них, и промахнётся МОЛЧА — алерт при этом уже помечен triggered и
+        второй раз не выстрелит. Факта рассылки для проверки недостаточно.
+        """
+        sent = self._fire_and_collect(["lighter:BTC", "BTC"])
+        self.assertEqual([m["symbol"] for m in sent], ["lighter:BTC", "BTC"])
+
+    def test_alert_reaches_client_watching_another_symbol(self):
+        """Смотрящий другой инструмент получает каноничное имя, а не своё.
+
+        Алерты глобальны — фронт принимает их независимо от подписки. Но
+        подставить сюда wire зрителя ETH значило бы прислать событие BTC
+        под именем "lighter:ETH".
+        """
+        sent = self._fire_and_collect(["lighter:ETH"])
+        self.assertEqual(sent[0]["symbol"], "lighter:BTC")
+
+    def test_display_symbol_roundtrip(self):
+        """display_symbol обратно к resolve_symbol и идемпотентен."""
+        self.assertEqual(self.hub.display_symbol("BTC"), "lighter:BTC")
+        self.assertEqual(self.hub.display_symbol("EUR/USD"), "fxcm:EUR/USD")
+        # Уже префиксованный не удваивается.
+        self.assertEqual(self.hub.display_symbol("lighter:BTC"), "lighter:BTC")
+        # Неизвестный отдаётся как есть, без выдуманного провайдера.
+        self.assertEqual(self.hub.display_symbol("NOPE"), "NOPE")
 
 
 class TestKeepBarsByTf(unittest.TestCase):

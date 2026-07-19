@@ -1085,6 +1085,27 @@ class Hub:
         """
         return self.resolve_symbol(symbol)[0]
 
+    def display_symbol(self, symbol):
+        """Собрать имя символа в том виде, в каком его знает фронт.
+
+        Обратное к resolve_symbol. Внутри хаба символ везде ЧИСТЫЙ (ключ
+        алертов, имя из шины), а фронт с Фазы 3 сравнивает пришедший symbol
+        со своим currentSymbol — то есть с префиксом. Событие, отправленное
+        под чистым именем, фронт молча отбросит: ни звука, ни попапа, при
+        том что алерт уже помечен triggered и повторно не сработает.
+
+        Args:
+            symbol: Чистый символ (как в шине).
+
+        Returns:
+            "provider:symbol", либо исходная строка, если провайдер не
+            определяется (тогда фронт-совместимость и так невозможна).
+        """
+        if ":" in symbol:
+            return symbol
+        provider = self._provider_of(symbol)
+        return provider + ":" + symbol if provider else symbol
+
     async def ws_handler(self, ws):
         """Обслужить одно браузерное подключение.
 
@@ -1219,6 +1240,12 @@ class Hub:
         # по имени из шины, где префикса нет. Клали бы сюда "lighter:BTC" —
         # алерт создавался бы, но не срабатывал никогда.
         symbol = self.resolve_symbol(requested)[1]
+        # Запомнить формат имени клиента: add_alert может прийти ДО set_symbol
+        # (фронт восстанавливает алерты из localStorage сразу после connect).
+        # Без этого срабатывание уйдёт ему в каноничном виде, а он ждёт своё.
+        info = self._clients.get(ws)
+        if info is not None and not info.get("wire"):
+            info["wire"] = requested
         price  = round(float(data["price"]), 5)
         alert  = {"id": self._alert_id, "price": price, "triggered": False}
         self._alerts.setdefault(symbol, []).append(alert)
@@ -1340,12 +1367,48 @@ class Hub:
                      symbol, alert["id"], level, price)
                 # Событие срабатывания — ВСЕМ клиентам (фронт принимает его
                 # независимо от requestId и подписки на символ).
-                self._broadcast(json.dumps({
-                    "type":   "alert",
-                    "symbol": symbol,
-                    "price":  level,
-                    "id":     alert["id"],
-                }))
+                # Каждому клиенту — в ЕГО формате имени. Фронт фильтрует
+                # событие по совпадению с currentSymbol, а форматы у клиентов
+                # разные: обновлённая вкладка ждёт "lighter:BTC", старая —
+                # голое "BTC". Один общий JSON обязательно промахнётся мимо
+                # половины из них, причём молча: алерт уже помечен triggered
+                # и повторно не сработает.
+                self._broadcast_alert(symbol, level, alert["id"])
+
+    def _broadcast_alert(self, symbol, level, alert_id):
+        """Разослать срабатывание алерта, каждому клиенту — под его именем.
+
+        Отличается от _broadcast тем, что JSON собирается для каждого
+        клиента отдельно: symbol берётся из его "wire" (как он сам назвал
+        инструмент при подписке), а не из внутреннего чистого имени. Фронт
+        сверяет msg.symbol с currentSymbol и чужой формат отбрасывает
+        БЕЗ ОШИБКИ — ни звука, ни попапа, при том что алерт уже сгорел.
+
+        Клиенту, который этот инструмент не смотрит, шлём каноничное имя:
+        событие всё равно нужно доставить (алерты глобальны, фронт
+        принимает их независимо от подписки).
+
+        Args:
+            symbol:   Чистый символ (как в шине).
+            level:    Уровень, который пересекла цена.
+            alert_id: Идентификатор алерта.
+
+        Returns:
+            None.
+        """
+        canonical = self.display_symbol(symbol)
+        for ws, info in list(self._clients.items()):
+            wire = (info or {}).get("wire")
+            # wire годится, только если это ТОТ ЖЕ инструмент: клиент может
+            # смотреть другой, и его имя к этому алерту отношения не имеет.
+            if not wire or self.resolve_symbol(wire)[1] != symbol:
+                wire = canonical
+            self._send(ws, json.dumps({
+                "type":   "alert",
+                "symbol": wire,
+                "price":  level,
+                "id":     alert_id,
+            }))
 
     def _broadcast(self, payload):
         """Разослать готовый JSON всем клиентам (алерты, инструменты).

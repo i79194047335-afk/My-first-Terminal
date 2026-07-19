@@ -908,7 +908,13 @@ function updateCursor(el, type) { el.style.cursor = type; }
 function deselectLine() {
     Object.values(panesState).forEach(st => {
         if (st.selectedLine) {
-            st.selectedLine.line.applyOptions({ color: st.selectedLine.color, lineWidth: st.selectedLine.width });
+            const obj = st.selectedLine;
+            // Сработавший алерт красный и толще — вернуть его в обычный
+            // color/width значило бы стереть признак срабатывания.
+            const restore = (obj.type === "alert" && obj.triggered)
+                ? { color: "#ff0000", lineWidth: 2 }
+                : { color: obj.color ?? "#000000", lineWidth: obj.width ?? 1 };
+            obj.line.applyOptions(restore);
             st.selectedLine = null;
         }
     });
@@ -938,7 +944,11 @@ function addAlertLine(id, price) {
         price, color: "#000000", lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "🔔"
     });
-    const obj = { id: null, paneId: id, type: "alert", price, symbol: currentSymbol, triggered: false, line };
+    // color/width обязательны: deselectLine возвращает линию в них после
+    // снятия выделения. Без них applyOptions получает undefined, LWC его
+    // игнорирует — и линия навсегда остаётся синей.
+    const obj = { id: null, paneId: id, type: "alert", price, symbol: currentSymbol,
+                  triggered: false, line, color: "#000000", width: 1 };
     pendingAlerts[price] = obj;
     drawings[id].push(obj);
     panesState[id].ws.send(JSON.stringify({ type: "add_alert", symbol: currentSymbol, price }));
