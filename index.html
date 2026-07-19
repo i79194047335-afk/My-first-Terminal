@@ -45,6 +45,14 @@
         padding:4px 10px; font-size:12px; cursor:pointer; }
     #chartTypeToggle button.on { background:var(--accent); color:#fff; }
 
+    /* Строка объёма повторяет разметку строки типа графика. */
+    #volumeRow { display:flex; align-items:center; justify-content:space-between; gap:12px;
+        margin:4px 0; }
+    #volumeToggle { display:inline-flex; border:1px solid var(--btn-border); border-radius:5px; overflow:hidden; }
+    #volumeToggle button { border:0; border-radius:0; background:var(--btn); color:var(--text);
+        padding:4px 10px; font-size:12px; cursor:pointer; }
+    #volumeToggle button.on { background:var(--accent); color:#fff; }
+
     #container {
         display: flex;
         width: 100%;
@@ -310,6 +318,15 @@
         <span id="chartTypeToggle">
             <button type="button" onclick="setChartTypeFromMenu('candles')" data-charttype-btn="candles">🕯 Свечи</button>
             <button type="button" onclick="setChartTypeFromMenu('bars')" data-charttype-btn="bars">📊 Бары</button>
+        </span>
+    </div>
+    <!-- Объём: только у инструментов, которые его дают (Lighter). У FXCM
+         это поток котировок, там строка неактивна. -->
+    <div id="volumeRow">
+        <span>Объём</span>
+        <span id="volumeToggle">
+            <button type="button" onclick="setVolumeVisible(true)"  data-volume-btn="on">Показать</button>
+            <button type="button" onclick="setVolumeVisible(false)" data-volume-btn="off">Скрыть</button>
         </span>
     </div>
 </div>
@@ -849,6 +866,14 @@ function handleMessage(id, state, msg) {
 
     if (msg.type === "heartbeat") { onHeartbeat(msg.data); return; }
 
+    // Фильтр по requestId отсекает ответы на устаревшие запросы (пользователь
+    // успел переключить ТФ, пока грузилась история). Но широковещательные
+    // сообщения requestId не несут, и их надо пропускать по типу.
+    //
+    // instruments и large_trade сюда добавлены в Фазе 3. Раньше instruments
+    // молча отсекались (requestId=undefined никогда не равен state.requestId),
+    // и селектор пар жил на захардкоженной HTML-разметке — баг был невидим,
+    // пока от instruments не стали зависеть precision и объём.
     if (
         msg.type !== "alert" &&
         msg.type !== "alert_created" &&
@@ -856,6 +881,8 @@ function handleMessage(id, state, msg) {
         msg.type !== "signal" &&
         msg.type !== "briefing" &&
         msg.type !== "signals_history" &&
+        msg.type !== "instruments" &&
+        msg.type !== "large_trade" &&
         msg.requestId !== state.requestId
     ) return;
 
@@ -868,6 +895,7 @@ function handleMessage(id, state, msg) {
             try { state.chart.clearCrosshairPosition(); } catch (e) {}
             state.data = msg.data;
             state.series.setData(state.data);
+            setVolumeData(id, state.data);
             refreshSignalMarkers();
             state.lastCandle = msg.data.at(-1);
 
@@ -904,6 +932,7 @@ function handleMessage(id, state, msg) {
 
     if (msg.type === "update" && msg.candle) {
         state.series.update(msg.candle);
+        updateVolumeBar(id, msg.candle);
 
         const last = state.data[state.data.length - 1];
         let isNewBar = false;
@@ -952,6 +981,15 @@ function handleMessage(id, state, msg) {
         Object.keys(panesState).forEach(id => applyPriceFormat(id));
         // Селектор пар — из instruments, а не из захардкоженной HTML-разметки.
         populateSymbolSelect(symbols);
+        // Только теперь известно, у кого есть объём: до instruments набор пуст,
+        // и серия не создалась бы даже на крипте.
+        [1, 2].forEach(id => {
+            const st = panesState[id];
+            if (!st?.chart) return;
+            ensureVolumeSeries(id);
+            if (st.volumeSeries && st.data?.length) setVolumeData(id, st.data);
+        });
+        syncVolumeButtons();
     }
 
     if (msg.type === "alert" && msg.symbol === currentSymbol) {
@@ -1789,6 +1827,10 @@ function switchSymbol(symbol) {
         if (!state) return;
         state.indicatorsLoaded = false; // force reload on next history
         applyPriceFormat(id);           // precision нового символа
+        // Объём есть не у всех: у FXCM это поток котировок, а не сделок.
+        // Снимаем/ставим серию сразу, не дожидаясь истории, иначе на
+        // форексе остались бы висеть столбцы от прошлого инструмента.
+        ensureVolumeSeries(id);
         const tf = layout[`pane${id}`]?.tf || "M1";
         const rs = state.ws && state.ws.readyState;
 
@@ -1912,6 +1954,106 @@ function makeSeries(chart, chartType) {
         { priceFormat: { type: 'price', precision: 5, minMove: 0.00001 } },
         0
     );
+}
+
+// ── Гистограмма объёма ─────────────────────────────────────────────────────
+// Живёт ОВЕРЛЕЕМ на главной пане, а не отдельной паной. Причина техническая:
+// IndicatorManager._teardownAllOscillatorSeries() сносит все паны кроме
+// нулевой при каждой перестройке осцилляторов — отдельная пана объёма
+// уничтожалась бы при добавлении любого RSI. Оверлей поверх свечей вдобавок
+// привычнее: так это сделано в TradingView.
+//
+// Собственная шкала (VOLUME_SCALE_ID) с большим отступом сверху: объём
+// прижат к низу и занимает нижнюю четверть, не перекрывая цену.
+const VOLUME_SCALE_ID = "vol";
+
+/**
+ * Создать серию объёма на панели, если инструмент даёт объём.
+ * @param {number} paneId Номер панели (1 или 2).
+ * @returns {void}
+ */
+function ensureVolumeSeries(paneId) {
+    const st = panesState[paneId];
+    if (!st || !st.chart) return;
+
+    const wanted = instrumentsWithVolume.has(currentSymbol) &&
+                   layout.showVolume !== false;
+
+    if (!wanted) {
+        if (st.volumeSeries) {
+            try { st.chart.removeSeries(st.volumeSeries); } catch (e) {}
+            st.volumeSeries = null;
+        }
+        return;
+    }
+    if (st.volumeSeries) return;
+
+    st.volumeSeries = st.chart.addSeries(LightweightCharts.HistogramSeries, {
+        priceFormat:       { type: "volume" },
+        priceScaleId:      VOLUME_SCALE_ID,
+        priceLineVisible:  false,
+        lastValueVisible:  false,
+    }, 0);
+
+    st.chart.priceScale(VOLUME_SCALE_ID).applyOptions({
+        // 0.75 сверху — объёму достаётся нижняя четверть панели.
+        scaleMargins: { top: 0.75, bottom: 0 },
+        visible: false,
+    });
+}
+
+/**
+ * Цвет столбца объёма по направлению свечи.
+ * @param {object} bar Свеча с полями open/close.
+ * @returns {string} Цвет с прозрачностью.
+ */
+function volumeBarColor(bar) {
+    const up = bar.close >= bar.open;
+    return up ? "rgba(38,166,154,0.5)" : "rgba(239,83,80,0.5)";
+}
+
+/**
+ * Привести свечи к точкам гистограммы объёма.
+ * Бары без объёма (FXCM) отбрасываются — рисовать нули незачем.
+ * @param {Array<object>} bars Свечи из истории.
+ * @returns {Array<object>} Точки для HistogramSeries.
+ */
+function volumePoints(bars) {
+    const out = [];
+    for (const b of bars) {
+        if (b.vol_base == null) continue;
+        out.push({ time: b.time, value: b.vol_base, color: volumeBarColor(b) });
+    }
+    return out;
+}
+
+/**
+ * Записать историю объёма в серию панели.
+ * @param {number} paneId Номер панели.
+ * @param {Array<object>} bars Свечи.
+ * @returns {void}
+ */
+function setVolumeData(paneId, bars) {
+    ensureVolumeSeries(paneId);
+    const st = panesState[paneId];
+    if (!st || !st.volumeSeries) return;
+    try { st.volumeSeries.setData(volumePoints(bars)); } catch (e) {}
+}
+
+/**
+ * Обновить последний столбец объёма живой свечой.
+ * @param {number} paneId Номер панели.
+ * @param {object} bar Живая свеча.
+ * @returns {void}
+ */
+function updateVolumeBar(paneId, bar) {
+    const st = panesState[paneId];
+    if (!st || !st.volumeSeries || bar.vol_base == null) return;
+    try {
+        st.volumeSeries.update({
+            time: bar.time, value: bar.vol_base, color: volumeBarColor(bar),
+        });
+    } catch (e) {}
 }
 
 // Переключить тип отрисовки панели, перенеся данные, цвета, precision,
@@ -2861,6 +3003,40 @@ function syncChartTypeButtons(paneId) {
     const cur = layout[`pane${paneId}`]?.chartType || "candles";
     document.querySelectorAll("#chartTypeToggle button").forEach(b =>
         b.classList.toggle("on", b.dataset.charttypeBtn === cur));
+}
+
+/**
+ * Показать или скрыть гистограмму объёма на обеих панелях.
+ * Настройка глобальная, а не по панели: панели показывают один инструмент,
+ * и объём у него либо есть, либо нет.
+ * @param {boolean} visible Показывать ли объём.
+ * @returns {void}
+ */
+function setVolumeVisible(visible) {
+    layout.showVolume = !!visible;
+    StorageLayer.autoSave(layout);
+    [1, 2].forEach(id => {
+        ensureVolumeSeries(id);
+        const st = panesState[id];
+        if (st?.volumeSeries && st.data?.length) setVolumeData(id, st.data);
+    });
+    syncVolumeButtons();
+}
+
+/**
+ * Подсветить активную кнопку объёма и погасить строку, если объёма нет.
+ * @returns {void}
+ */
+function syncVolumeButtons() {
+    const has = instrumentsWithVolume.has(currentSymbol);
+    const on  = has && layout.showVolume !== false;
+    document.querySelectorAll("#volumeToggle button").forEach(b =>
+        b.classList.toggle("on", b.dataset.volumeBtn === (on ? "on" : "off")));
+    const row = document.getElementById("volumeRow");
+    if (row) {
+        row.style.opacity = has ? "" : "0.45";
+        row.title = has ? "" : "У этого инструмента нет биржевого объёма";
+    }
 }
 function setTheme(theme) {
     layout.theme = (theme === "dark") ? "dark" : "light";

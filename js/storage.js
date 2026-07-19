@@ -25,6 +25,17 @@ function loadLayout(DEFAULT_COLORS) {
    if (!layout.drawings) {
     layout.drawings = {};
 }
+    // Достраиваем обязательные поля: сохранённый layout мог прийти из более
+    // старой версии или быть частично перезаписан. Раньше значения по
+    // умолчанию подставлялись ТОЛЬКО когда layoutState отсутствовал целиком,
+    // и объект без colors ронял applyColors на первом же кадре.
+    if (!layout.colors) layout.colors = { ...DEFAULT_COLORS };
+    else for (const k in DEFAULT_COLORS)
+        if (layout.colors[k] === undefined) layout.colors[k] = DEFAULT_COLORS[k];
+    if (!layout.pane1) layout.pane1 = { tf: "M1" };
+    if (!layout.pane2) layout.pane2 = { tf: "M1" };
+    if (!layout.split) layout.split = "split";
+
     return layout;
 }
 
