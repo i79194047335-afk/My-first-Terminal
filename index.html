@@ -1013,6 +1013,8 @@ function handleMessage(id, state, msg) {
     if (msg.type === "update" && msg.candle) {
         state.series.update(msg.candle);
         updateVolumeBar(id, msg.candle);
+        // Свежая цена — для подбора R при следующем переключении сюда.
+        if (msg.candle.close > 0) lastKnownPrice[currentSymbol] = msg.candle.close;
 
         const last = state.data[state.data.length - 1];
         let isNewBar = false;
@@ -1059,6 +1061,10 @@ function handleMessage(id, state, msg) {
                 const d = (inst.price_decimals == null) ? 5 : inst.price_decimals;
                 instrumentPrecision[full] = { precision: d, minMove: Math.pow(10, -d) };
                 if (inst.has_volume) instrumentsWithVolume.add(full);
+                // mark_price от биржи — единственная цена инструмента, известная
+                // ДО того, как его открыли. По ней подбирается стартовый R.
+                const mark = parseFloat(inst.meta?.mark_price);
+                if (mark > 0 && !lastKnownPrice[full]) lastKnownPrice[full] = mark;
                 symbols.push(full);
             }
         }
@@ -1915,6 +1921,16 @@ function setTF(paneId, tf) {
             { secondsVisible: !st.tfSeconds || st.tfSeconds < 60 } });
     }
     layout[`pane${paneId}`].tf = tf;
+
+    // Рэндж-ТФ запоминается НА ИНСТРУМЕНТ. R задан в поинтах, а поинт у
+    // инструментов различается в тысячи раз: R500 — это ~$50 на BTC (темп M5)
+    // и 0.05 на LIT (цена $2.2, бар в жизни не закроется). Без этой памяти
+    // при каждом переключении пары приходилось бы подбирать R заново.
+    // Обычные ТФ (M1/H1/…) осмысленны для всех, их держим на панели.
+    if (parseRangeTF(tf)) {
+        layout.rangeTf = layout.rangeTf || {};
+        layout.rangeTf[currentSymbol] = tf;
+    }
     StorageLayer.autoSave(layout);
     DrawingController.resetTool();
 
@@ -1964,7 +1980,23 @@ function switchSymbol(symbol) {
         // Снимаем/ставим серию сразу, не дожидаясь истории, иначе на
         // форексе остались бы висеть столбцы от прошлого инструмента.
         ensureVolumeSeries(id);
-        const tf = layout[`pane${id}`]?.tf || "M1";
+
+        // Если панель стоит на рэндж-ТФ, берём R, ЗАПОМНЕННЫЙ ДЛЯ НОВОГО
+        // инструмента: R в поинтах несопоставим между парами (R500 = ~$50 на
+        // BTC и 0.05 на LIT), и тащить чужое значение бессмысленно. Нет
+        // запомненного — считаем разумное значение от текущей цены.
+        let tf = layout[`pane${id}`]?.tf || "M1";
+        if (parseRangeTF(tf)) {
+            const remembered = layout.rangeTf?.[currentSymbol];
+            tf = remembered || suggestRangeTF(currentSymbol) || tf;
+            layout[`pane${id}`] = layout[`pane${id}`] || {};
+            layout[`pane${id}`].tf = tf;
+            const els2 = getPaneElements(id);
+            if (els2?.tfSelect) {
+                ensureRangeOption(els2.tfSelect, tf);
+                els2.tfSelect.value = tf;
+            }
+        }
         const rs = state.ws && state.ws.readyState;
 
         if (rs === WebSocket.OPEN) {
@@ -2520,6 +2552,52 @@ function showSignal(data) {
 }
 
 // ===== BRIEFING PANEL =====
+
+// ── Подбор рэндж-ТФ под инструмент ─────────────────────────────────────────
+// R задаётся в ПОИНТАХ (минимальных тиках цены), как в TradingView. Но поинт
+// у инструментов различается в тысячи раз: R500 = ~$50 на BTC (темп ≈M5) и
+// 0.05 на LIT при цене $2.2 — там бар не закроется никогда. Поэтому при
+// первом переключении на инструмент R считается от его цены.
+//
+// Ориентир 0.08% хода ≈ темп M5 на крипте (замерено на BTC: R500 = $50 =
+// 0.077%, бар в среднем за 6 минут).
+const RANGE_TARGET_PCT = 0.0008;
+
+// Последняя известная цена по инструменту. Нужна для подбора R в момент
+// переключения, когда данные графика уже очищены, а история нового
+// инструмента ещё не пришла. Заполняется из instruments (mark_price) и
+// обновляется живыми тиками.
+const lastKnownPrice = {};
+
+/**
+ * Предложить рэндж-ТФ для инструмента по его последней известной цене.
+ * @param {string} sym Полный символ ("lighter:BTC").
+ * @returns {string|null} Строка вида "R:500" либо null, если цена неизвестна.
+ */
+function suggestRangeTF(sym) {
+    const info  = instrumentPrecision[sym];
+    const price = lastKnownPrice[sym];
+    if (!info || !info.minMove || !price) return null;
+
+    const points = Math.round(price * RANGE_TARGET_PCT / info.minMove);
+    return points >= 1 ? "R:" + points : null;
+}
+
+/**
+ * Добавить опцию рэндж-ТФ в селектор, если её там ещё нет.
+ * Значения R подбираются под инструмент и не входят в фиксированный список.
+ * @param {HTMLSelectElement} select Селектор таймфреймов.
+ * @param {string} tf Значение вида "R:500".
+ * @returns {void}
+ */
+function ensureRangeOption(select, tf) {
+    if (!select || !tf) return;
+    if (Array.from(select.options).some(o => o.value === tf)) return;
+    const opt = document.createElement("option");
+    opt.value = tf;
+    opt.text  = tf.replace(":", "");   // "R:500" → "R500"
+    select.appendChild(opt);
+}
 
 // ── Лента крупных сделок ───────────────────────────────────────────────────
 // Хаб шлёт large_trade широковещательно по всем инструментам; фильтруем по
