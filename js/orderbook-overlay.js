@@ -76,6 +76,17 @@ class OrderbookOverlay {
         this.canvas.remove();
     }
 
+    // Ширина ценовой шкалы в пикселях. Гистограмма рисуется левее неё, чтобы
+    // не перекрывать подписи цен. Фолбэк — ноль: хуже наезд, чем пустой
+    // экран, если API в этой версии LWC отсутствует.
+    priceScaleWidth() {
+        try {
+            const w = this.series.priceScale().width();
+            if (w > 0) return w;
+        } catch (e) {}
+        return 0;
+    }
+
     // Нижняя граница ЦЕНОВОЙ области: гистограмма не должна залезать в паны
     // индикаторов. Та же логика, что в DrawingEngine.priceAreaBottom().
     priceAreaBottom() {
@@ -142,7 +153,9 @@ class OrderbookOverlay {
         if (!(maxSize > 0)) return;
 
         const fullW = Math.round(this.canvas.width * OrderbookOverlay.WIDTH_RATIO);
-        const rightX = this.canvas.width;   // вплотную к ценовой шкале
+        // Правый край — ЛЕВЕЕ ценовой шкалы, а не по краю канваса: иначе
+        // полосы наезжают на подписи цен и читать их невозможно.
+        const rightX = this.canvas.width - this.priceScaleWidth();
         const h = Math.max(1, OrderbookOverlay.BUCKET_PX - 1);
 
         // Тот же порог, что делит стороны: цена между лучшими bid и ask.

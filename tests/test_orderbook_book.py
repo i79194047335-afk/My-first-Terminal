@@ -159,6 +159,19 @@ class TestSnapshotSlice(unittest.TestCase):
         self.assertIsNone(book.mid())
         self.assertEqual(book.snapshot(), ([], []))
 
+    def test_default_pct_covers_visible_range(self):
+        """Умолчание среза — ±2%, не уже.
+
+        ±0.5% покрывало меньше половины видимой шкалы на реальном экране, и
+        стены жались к центру. Значение продублировано в lighter_feed.BOOK_PCT;
+        разъедься они — фид слал бы одно, а книга умела другое.
+        """
+        book = OrderBook()
+        # mid = 1000, уровень на 1.5% ниже: при ±0.5% он бы не прошёл.
+        book.apply_snapshot([_lv(985, 1)], [_lv(1001, 1)])
+        bids, _ = book.snapshot()
+        self.assertEqual([lv[0] for lv in bids], [985.0])
+
     def test_sizes_preserved(self):
         """Объёмы доезжают до среза без искажения."""
         book = OrderBook()
