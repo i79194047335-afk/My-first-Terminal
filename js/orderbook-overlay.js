@@ -163,14 +163,17 @@ class OrderbookOverlay {
         const asks = this._bucketize(this.book.asks, bottom);
         if (!bids.length && !asks.length) return;
 
-        // Масштаб — по самой толстой стене В ВИДИМОЙ ОБЛАСТИ. Стены заметны
-        // при любой ликвидности, ценой того, что толщина между моментами
-        // времени несравнима.
+        // Сторона запоминается ЗДЕСЬ, при сборке, а не выводится потом из
+        // цены. Граничная корзина накрывает и bid, и ask одновременно —
+        // определяя сторону по цене, мы рисовали их друг поверх друга, и
+        // столбцы на стыке слипались в один сплошной блок.
         const visible = [];
-        for (const b of bids.concat(asks)) {
-            const y = this.series.priceToCoordinate(b.price);
-            if (y === null || y < 0 || y > bottom) continue;
-            visible.push({ ...b, y });
+        for (const [side, list] of [["bid", bids], ["ask", asks]]) {
+            for (const b of list) {
+                const y = this.series.priceToCoordinate(b.price);
+                if (y === null || y < 0 || y > bottom) continue;
+                visible.push({ ...b, y, side });
+            }
         }
         if (!visible.length) return;
 
@@ -183,23 +186,31 @@ class OrderbookOverlay {
         // полосы наезжают на подписи цен и читать их невозможно.
         const rightX = this.canvas.width - this.priceScaleWidth();
 
-        // Тот же порог, что делит стороны: цена между лучшими bid и ask.
-        const bestBid = this.book.bids.length ? this.book.bids[0][0] : -Infinity;
-        const bestAsk = this.book.asks.length ? this.book.asks[0][0] :  Infinity;
-        const mid = (bestBid > -Infinity && bestAsk < Infinity)
-            ? (bestBid + bestAsk) / 2 : null;
+        // Спред: граница между сторонами. Корзина, попавшая на него, режется
+        // по нему же — иначе bid и ask рисовались бы на одной высоте.
+        const bestBid = this.book.bids.length ? this.book.bids[0][0] : null;
+        const bestAsk = this.book.asks.length ? this.book.asks[0][0] : null;
 
         ctx.save();
         ctx.globalAlpha = OrderbookOverlay.ALPHA;
         for (const b of visible) {
-            const isAsk = mid !== null ? b.price > mid : false;
+            const isAsk = b.side === "ask";
             const w = Math.max(1, Math.round(fullW * (b.size / maxSize)));
 
-            // Высота полосы — весь ценовой интервал корзины, минус пиксель на
-            // просвет. Столбец занимает строку между соседними подписями
-            // шкалы, а не висит тонкой чертой по центру.
-            const yHi = this.series.priceToCoordinate(b.hi);
-            const yLo = this.series.priceToCoordinate(b.lo);
+            // Ценовые границы полосы. Граничную корзину подрезаем по лучшей
+            // цене своей стороны: bid не должен заходить выше лучшего bid,
+            // ask — ниже лучшего ask. Без этого столбцы на стыке накрывают
+            // друг друга и сливаются в сплошной блок.
+            let lo = b.lo, hi = b.hi;
+            if (isAsk && bestAsk !== null) lo = Math.max(lo, bestAsk);
+            if (!isAsk && bestBid !== null) hi = Math.min(hi, bestBid);
+            if (hi <= lo) continue;   // корзина целиком по ту сторону спреда
+
+            // Высота полосы — весь её ценовой интервал, минус пиксель на
+            // просвет. Столбец занимает строку между подписями шкалы, а не
+            // висит тонкой чертой по центру.
+            const yHi = this.series.priceToCoordinate(hi);
+            const yLo = this.series.priceToCoordinate(lo);
             let top = Math.round(yHi);
             let h   = Math.max(1, Math.round(Math.abs(yLo - yHi)) - 1);
             if (!isFinite(top)) { top = Math.round(b.y); h = 1; }

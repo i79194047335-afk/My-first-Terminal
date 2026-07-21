@@ -1308,7 +1308,10 @@ function createPane(id) {
                 timeVisible: true,
                 secondsVisible: !tfSec || tfSec < 60,
                 rightBarStaysOnScroll: true,
-                rightOffset: 12,
+                // Отступ последней свечи от ценовой шкалы, в барах. 24 вместо
+                // прежних 12: под гистограмму стакана нужен свободный край,
+                // иначе стены ложатся поверх свежих свечей.
+                rightOffset: 24,
                 tickMarkFormatter: (time) => {
                     const ts = (typeof time === "object" ? time.timestamp : time) * 1000;
                     const d  = new Date(ts + TZ_OFFSET * 3600 * 1000);
