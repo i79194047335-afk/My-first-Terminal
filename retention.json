@@ -27,7 +27,12 @@
       "H4",
       "D1"
     ],
-    "lighter": []
+    "lighter": [
+      "M15",
+      "H1",
+      "H4",
+      "D1"
+    ]
   },
   "data_dir": "data",
   "health_port": 8787,

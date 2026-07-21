@@ -130,6 +130,27 @@ BACKFILL_BARS      = 2000
 CANDLES_PAGE_LIMIT = 500
 CHUNK_BARS         = 2000
 
+# Разрешения API Lighter → секунды. Эндпоинт принимает ТОЛЬКО эти строки,
+# голые числа дают 400 invalid param.
+RESOLUTION_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900,
+    "1h": 3600, "4h": 14400, "1d": 86400,
+}
+
+# Старшие ТФ грузятся У БИРЖИ НАПРЯМУЮ, как H1/H4/D1 у FXCM. Собирать их из
+# M1 нельзя: бэкфил M1 — 2000 баров, это 33 часа, и D1 из него выходит в две
+# свечи вместо года. Замер API (BTC, 500 баров за запрос): 1h → 21 день,
+# 4h → 83 дня, 1d → 499 дней.
+#
+# Имя ТФ в шине → (разрешение API, сколько баров тянуть). Числа зеркалят
+# глубину FXCM: у него D1 = 341 бар (406 дней), H4 = 429, H1 = 1705.
+DIRECT_LOAD_TF = [
+    ("M15", "15m", 1500),
+    ("H1",  "1h",  1500),
+    ("H4",  "4h",  500),
+    ("D1",  "1d",  500),
+]
+
 # Переподключение к WS: экспоненциальный backoff, как в боте.
 RECONNECT_MIN_SEC = 1
 RECONNECT_MAX_SEC = 60
@@ -210,7 +231,10 @@ def fetch_candles(symbol, market_id, resolution=BACKFILL_TF, bars=BACKFILL_BARS)
         Список свечей (time/open/high/low/close/vol_base/vol_quote),
         старые первыми, время в СЕКУНДАХ.
     """
-    step = 60  # BACKFILL_TF = 1m
+    step = RESOLUTION_SECONDS.get(resolution)
+    if step is None:
+        log.error("бэкфил %s: неизвестное разрешение %r", symbol, resolution)
+        return []
     end = int(time.time())
     collected = {}
 
@@ -272,6 +296,11 @@ def load_history(bus):
     Секундные ТФ (S5–S30) бэкфила не имеют: минимальное разрешение API — 1m.
     Они копятся живьём, это согласовано.
 
+    Зеркалит поведение фида FXCM: каждый старший ТФ грузится У БИРЖИ
+    НАПРЯМУЮ, а не собирается из M1. Собирать нельзя — бэкфил M1 даёт 33
+    часа, и D1 из него выходит в две свечи вместо года. M5 хаб по-прежнему
+    агрегирует сам: там глубины M1 хватает.
+
     Args:
         bus: BusClient.
 
@@ -280,12 +309,25 @@ def load_history(bus):
     """
     for symbol, market_id in MARKETS.items():
         bars = fetch_candles(symbol, market_id)
-        if not bars:
-            continue
-        for i in range(0, len(bars), CHUNK_BARS):
-            bus.send_threadsafe(
-                make_candles(PROVIDER, symbol, "M1", bars[i:i + CHUNK_BARS])
-            )
+        if bars:
+            for i in range(0, len(bars), CHUNK_BARS):
+                bus.send_threadsafe(
+                    make_candles(PROVIDER, symbol, "M1", bars[i:i + CHUNK_BARS])
+                )
+
+        for tf, resolution, count in DIRECT_LOAD_TF:
+            try:
+                hi = fetch_candles(symbol, market_id,
+                                   resolution=resolution, bars=count)
+            except Exception as err:
+                log.warning("бэкфил %s %s упал: %r", symbol, tf, err)
+                continue
+            if not hi:
+                continue
+            for i in range(0, len(hi), CHUNK_BARS):
+                bus.send_threadsafe(
+                    make_candles(PROVIDER, symbol, tf, hi[i:i + CHUNK_BARS])
+                )
 
 
 # ── запись сырых тиков ────────────────────────────────────────────────

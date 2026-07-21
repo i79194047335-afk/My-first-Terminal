@@ -245,14 +245,51 @@ class TestBrokerTfPerProvider(OrderbookHubTest):
         """У FXCM старшие ТФ приходят от брокера со своей сеткой."""
         self.assertEqual(self.hub.broker_tf_for("fxcm"), ("H1", "H4", "D1"))
 
-    def test_lighter_gives_nothing(self):
-        """У Lighter старшие ТФ хаб собирает из M1.
+    def test_lighter_loads_higher_tf_directly(self):
+        """У Lighter старшие ТФ грузятся у биржи, как H1/H4/D1 у FXCM.
 
-        Фид грузит только 1m. Пока broker_tf был общим списком, H1/H4/D1
-        числились «брокерскими» для ВСЕХ — их никто не поставлял и никто не
-        собирал, и на крипте в БД лежало по 3 свечи H1 вместо тысяч.
+        Собирать их из M1 нельзя: бэкфил M1 — 2000 баров, это 33 часа, и D1
+        вышел бы в две свечи вместо года. Замер API: 500 баров 1d = 499 дней.
+
+        M5 в списке НЕТ намеренно — его хаб агрегирует сам, глубины M1 хватает.
         """
-        self.assertEqual(self.hub.broker_tf_for("lighter"), ())
+        self.assertEqual(self.hub.broker_tf_for("lighter"),
+                         ("M15", "H1", "H4", "D1"))
+        self.assertNotIn("M5", self.hub.broker_tf_for("lighter"))
+
+    def test_both_providers_have_direct_tf(self):
+        """Логика зеркальна: у обоих провайдеров старшие ТФ идут от источника.
+
+        Разъедься это — на одном из них D1 снова собирался бы из куцего M1.
+        """
+        for provider in ("fxcm", "lighter"):
+            for tf in ("H1", "H4", "D1"):
+                self.assertIn(tf, self.hub.broker_tf_for(provider),
+                              "%s: %s должен грузиться напрямую" % (provider, tf))
+
+    def test_feed_and_config_agree(self):
+        """Фид грузит ровно те ТФ, что конфиг считает брокерскими.
+
+        Разъехались бы — либо хаб перезаписал бы загруженное своей сборкой
+        из M1 (и D1 снова стал бы двумя свечами), либо ТФ не пришёл бы
+        вообще, потому что его никто не поставляет и никто не собирает.
+        Ровно так и потерялась история H1 на крипте.
+        """
+        import feeds.lighter_feed as feed
+        from_feed = {tf for tf, _res, _n in feed.DIRECT_LOAD_TF}
+        from_config = set(self.hub.broker_tf_for("lighter"))
+        self.assertEqual(from_feed, from_config)
+
+    def test_feed_resolutions_are_valid(self):
+        """Разрешения в DIRECT_LOAD_TF существуют в API.
+
+        Эндпоинт принимает только 1m/5m/15m/1h/4h/1d; опечатка дала бы 400
+        и молча пустую историю на этом ТФ.
+        """
+        import feeds.lighter_feed as feed
+        for tf, resolution, _n in feed.DIRECT_LOAD_TF:
+            self.assertIn(resolution, feed.RESOLUTION_SECONDS,
+                          "%s: разрешение %r не известно API" % (tf, resolution))
 
     def test_unknown_provider_builds_everything(self):
         """Незнакомый провайдер — считаем, что готового не даёт ничего."""
