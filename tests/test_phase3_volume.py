@@ -105,6 +105,36 @@ class TestVolumeAccumulation(unittest.TestCase):
         self.assertEqual(out[0]["vol_quote"], 1000.0)
         self.assertEqual(out[0]["delta"], -1.0)
 
+    def test_aggregate_survives_null_volume_from_db(self):
+        """Свеча ИЗ БД несёт delta=None — агрегация не должна падать.
+
+        Ровно этот случай уронил прод при вливании Фазы 3. Свечи, собранные
+        в памяти, ключей объёма просто не имеют, и проверка `key in source`
+        их отсекала. Но sqlite возвращает ВСЕ колонки, и у 103 тыс. строк
+        FXCM delta/vol_base приходят как NULL → None. Ключ на месте,
+        проверка проходит, дальше 0.0 + None — и каждое сообщение шины,
+        задевавшее старший ТФ, гибло с TypeError.
+        """
+        src = [{"time": i * 60, "open": 1.0, "high": 2.0, "low": 0.5,
+                "close": 1.5, "vol_base": None, "vol_quote": None,
+                "delta": None}
+               for i in range(5)]
+        out = aggregate_higher_tf(src, 300)   # не должно падать
+        self.assertEqual(len(out), 1)
+        # Пустые счётчики не материализуются: FXCM остаётся чистым OHLC.
+        for key in ("vol_base", "vol_quote", "delta"):
+            self.assertNotIn(key, out[0])
+
+    def test_aggregate_mixes_null_and_real_volume(self):
+        """Смесь None и чисел суммируется по числам, None пропускается."""
+        src = [{"time": 0,  "open": 1.0, "high": 2.0, "low": 0.5,
+                "close": 1.5, "vol_base": None, "delta": None},
+               {"time": 60, "open": 1.0, "high": 2.0, "low": 0.5,
+                "close": 1.5, "vol_base": 3.0, "delta": 1.0}]
+        out = aggregate_higher_tf(src, 300)
+        self.assertEqual(out[0]["vol_base"], 3.0)
+        self.assertEqual(out[0]["delta"], 1.0)
+
 
 class TestBusSide(unittest.TestCase):
     """Сторона агрессора в контракте шины."""

@@ -306,8 +306,13 @@ def _add_volume(candle: dict, price: float, size: float, side) -> None:
 def _sum_volume(target: dict, source: dict) -> None:
     """Add one source candle's volume counters into an aggregate candle.
 
-    Only keys actually present in the source are touched: a provider without
+    Only keys with an actual numeric value are touched: a provider without
     volume (FXCM) must not grow zero-valued volume keys on aggregation.
+
+    The check is ``is not None``, not ``key in source``: candles read back
+    from SQLite always carry every column, and for FXCM rows delta/vol_base
+    come back as NULL → None. Testing for mere presence let None through into
+    ``0.0 + None`` and killed every bus message that aggregated a higher TF.
 
     Args:
         target: Aggregate candle being built, updated in place.
@@ -317,7 +322,7 @@ def _sum_volume(target: dict, source: dict) -> None:
         None.
     """
     for key in ("vol_base", "vol_quote", "delta"):
-        if key in source:
+        if source.get(key) is not None:
             target[key] = target.get(key, 0.0) + source[key]
 
 
