@@ -60,15 +60,29 @@ Key: `hub.py:on_bus_message()` — центральный диспетчер. Т
   брокеру. Конфиг — `retention.json` (боевая `market.db`, порт 8765, ТФ, рынки).
 - [feeds/fxcm_feed.py](feeds/fxcm_feed.py) — стример FXCM (py3.7). Сессия
   ForexConnect, тики и история → шина; сырые тики → `data/*.csv`.
+- [feeds/lighter_feed.py](feeds/lighter_feed.py) — стример Lighter (py3.10,
+  Фаза 3). WS `trade/{market_id}`, бэкфил REST `/api/v1/candles`, тики в CSV
+  с кольцом 14 дней (`tick_retention_days`). Ключи НЕ нужны — данные публичны.
+- [feeds/lighter_raw.py](feeds/lighter_raw.py) — нормализация сделки и
+  дедупликация. В `feeds/`, а НЕ в `core/`: `core` обязан парситься на py3.7.
 - [core/bus.py](core/bus.py) — внутренняя шина фид→хаб (WS 127.0.0.1:8766),
-  контракт сообщений (tick / candles / instruments).
+  контракт сообщений (tick / candles / instruments). Тик несёт `size`/`side`
+  — у FXCM они None, и свеча остаётся чистым OHLC.
 - [core/candles.py](core/candles.py) — `CandleBuilder` (нарезка тиков по ТФ,
-  учёт сетки провайдера H4/D1 через offset) + `aggregate_higher_tf`.
+  учёт сетки провайдера H4/D1 через offset) + `aggregate_higher_tf`. Объём и
+  дельта копятся только когда провайдер их даёт.
 - [core/range_bars.py](core/range_bars.py) — `RangeBarBuilder` (рэндж-бары из
   тиков, гэпы честные) + `backfill_tail` (быстрый бэкфил хвоста из архива).
   Единица — ПОИНТЫ (пипетты), как TradingView. См. «Range bars» ниже.
-- [core/db.py](core/db.py) — SQLite: `candles` (PK provider/symbol/tf/time) +
-  `instruments`, upsert / чтение / подрезка окна.
+- [core/volume_profile.py](core/volume_profile.py) — профиль объёма
+  (Фаза 3): логарифмическая сетка 0.05%, POC, область стоимости 70%.
+  Копится только из тиков, хранится вечно.
+- [core/large_trades.py](core/large_trades.py) — лента крупных сделок
+  (Фаза 3): порог = 95-й процентиль за скользящий час, гистограмма вместо
+  сортировки. Не хранится — живой поток.
+- [core/db.py](core/db.py) — SQLite: `candles` (PK provider/symbol/tf/time,
+  + `vol_base`/`vol_quote`/`delta`) + `instruments` + `volume_profile`,
+  upsert / чтение / подрезка окна.
 - [market_engine.py](market_engine.py) — `MarketEngine`: velocity, pressure,
   micro-trend, HTF trend, volatility. Использовался монолитом; в хаб НЕ
   портирован (analysis-панель отключена вместе с сигналами).
@@ -135,14 +149,17 @@ Key: `hub.py:on_bus_message()` — центральный диспетчер. Т
 
 - FXCM demo, пакет `forexconnect`. FXCM_* креды — в `.env`
   (`EnvironmentFile` фида), НЕ хардкод.
-- Symbols: AUD/USD, EUR/USD, USD/CAD, USD/JPY.
+- Symbols FXCM: AUD/USD, EUR/USD, USD/CAD, USD/JPY.
+- Symbols Lighter (Фаза 3, крипта 24/7): BTC, ETH, HYPE, SOL, WTI, LIT, ZEC,
+  XAU, BNB, SPCX, MU, XAG. Фронт шлёт их с префиксом (`lighter:BTC`) — у
+  Lighter ЕСТЬ свои USDJPY/USDCAD/AUDUSD, по голому тикеру не различить.
 - Timeframes: S5, S10, S15, S30, M1, M3, M5, M15, H1, H4, D1 (`tf_seconds` в
   `retention.json`). H1/H4/D1 грузятся у брокера напрямую (несут его сетку).
 
 ## How to run
 
-Три systemd-сервиса (autostart on boot, `Restart=always`). Все смотрят в это
-дерево (`/root/projects/terminal`) с 2026-07-18.
+**Четыре** systemd-сервиса (autostart on boot, `Restart=always`). Все смотрят
+в это дерево (`/root/projects/terminal`) с 2026-07-18.
 
 ```bash
 # Хаб (шина → свечи → SQLite → браузер WS :8765) — НЕ рестартить без разрешения
@@ -151,22 +168,26 @@ systemctl {start|stop|restart|status} chart-hub
 # Фид FXCM (тики → шина :8766) — НЕ рестартить без разрешения
 systemctl {start|stop|restart|status} chart-feed
 
+# Фид Lighter (сделки крипты → шина :8766) — с 2026-07-21, py3.10, ключи не нужны
+systemctl {start|stop|restart|status} chart-feed-lighter
+
 # Фронт (HTTP :8082, отдаёт index.html)
 systemctl {start|stop|restart|status} chart-frontend
 ```
 
-Юниты: `/etc/systemd/system/chart-{hub,feed,frontend}.service`. Копии
-хаб/фид — в `deploy/`. Порядок: хаб первым (фид зависит от шины хаба).
+Юниты: `/etc/systemd/system/chart-{hub,feed,feed-lighter,frontend}.service`.
+Копии — в `deploy/`. Порядок: хаб первым (фиды зависят от его шины).
 
 URL: `http://<server-ip>:8082/index.html`. Порт **8080** занят `code-server`,
 не фронтом; фронт — **8082**.
 
 ## Rules
 
-- **NEVER restart or kill `chart-hub` / `chart-feed` without explicit
-  instruction.** Рестарт хаба безопасен для истории (SQLite переживает), но
-  рестарт фида в рабочие часы форекса теряет тики за паузу. Рестарт вне сессии
-  (выходные) — без потерь.
+- **NEVER restart or kill `chart-hub` / `chart-feed` / `chart-feed-lighter`
+  without explicit instruction.** Рестарт хаба безопасен для истории (SQLite
+  переживает), но рестарт фида в рабочие часы форекса теряет тики за паузу.
+  Рестарт вне сессии (выходные) — без потерь. Крипта торгуется 24/7, поэтому
+  у `chart-feed-lighter` «безопасного окна» нет вообще.
 - Правки живых файлов — согласовывать с владельцем.
 - **Конец сессии — `git push` всех затронутых веток, включая master.**
   Репозиторий — единственный канал синхронизации с ассистентом в вебе:

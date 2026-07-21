@@ -142,12 +142,20 @@ def load_ticks():
     return ticks
 
 
-def load_broker_bars(tf, limit=50):
+def load_broker_bars(tf, limit=50, provider="fxcm"):
     """Load real broker bars from market.db.
 
+    Фильтр по провайдеру ОБЯЗАТЕЛЕН, и это не оптимизация. Сетки у
+    провайдеров разные: FXCM отдаёт H4 по 01/05/09 UTC (offset=3600), а
+    Lighter — по UTC-полуночи (offset=0), потому что у биржи 24/7 нет
+    торгового дня со сдвигом. Обе сетки верны каждая для своего рынка.
+    Выборка без provider смешивала их в кучу, detect_offsets видел мешанину,
+    и тест падал на здоровых данных (после вливания Фазы 3).
+
     Args:
-        tf:    Timeframe name.
-        limit: How many of the most recent bars to fetch.
+        tf:       Timeframe name.
+        limit:    How many of the most recent bars to fetch.
+        provider: Провайдер, чью сетку проверяем.
 
     Returns:
         List of candle dicts (time only matters here), oldest first; [] if
@@ -158,8 +166,9 @@ def load_broker_bars(tf, limit=50):
     conn = sqlite3.connect("file:%s?mode=ro" % DB_PATH, uri=True)
     try:
         rows = conn.execute(
-            "SELECT time FROM candles WHERE tf=? ORDER BY time DESC LIMIT ?",
-            (tf, limit),
+            "SELECT time FROM candles WHERE tf=? AND provider=? "
+            "ORDER BY time DESC LIMIT ?",
+            (tf, provider, limit),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -235,6 +244,21 @@ class TestDetectOffsets(unittest.TestCase):
         if bars.get("D1"):
             self.assertIn(offsets["D1"], (75600, 79200),
                           "D1 у FXCM: 21:00 UTC летом, 22:00 зимой")
+
+    def test_lighter_grid_is_utc_aligned(self):
+        """У Lighter своя сетка — по UTC, и это НЕ баг.
+
+        Смысл теста — закрепить, что сетки провайдеров различаются законно:
+        у биржи 24/7 нет торгового дня со сдвигом, поэтому H4 идёт по
+        UTC-полуночи (offset=0), а не по 01/05/09 как у FXCM. Пока это не
+        записано, любая будущая проверка «сетка должна быть 3600» снова
+        сломается о крипту.
+        """
+        bars = load_broker_bars("H4", limit=50, provider="lighter")
+        if len(bars) < 2:
+            self.skipTest("нет баров Lighter H4")
+        offsets = CandleBuilder.detect_offsets({"H4": bars}, TF_SECONDS)
+        self.assertEqual(offsets["H4"], 0, "Lighter H4 выровнен по UTC")
 
     def test_every_real_bar_sits_on_detected_grid(self):
         """Все реальные бары брокера лежат на одной сетке — без второй сетки."""
