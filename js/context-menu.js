@@ -77,6 +77,9 @@ function showCandleContextMenu(x, y) {
     // Состояние объёма: строка гаснет на инструментах без биржевого объёма.
     if (typeof syncVolumeButtons === "function") syncVolumeButtons();
 
+    // То же для стакана: он есть только у бирж, у форекса строка неактивна.
+    if (typeof syncOrderbookButtons === "function") syncOrderbookButtons();
+
 }
 // ============================================================================
 // Line Context Menu

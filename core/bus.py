@@ -130,6 +130,37 @@ def make_instruments(provider, data):
     }
 
 
+def make_orderbook(provider, symbol, ts, bids, asks):
+    """Собрать сообщение 'orderbook' (срез стакана лимитных заявок).
+
+    Стакан принципиально отличается от тика и свечи: он НЕ хранится и не
+    накапливается — это состояние «сейчас», которое устаревает за секунду.
+    Хаб его не пишет в БД, а раздаёт подписанным браузерам и забывает.
+
+    Уровни идут массивами пар [цена, объём], а не списком dict'ов: на
+    ~700 уровней разница в размере JSON почти двукратная, а шлём мы это
+    раз в секунду на каждую смотрящую вкладку.
+
+    Args:
+        provider: Источник (только биржи; у форекса стакана нет).
+        symbol:   Инструмент.
+        ts:       Время среза, unix-секунды.
+        bids:     Заявки на покупку: [[price, size], …], цена по убыванию.
+        asks:     Заявки на продажу: [[price, size], …], цена по возрастанию.
+
+    Returns:
+        Dict сообщения шины.
+    """
+    return {
+        "type":     "orderbook",
+        "provider": provider,
+        "symbol":   symbol,
+        "ts":       ts,
+        "bids":     bids,
+        "asks":     asks,
+    }
+
+
 def _is_number(value):
     """Число ли это (bool — не число).
 
@@ -161,8 +192,9 @@ def validate(msg):
         raise BusError("сообщение должно быть dict, получено %s" % type(msg).__name__)
 
     mtype = msg.get("type")
-    if mtype not in ("tick", "candles", "instruments"):
-        raise BusError("неизвестный type: %r (ожидается tick/candles/instruments)"
+    if mtype not in ("tick", "candles", "instruments", "orderbook"):
+        raise BusError("неизвестный type: %r "
+                       "(ожидается tick/candles/instruments/orderbook)"
                        % (mtype,))
 
     provider = msg.get("provider")
@@ -234,6 +266,56 @@ def validate(msg):
                     "внутри шины время только в секундах"
                     % (symbol, tf, i, bar["time"]))
 
+    elif mtype == "orderbook":
+        symbol = msg.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise BusError("orderbook: пустой symbol: %r" % (symbol,))
+
+        ts = msg.get("ts")
+        if not _is_number(ts):
+            raise BusError("orderbook[%s]: ts не число: %r" % (symbol, ts))
+        if ts > 1e11:
+            raise BusError(
+                "orderbook[%s]: ts=%r похож на МИЛЛИСЕКУНДЫ; конвертируй на "
+                "границе фида — внутри шины время только в секундах"
+                % (symbol, ts))
+
+        for side_name in ("bids", "asks"):
+            levels = msg.get(side_name)
+            if not isinstance(levels, list):
+                raise BusError("orderbook[%s]: %s должен быть списком, получено %s"
+                               % (symbol, side_name, type(levels).__name__))
+            for i, level in enumerate(levels):
+                if not isinstance(level, (list, tuple)) or len(level) != 2:
+                    raise BusError(
+                        "orderbook[%s]: %s[%d] должен быть парой [цена, объём], "
+                        "получено %r" % (symbol, side_name, i, level))
+                if not _is_number(level[0]) or not _is_number(level[1]):
+                    raise BusError("orderbook[%s]: %s[%d] нечисловая пара: %r"
+                                   % (symbol, side_name, i, level))
+                if level[0] <= 0:
+                    raise BusError("orderbook[%s]: %s[%d] цена должна быть > 0: %r"
+                                   % (symbol, side_name, i, level[0]))
+                if level[1] <= 0:
+                    # Нулевой размер у Lighter означает СНЯТИЕ уровня. Такие
+                    # записи применяются к книге в фиде и наружу выходить не
+                    # должны: в срезе они выглядели бы как пустые полосы.
+                    raise BusError(
+                        "orderbook[%s]: %s[%d] объём должен быть > 0 (нулевой "
+                        "уровень = снятие, применяется в фиде): %r"
+                        % (symbol, side_name, i, level[1]))
+
+        # Стороны не должны пересекаться: лучший bid ниже лучшего ask, иначе
+        # заявки исполнились бы друг о друга. Пересечение = перепутаны местами.
+        if msg["bids"] and msg["asks"]:
+            best_bid = msg["bids"][0][0]
+            best_ask = msg["asks"][0][0]
+            if best_bid >= best_ask:
+                raise BusError(
+                    "orderbook[%s]: лучший bid %r >= лучшего ask %r — стороны "
+                    "перепутаны или книга не отсортирована"
+                    % (symbol, best_bid, best_ask))
+
     else:
         data = msg.get("data")
         if not isinstance(data, list):
@@ -278,6 +360,33 @@ class BusServer:
         self._received   = 0
         self._dropped    = 0
         self._clients    = 0
+        # Сокет каждого подключённого фида по имени провайдера — для КОМАНД
+        # хаб→фид (подписка на стакан). Основной поток остаётся односторонним:
+        # команды это редкие управляющие сообщения, а не данные.
+        self._feeds      = {}
+
+    async def command(self, provider, payload):
+        """Послать фиду управляющую команду (например, подписку на стакан).
+
+        Тихо ничего не делает, если фид этого провайдера не подключён:
+        стакан — не критичные данные, а фид может быть в перезапуске.
+
+        Args:
+            provider: Имя провайдера ("lighter").
+            payload:  Dict команды, уходит как есть.
+
+        Returns:
+            True, если команда отправлена; False, если фида нет.
+        """
+        ws = self._feeds.get(provider)
+        if ws is None:
+            return False
+        try:
+            await ws.send(json.dumps(payload))
+            return True
+        except Exception as err:
+            log.warning("команда фиду %s не ушла: %s", provider, err)
+            return False
 
     async def _handler(self, ws):
         """Обслужить одно подключение фида.
@@ -289,6 +398,7 @@ class BusServer:
             None.
         """
         self._clients += 1
+        provider = None
         try:
             async for raw in ws:
                 try:
@@ -298,6 +408,13 @@ class BusServer:
                     self._dropped += 1
                     log.warning("отброшено: %s", err)
                     continue
+
+                # Провайдер узнаётся из первого же валидного сообщения:
+                # отдельного рукопожатия в контракте нет и заводить его ради
+                # команд не нужно.
+                if provider is None:
+                    provider = msg["provider"]
+                    self._feeds[provider] = ws
 
                 self._received += 1
                 try:
@@ -310,6 +427,12 @@ class BusServer:
             log.info("фид отключился")
         finally:
             self._clients -= 1
+            # Снять из реестра ТОЛЬКО свой сокет: при переподключении фида
+            # новый _handler уже мог записать себя, и слепой pop убил бы
+            # живую запись, оставив хаб без канала команд до следующего
+            # обрыва.
+            if provider is not None and self._feeds.get(provider) is ws:
+                del self._feeds[provider]
 
     async def start(self):
         """Забиндить порт и вернуть управление (сервер уже принимает фиды).
@@ -387,13 +510,16 @@ class BusClient:
     лучше потерять старые тики, чем съесть память.
     """
 
-    def __init__(self, provider, url=BUS_URL, max_queue=10000):
+    def __init__(self, provider, url=BUS_URL, max_queue=10000, on_command=None):
         """Создать клиента шины.
 
         Args:
-            provider:  Имя фида ("fxcm", "lighter").
-            url:       Адрес хаба.
-            max_queue: Потолок очереди на время обрыва связи.
+            provider:   Имя фида ("fxcm", "lighter").
+            url:        Адрес хаба.
+            max_queue:  Потолок очереди на время обрыва связи.
+            on_command: callable(dict) — обработчик КОМАНД хаба (подписка на
+                        стакан). Может быть корутиной. None (по умолчанию)
+                        оставляет соединение односторонним, как у фида FXCM.
 
         Returns:
             None.
@@ -421,6 +547,36 @@ class BusClient:
         self._dropped    = 0
         self._reconnects = 0
         self._connected  = False
+        self._on_command = on_command
+
+    async def _listen(self, ws):
+        """Читать команды хаба и отдавать их обработчику фида.
+
+        Обратный канал нужен для подписок, которыми управляет хаб: на стакан
+        подписываются только когда его кто-то смотрит, и знает об этом хаб,
+        а ходит к бирже фид. Поток данных при этом остаётся односторонним.
+
+        Битая команда НЕ рвёт соединение: потерять из-за неё поток тиков было
+        бы несоразмерно.
+
+        Args:
+            ws: Открытое WebSocket-соединение.
+
+        Returns:
+            None. Выходит через ConnectionClosed при обрыве.
+        """
+        async for raw in ws:
+            try:
+                cmd = json.loads(raw)
+            except ValueError as err:
+                log.warning("[%s] не-JSON команда: %s", self._provider, err)
+                continue
+            try:
+                result = self._on_command(cmd)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as err:
+                log.error("[%s] обработчик команды упал: %r", self._provider, err)
 
     # -- отправка ------------------------------------------------------
 
@@ -498,7 +654,26 @@ class BusClient:
                     self._connected = True
                     backoff = 1
                     log.info("[%s] подключён к %s", self._provider, self._url)
-                    await self._pump(ws)
+                    if self._on_command is None:
+                        await self._pump(ws)
+                    else:
+                        # Отправка и приём команд — параллельно: _pump вечный,
+                        # и последовательно читать команды было бы негде.
+                        # Падение любой из задач валит обе, дальше обычное
+                        # переподключение с backoff.
+                        pump = asyncio.ensure_future(self._pump(ws))
+                        recv = asyncio.ensure_future(self._listen(ws))
+                        try:
+                            done, pending = await asyncio.wait(
+                                [pump, recv],
+                                return_when=asyncio.FIRST_EXCEPTION)
+                            for task in pending:
+                                task.cancel()
+                            for task in done:
+                                task.result()   # пробросить исключение наружу
+                        finally:
+                            pump.cancel()
+                            recv.cancel()
             except _NET_ERRORS as err:
                 log.warning("[%s] обрыв (%s), переподключение через %d с",
                             self._provider, type(err).__name__, backoff)

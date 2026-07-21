@@ -131,6 +131,11 @@ class Hub:
         self._profile_dirty = set()
         self._profile_flush_ts = 0.0
 
+        # Стакан: что мы В ПОСЛЕДНИЙ РАЗ просили у каждого фида. Нужно, чтобы
+        # не слать команду на каждое действие клиента — только при реальном
+        # изменении набора. Сам стакан НЕ хранится: хаб его ретранслирует.
+        self._orderbook_sent = {}
+
         # Лента крупных сделок: (provider, symbol) -> LargeTradeFilter.
         # НЕ хранится: это живой поток, интересный в момент события. Порог —
         # 95-й процентиль за скользящий час, свой у каждого инструмента.
@@ -304,8 +309,46 @@ class Hub:
                 self._handle_candles(msg)
             elif msg["type"] == "instruments":
                 self._handle_instruments(msg)
+            elif msg["type"] == "orderbook":
+                self._handle_orderbook(msg)
         except Exception as err:
             log.error("ошибка на сообщении шины: %r", err)
+
+    def _handle_orderbook(self, msg):
+        """Раздать срез стакана подписанным браузерам.
+
+        Стакан НЕ хранится и не пишется в БД: это состояние «сейчас», которое
+        устаревает за секунду. Хаб здесь чистый ретранслятор — держать
+        последний срез незачем, следующий придёт через секунду.
+
+        Args:
+            msg: Сообщение шины типа orderbook.
+
+        Returns:
+            None.
+        """
+        symbol = msg["symbol"]
+        # Кэш по ИМЕНИ КЛИЕНТА, а не один на всех: вкладки зовут инструмент
+        # по-разному ("lighter:BTC" / "BTC"), и общий payload отдал бы части
+        # из них чужое имя — фронт сверяет symbol с currentSymbol и молча
+        # отбросил бы срез (тот же класс бага, что убивал алерты).
+        by_wire = {}
+        for ws, info in list(self._clients.items()):
+            if not info.get("orderbook") or info.get("symbol") != symbol:
+                continue
+            wire = info.get("wire") or symbol
+            payload = by_wire.get(wire)
+            if payload is None:
+                # Сериализуем ~700 уровней только если есть кому слать.
+                payload = json.dumps({
+                    "type":   "orderbook",
+                    "symbol": wire,
+                    "ts":     msg["ts"],
+                    "bids":   msg["bids"],
+                    "asks":   msg["asks"],
+                })
+                by_wire[wire] = payload
+            self._send(ws, payload)
 
     def _handle_candles(self, msg):
         """Влить историческую пачку баров от провайдера.
@@ -477,6 +520,15 @@ class Hub:
         provider = msg["provider"]
         data     = msg["data"]
         self._instruments[provider] = data
+
+        # Фид (пере)подключился — его подписки на стаканы сброшены вместе с
+        # соединением. Забываем, что ему посылали, и просим заново то, что
+        # смотрят сейчас. Без этого после перезапуска ЛЮБОЙ из сторон набор
+        # у хаба и фида разъезжается молча: либо стакан не приходит, либо
+        # фид держит подписку, которую никто не смотрит.
+        self._orderbook_sent.pop(provider, None)
+        if self._loop is not None:
+            asyncio.ensure_future(self._sync_orderbook_subs())
 
         for item in data:
             upsert_instrument(
@@ -1152,10 +1204,71 @@ class Hub:
 
                 elif mtype == "remove_alert":
                     self._on_remove_alert(data)
+
+                elif mtype == "orderbook":
+                    await self._on_orderbook_toggle(ws, data)
         except websockets.ConnectionClosed:
             pass
         finally:
             self._clients.pop(ws, None)
+            # Клиент ушёл — возможно, он был последним зрителем стакана.
+            await self._sync_orderbook_subs()
+
+    async def _on_orderbook_toggle(self, ws, data):
+        """Включить или выключить стакан для клиента.
+
+        Args:
+            ws:   Соединение клиента.
+            data: Сообщение {"type": "orderbook", "enabled": bool}.
+
+        Returns:
+            None.
+        """
+        info = self._clients.get(ws)
+        if info is None:
+            return
+        info["orderbook"] = bool(data.get("enabled"))
+        await self._sync_orderbook_subs()
+
+    async def _sync_orderbook_subs(self):
+        """Сообщить фидам, чьи стаканы сейчас кто-то смотрит.
+
+        Считается по ВСЕМ клиентам заново, а не инкрементально: набор
+        маленький (по числу вкладок), а инкрементальный учёт разъезжается на
+        каждом пропущенном событии — закрытая вкладка, смена символа,
+        выключенный тумблер. Расхождение здесь стоит 1.1 ГБ/сутки на
+        забытую подписку.
+
+        Returns:
+            None.
+        """
+        wanted = {}
+        for info in self._clients.values():
+            if not info.get("orderbook"):
+                continue
+            provider, symbol = info.get("provider"), info.get("symbol")
+            if provider and symbol:
+                wanted.setdefault(provider, set()).add(symbol)
+
+        bus = getattr(self, "_bus", None)
+        if bus is None:
+            return
+
+        # Рассматриваем провайдеров с текущими зрителями и тех, кому уже
+        # что-то посылали. Провайдер без зрителей и без истории команд
+        # пропускается сам собой — фид и так ни на что не подписан.
+        for provider in set(wanted) | set(self._orderbook_sent):
+            symbols = sorted(wanted.get(provider, ()))
+            # `is None` вместо `== symbols` по умолчанию: провайдер, которому
+            # мы никогда не слали команду, обязан её получить даже с пустым
+            # набором, если он попал в рассмотрение. Пустой набор без истории
+            # означает «уже отписаны» и сюда просто не доходит.
+            if self._orderbook_sent.get(provider) == symbols:
+                continue
+            self._orderbook_sent[provider] = symbols
+            await bus.command(provider, {"type": "orderbook_sub",
+                                         "symbols": symbols})
+            log.info("стакан: %s → %s", provider, symbols or "никого")
 
     async def _on_set_tf(self, ws, data):
         """Отдать историю и живую свечу по запросу фронта.
@@ -1192,9 +1305,15 @@ class Hub:
         # wire — как символ зовёт ФРОНТ (с префиксом или без). Живые
         # обновления обязаны уходить под тем же именем, иначе браузер не
         # сопоставит их со своим currentSymbol и график замрёт.
+        # Флаг стакана ПЕРЕНОСИТСЯ: запись пересоздаётся на каждом set_tf, и
+        # без переноса переключение символа или ТФ молча гасило бы индикатор.
+        prev = self._clients.get(ws) or {}
         self._clients[ws] = {"provider": provider, "symbol": symbol,
                              "wire": requested,
-                             "tf": tf, "requestId": request_id}
+                             "tf": tf, "requestId": request_id,
+                             "orderbook": prev.get("orderbook", False)}
+        # Символ сменился — подписка на стакан должна переехать за ним.
+        await self._sync_orderbook_subs()
 
         key     = (provider, symbol)
         history = (self._history.get(key) or {}).get(tf, [])
@@ -1612,6 +1731,9 @@ async def main():
     threading.Thread(target=hub.briefing_watcher, daemon=True).start()
 
     bus = BusServer(hub.on_bus_message, config["bus_host"], config["bus_port"])
+    # Хабу нужен канал КОМАНД фиду: подписка на стакан заводится только когда
+    # его кто-то смотрит, и знает об этом хаб.
+    hub._bus = bus
     await bus.start()
 
     await websockets.serve(hub.ws_handler, "0.0.0.0", config["ws_port"])
