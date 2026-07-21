@@ -145,6 +145,11 @@ class Hub:
         self._profile_dirty = set()
         self._profile_flush_ts = 0.0
 
+        # Сводка по инструментам (mark/index, объём, OI, фандинг). Держим
+        # последнюю: новый клиент должен получить карточку сразу, а не ждать
+        # следующего обновления. В БД не пишется — данные живут секунды.
+        self._ticker = {}
+
         # Стакан: что мы В ПОСЛЕДНИЙ РАЗ просили у каждого фида. Нужно, чтобы
         # не слать команду на каждое действие клиента — только при реальном
         # изменении набора. Сам стакан НЕ хранится: хаб его ретранслирует.
@@ -341,8 +346,32 @@ class Hub:
                 self._handle_instruments(msg)
             elif msg["type"] == "orderbook":
                 self._handle_orderbook(msg)
+            elif msg["type"] == "ticker":
+                self._handle_ticker(msg)
         except Exception as err:
             log.error("ошибка на сообщении шины: %r", err)
+
+    def _handle_ticker(self, msg):
+        """Запомнить сводку по инструментам и разослать браузерам.
+
+        В отличие от стакана, ПОСЛЕДНЕЕ значение держим в памяти: новый
+        клиент должен увидеть карточку сразу, а не ждать до пяти секунд
+        следующего обновления. В БД по-прежнему ничего не пишем — данные
+        живут секунды и восстанавливаются одним запросом к бирже.
+
+        Args:
+            msg: Сообщение шины типа ticker.
+
+        Returns:
+            None.
+        """
+        provider = msg["provider"]
+        self._ticker[provider] = msg["data"]
+        self._broadcast(json.dumps({
+            "type":     "ticker",
+            "provider": provider,
+            "data":     msg["data"],
+        }))
 
     def _handle_orderbook(self, msg):
         """Раздать срез стакана подписанным браузерам.
@@ -1214,6 +1243,13 @@ class Hub:
                 cached = self._briefing
             if cached is not None:
                 await ws.send(json.dumps({"type": "briefing", "data": cached}))
+
+            # Сводка по инструментам — тоже сразу: иначе карточка была бы
+            # пустой до следующего обновления (до пяти секунд).
+            for provider, data in self._ticker.items():
+                await ws.send(json.dumps({"type": "ticker",
+                                          "provider": provider,
+                                          "data": data}))
 
             async for raw in ws:
                 data = json.loads(raw)

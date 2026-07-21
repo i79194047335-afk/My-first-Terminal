@@ -48,7 +48,7 @@ import websockets
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.bus import BusClient, make_candles, make_instruments, \
-    make_orderbook, make_tick
+    make_orderbook, make_ticker, make_tick
 from core.logfmt import setup as _log_setup
 from feeds.lighter_raw import Deduper, normalize_trade
 from feeds.orderbook import OrderBook
@@ -711,6 +711,98 @@ async def ws_loop(bus, tick_queue, books, wanted):
         delay = min(delay * 2, RECONNECT_MAX_SEC)
 
 
+def fetch_ticker():
+    """Собрать сводку по рынкам белого списка: mark/index, объём, OI, фандинг.
+
+    Два запроса на ВСЕ инструменты сразу, а не по одному на каждый:
+    orderBookDetails отдаёт все 226 рынков одним ответом, funding-rates —
+    ставки всех бирж по всем рынкам.
+
+    Открытый интерес приходит в БАЗОВОЙ валюте (2288 BTC), поэтому здесь же
+    переводится в доллары по mark price — в карточке нужен именно он.
+    Числа у Lighter местами приходят строками, приведение обязательно.
+
+    Returns:
+        Dict symbol → поля сводки. Пустой dict, если запрос не удался:
+        карточка инструмента не настолько важна, чтобы ронять фид.
+    """
+    def _num(value, default=0.0):
+        """Привести значение к float, не падая на строках и None."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        details = (_rest_get("/api/v1/orderBookDetails")
+                   .get("order_book_details") or [])
+    except Exception as err:
+        log.warning("сводка: orderBookDetails упал (%r)", err)
+        return {}
+
+    # Ставка фандинга САМОЙ Lighter: в ответе лежат ещё binance/bybit/
+    # hyperliquid по тем же рынкам, и перепутать их — значит показать
+    # владельцу чужую цифру.
+    funding = {}
+    try:
+        for row in (_rest_get("/api/v1/funding-rates")
+                    .get("funding_rates") or []):
+            if row.get("exchange") == PROVIDER:
+                funding[row.get("symbol")] = _num(row.get("rate"))
+    except Exception as err:
+        log.warning("сводка: funding-rates упал (%r)", err)
+
+    out = {}
+    for d in details:
+        symbol = d.get("symbol")
+        if symbol not in MARKETS:
+            continue
+        mark = _num(d.get("mark_price"))
+        oi_base = _num(d.get("open_interest"))
+        out[symbol] = {
+            "mark":          mark,
+            "index":         _num(d.get("index_price")),
+            "last":          _num(d.get("last_trade_price")),
+            "change_pct":    _num(d.get("daily_price_change")),
+            "high":          _num(d.get("daily_price_high")),
+            "low":           _num(d.get("daily_price_low")),
+            "vol_quote_24h": _num(d.get("daily_quote_token_volume")),
+            "vol_base_24h":  _num(d.get("daily_base_token_volume")),
+            "trades_24h":    int(_num(d.get("daily_trades_count"))),
+            "oi_base":       oi_base,
+            "oi_quote":      oi_base * mark,
+            "funding":       funding.get(symbol),
+        }
+    return out
+
+
+async def _ticker_loop(bus, every=5):
+    """Раз в N секунд слать хабу сводку по инструментам.
+
+    5 секунд достаточно: mark price и открытый интерес меняются заметно
+    медленнее, чем цена, а запрос идёт к публичному API и бьёт по всем
+    рынкам сразу.
+
+    Args:
+        bus:   BusClient.
+        every: Период, секунды.
+
+    Returns:
+        None (бесконечный цикл).
+    """
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            # Блокирующий REST — в отдельный поток, иначе на время запроса
+            # встанет весь event loop вместе с потоком тиков.
+            data = await loop.run_in_executor(None, fetch_ticker)
+            if data:
+                bus.send_threadsafe(make_ticker(PROVIDER, data))
+        except Exception as err:
+            log.warning("сводка: цикл упал (%r)", err)
+        await asyncio.sleep(every)
+
+
 async def _stats_loop(bus, every=60):
     """Печатать статистику шины раз в минуту.
 
@@ -798,6 +890,7 @@ async def main():
     asyncio.ensure_future(_stats_loop(bus))
     asyncio.ensure_future(ws_loop(bus, tick_queue, books, wanted))
     asyncio.ensure_future(_book_publisher(bus, books))
+    asyncio.ensure_future(_ticker_loop(bus))
     await bus.run()   # вечный цикл: коннект к хабу + отправка очереди
 
 

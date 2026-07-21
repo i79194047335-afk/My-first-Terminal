@@ -161,6 +161,27 @@ def make_orderbook(provider, symbol, ts, bids, asks):
     }
 
 
+def make_ticker(provider, data):
+    """Собрать сообщение 'ticker' (сводка по инструментам).
+
+    Mark/index price, суточные объём и изменение, открытый интерес, ставка
+    фандинга — то, что рисуется в карточке инструмента. Как и стакан, НЕ
+    хранится: это состояние «сейчас», обновляемое раз в несколько секунд.
+
+    Args:
+        provider: Источник (только биржи; у форекса этих данных нет).
+        data:     Dict symbol → dict полей сводки.
+
+    Returns:
+        Dict сообщения шины.
+    """
+    return {
+        "type":     "ticker",
+        "provider": provider,
+        "data":     data,
+    }
+
+
 def _is_number(value):
     """Число ли это (bool — не число).
 
@@ -192,9 +213,9 @@ def validate(msg):
         raise BusError("сообщение должно быть dict, получено %s" % type(msg).__name__)
 
     mtype = msg.get("type")
-    if mtype not in ("tick", "candles", "instruments", "orderbook"):
+    if mtype not in ("tick", "candles", "instruments", "orderbook", "ticker"):
         raise BusError("неизвестный type: %r "
-                       "(ожидается tick/candles/instruments/orderbook)"
+                       "(ожидается tick/candles/instruments/orderbook/ticker)"
                        % (mtype,))
 
     provider = msg.get("provider")
@@ -315,6 +336,18 @@ def validate(msg):
                     "orderbook[%s]: лучший bid %r >= лучшего ask %r — стороны "
                     "перепутаны или книга не отсортирована"
                     % (symbol, best_bid, best_ask))
+
+    elif mtype == "ticker":
+        data = msg.get("data")
+        if not isinstance(data, dict):
+            raise BusError("ticker: data должен быть dict symbol→поля, "
+                           "получено %s" % type(data).__name__)
+        for sym, fields in data.items():
+            if not isinstance(sym, str) or not sym.strip():
+                raise BusError("ticker: пустой symbol в ключе: %r" % (sym,))
+            if not isinstance(fields, dict):
+                raise BusError("ticker[%s]: поля должны быть dict, получено %s"
+                               % (sym, type(fields).__name__))
 
     else:
         data = msg.get("data")

@@ -238,6 +238,27 @@
         padding: 14px 16px; display: none;
     }
 
+    /* Карточка инструмента — компактная плашка сверху справа, а не панель
+       во весь график: данных мало, а перекрывать цену ради шести чисел
+       незачем. */
+    #infoPanel {
+        position: absolute; right: 8px; top: 8px; width: 300px;
+        background: var(--panel); border: 1px solid var(--btn-border);
+        border-radius: 8px; color: var(--text); font-size: 12px;
+        z-index: 2002; box-sizing: border-box; padding: 10px 12px;
+        display: none; box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    }
+    #infoPanel .ip-title { font-weight: 600; font-size: 13px; margin-bottom: 8px;
+        display: flex; justify-content: space-between; align-items: baseline; }
+    #infoPanel .ip-row { display: flex; justify-content: space-between;
+        padding: 3px 0; border-bottom: 1px solid var(--btn-border); }
+    #infoPanel .ip-row:last-child { border-bottom: 0; }
+    #infoPanel .ip-k { opacity: 0.7; }
+    #infoPanel .ip-v { font-variant-numeric: tabular-nums; }
+    #infoPanel .ip-up { color: #26a69a; }
+    #infoPanel .ip-dn { color: #ef5350; }
+    #infoPanel .ip-none { opacity: 0.6; padding: 6px 0; }
+
     /* Лента крупных сделок. Узкая панель справа, а не поверх графика:
        смотреть её надо ОДНОВРЕМЕННО с ценой, иначе смысла нет. */
     #tapePanel {
@@ -600,11 +621,16 @@
             <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
             <button id="signalLogBtn" class="tb-txt" onclick="toggleSignalPanel()" data-tip="Сигналы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
             <button id="tapeBtn" class="tb-ic" onclick="toggleTape()" data-tip="Лента крупных сделок"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
+            <button id="infoBtn" class="tb-ic" onclick="toggleInfo()" data-tip="Карточка инструмента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
         </div>
         <div class="chart-wrapper" id="wrapper2">
             <div id="signalPanel"></div>
             <div id="briefPanel" style="display:none;"><div id="briefContent"></div></div>
+            <!-- Карточка инструмента: mark/index, суточные объём и изменение,
+                 открытый интерес, фандинг. Только у биржевых инструментов —
+                 у FXCM этих данных нет вовсе. -->
+            <div id="infoPanel"></div>
             <!-- Лента крупных сделок: только для инструментов с биржевым
                  объёмом, порог — 95-й процентиль за скользящий час. -->
             <div id="tapePanel">
@@ -1013,7 +1039,7 @@ function isDrawingActive() {
 // (селектор пар жил на захардкоженной разметке) и срез стакана.
 const BROADCAST_TYPES = new Set([
     "alert", "alert_created", "analysis", "signal", "briefing",
-    "signals_history", "instruments", "large_trade", "orderbook",
+    "signals_history", "instruments", "large_trade", "orderbook", "ticker",
 ]);
 
 function handleMessage(id, state, msg) {
@@ -1138,6 +1164,13 @@ function handleMessage(id, state, msg) {
     if (msg.type === "analysis") updateMarketEngine(msg);
     if (msg.type === "signal")   showSignal(msg);
     if (msg.type === "briefing") { lastBriefingData = msg.data; if (briefVisible) renderBriefing(); }
+
+    // Сводка по инструментам. Приходит раз в 5 секунд по ВСЕМ рынкам
+    // провайдера сразу — храним целиком, карточка берёт из неё текущий.
+    if (msg.type === "ticker" && id === 1) {
+        tickerData[msg.provider] = msg.data;
+        if (infoVisible) renderInfo();
+    }
     if (msg.type === "signals_history") applySignalsHistory(msg.data);
 
     if (msg.type === "instruments") {
@@ -2851,6 +2884,114 @@ function resetTape() {
     }
     renderTapeHeader();
 }
+
+// ── Карточка инструмента ──
+let tickerData  = {};      // provider → { symbol → поля сводки }
+let infoVisible = false;
+
+/**
+ * Компактная запись больших чисел: 685266221 → "685.3M".
+ * @param {number} v Значение.
+ * @returns {string}
+ */
+function fmtCompact(v) {
+    if (!isFinite(v)) return "—";
+    const a = Math.abs(v);
+    if (a >= 1e9) return (v / 1e9).toFixed(2) + "B";
+    if (a >= 1e6) return (v / 1e6).toFixed(2) + "M";
+    if (a >= 1e3) return (v / 1e3).toFixed(1) + "K";
+    return v.toFixed(2);
+}
+
+/**
+ * Время до следующего фандинга. У Lighter он ежечасный, поэтому это просто
+ * остаток текущего часа.
+ * @returns {string} "МM:СC".
+ */
+function nextFundingIn() {
+    const left = 3600 - (Date.now() / 1000) % 3600;
+    const m = Math.floor(left / 60), s = Math.floor(left % 60);
+    return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+
+/**
+ * Сводка по текущему инструменту или null, если её нет.
+ * @returns {object|null}
+ */
+function currentTicker() {
+    const [provider, bare] = currentSymbol.includes(":")
+        ? currentSymbol.split(":") : [null, currentSymbol];
+    if (provider) return (tickerData[provider] || {})[bare] || null;
+    // Голое имя (старая вкладка) — ищем перебором.
+    for (const data of Object.values(tickerData))
+        if (data[bare]) return data[bare];
+    return null;
+}
+
+/**
+ * Отрисовать карточку инструмента.
+ * @returns {void}
+ */
+function renderInfo() {
+    const el = document.getElementById("infoPanel");
+    if (!el) return;
+    const t = currentTicker();
+    if (!t) {
+        el.innerHTML = '<div class="ip-title">' + displaySymbol(currentSymbol)
+            + '</div><div class="ip-none">Нет данных: биржевая сводка есть '
+            + 'только у крипты.</div>';
+        return;
+    }
+
+    const dec = instrumentPrecision[currentSymbol]?.precision ?? 2;
+    const chCls = t.change_pct >= 0 ? "ip-up" : "ip-dn";
+    const chTxt = (t.change_pct >= 0 ? "+" : "") + t.change_pct.toFixed(2) + "%";
+    const fund  = t.funding === null || t.funding === undefined
+        ? "—" : (t.funding * 100).toFixed(4) + "%";
+    const fCls  = (t.funding || 0) >= 0 ? "ip-up" : "ip-dn";
+
+    const rows = [
+        ["Mark Price",   t.mark.toFixed(dec)],
+        ["Index Price",  t.index.toFixed(dec)],
+        ["24h Change",   '<span class="' + chCls + '">' + chTxt + "</span>"],
+        ["24h High/Low", t.high.toFixed(dec) + " / " + t.low.toFixed(dec)],
+        ["24h Volume",   "$" + fmtCompact(t.vol_quote_24h)],
+        ["24h Trades",   fmtCompact(t.trades_24h)],
+        ["Open Interest", "$" + fmtCompact(t.oi_quote)],
+        ["1h Funding",   '<span class="' + fCls + '">' + fund + "</span>"],
+        ["Next Funding", nextFundingIn()],
+    ];
+
+    el.innerHTML = '<div class="ip-title"><span>'
+        + displaySymbol(currentSymbol) + "</span><span>"
+        + t.last.toFixed(dec) + "</span></div>"
+        + rows.map(([k, v]) => '<div class="ip-row"><span class="ip-k">'
+            + k + '</span><span class="ip-v">' + v + "</span></div>").join("");
+}
+
+/**
+ * Показать или скрыть карточку инструмента.
+ * @returns {void}
+ */
+function toggleInfo() {
+    infoVisible = !infoVisible;
+    const panel = document.getElementById("infoPanel");
+    const btn   = document.getElementById("infoBtn");
+    if (infoVisible) {
+        if (btn) btn.classList.add("on");
+        panel.style.display = "block";
+        renderInfo();
+        // Секундный тик — только ради обратного отсчёта до фандинга: сами
+        // данные приходят от хаба раз в пять секунд.
+        infoTimer = setInterval(renderInfo, 1000);
+    } else {
+        if (btn) btn.classList.remove("on");
+        panel.style.display = "none";
+        clearInterval(infoTimer);
+        infoTimer = null;
+    }
+}
+let infoTimer = null;
 
 function toggleBriefing() {
     briefVisible = !briefVisible;
