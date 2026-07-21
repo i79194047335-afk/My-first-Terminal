@@ -74,6 +74,9 @@ function showCandleContextMenu(x, y) {
         syncChartTypeButtons(chartMenuPane);
     }
 
+    // Состояние объёма: строка гаснет на инструментах без биржевого объёма.
+    if (typeof syncVolumeButtons === "function") syncVolumeButtons();
+
 }
 // ============================================================================
 // Line Context Menu

@@ -1,0 +1,18 @@
+[Unit]
+Description=Chart Lighter Feed (exchange trades -> bus :8766)
+After=network.target chart-hub.service
+Wants=chart-hub.service
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+WorkingDirectory=/root/projects/terminal
+# Ключи НЕ НУЖНЫ: рыночные данные Lighter публичны. EnvironmentFile тут только
+# ради LIGHTER_WS_URL / LIGHTER_REST_URL, если понадобится переезд на testnet.
+EnvironmentFile=-/root/projects/terminal/.env
+ExecStart=/usr/bin/python3.10 -m feeds.lighter_feed
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -45,6 +45,14 @@
         padding:4px 10px; font-size:12px; cursor:pointer; }
     #chartTypeToggle button.on { background:var(--accent); color:#fff; }
 
+    /* Строка объёма повторяет разметку строки типа графика. */
+    #volumeRow { display:flex; align-items:center; justify-content:space-between; gap:12px;
+        margin:4px 0; }
+    #volumeToggle { display:inline-flex; border:1px solid var(--btn-border); border-radius:5px; overflow:hidden; }
+    #volumeToggle button { border:0; border-radius:0; background:var(--btn); color:var(--text);
+        padding:4px 10px; font-size:12px; cursor:pointer; }
+    #volumeToggle button.on { background:var(--accent); color:#fff; }
+
     #container {
         display: flex;
         width: 100%;
@@ -72,18 +80,34 @@
     .chart-wrapper { position:relative; flex:1; overflow:hidden; }
     .chart { width:100%; height:100%; }
 
-    .expand, .scrollRight, .resetZoom {
+    /* Верхний правый угол: только «домой» и «на весь экран». Сброс масштаба
+       переехал вниз к кнопкам зума (⟲ в .zoomCenter). */
+    .expand, .scrollRight {
         position:absolute; top:8px; z-index:1000; cursor:pointer;
         background:var(--btn); color:var(--text); border:1px solid var(--btn-border); padding:3px 7px; border-radius:3px;
     }
     .expand      { right:8px; }
     .scrollRight { right:38px; }
-    .resetZoom   { right:68px; }
 
     .tv-countdown {
         position:absolute; right:6px; padding:3px 7px; font-size:11px; font-weight:bold;
         border-radius:3px; pointer-events:none; z-index:1000; color:#fff;
     }
+
+    /* Легенда объёма и дельты. Цвет столбца показывает ЗНАК дельты,
+       а величину видно только числом — отсюда эта строка.
+       Позиционируется ПОД легендой индикаторов (та живёт на left:8px/top:4px
+       в js/indicators.js:_createLegend) — иначе строки налезают друг на друга.
+       Отступ сверху пересчитывается по фактической высоте легенды индикаторов. */
+    .vol-legend {
+        position:absolute; left:8px; top:6px; font-size:11px;
+        pointer-events:none; z-index:1000; color:var(--muted);
+        font-variant-numeric:tabular-nums; display:none;
+    }
+    .vol-legend.on { display:block; }
+    .vol-legend b { color:var(--text); font-weight:600; }
+    .vol-legend .d-pos { color:#26a69a; font-weight:600; }
+    .vol-legend .d-neg { color:#ef5350; font-weight:600; }
 
     select, button { padding:4px 8px; border:1px solid var(--btn-border); background:var(--btn); color:var(--text); cursor:pointer; }
     button { border-radius:3px; }
@@ -146,16 +170,41 @@
 
     .menu-item { cursor:pointer; padding:4px 0; }
 
-    .zoomCenter {
-        position:absolute; bottom:6px; left:50%; transform:translateX(-50%);
-        display:flex; gap:4px; z-index:1200;
+    /* Зона наведения для кнопок масштаба.
+       Кнопки висели прямо на графике и мешали читать цену. Теперь они
+       проявляются, только когда курсор входит в эту зону.
+
+       Зона привязана к ЦЕНТРУ обёртки панели (left:50% + translateX), а не к
+       краю окна: при разворачивании панели на весь экран она остаётся
+       по центру графика, а не уезжает вбок.
+
+       bottom:34px — над временной шкалой LWC (~26px), чтобы кнопки её
+       не перекрывали. */
+    .zoomZone {
+        position:absolute; bottom:0; left:50%; transform:translateX(-50%);
+        width:200px; height:64px; z-index:1200;
+        /* Пустая зона не должна перехватывать колесо и протяжку графика —
+           события ловят только сами кнопки (pointer-events на .zoomCenter). */
+        pointer-events:none;
     }
+    .zoomCenter {
+        position:absolute; bottom:34px; left:50%; transform:translateX(-50%);
+        display:flex; gap:4px;
+        opacity:0; transition:opacity .15s ease;
+        pointer-events:auto;
+    }
+    /* Проявляем при наведении на зону И при наведении на сами кнопки —
+       без второго условия кнопки гасли бы, пока до них ведёшь курсор. */
+    .zoomZone:hover .zoomCenter,
+    .zoomCenter:hover { opacity:1; }
     .zoomBtn {
         width:22px; height:22px; display:flex; align-items:center; justify-content:center;
         background:var(--btn); color:var(--text); border:1px solid var(--btn-border); border-radius:3px;
         cursor:pointer; font-size:14px; font-weight:bold; user-select:none;
     }
     .zoomBtn:hover { background:var(--accent-soft); }
+    /* Круговая стрелка сброса масштаба — тоньше цифр, поэтому свой размер. */
+    .zoomBtn.zoom-reset { font-size:13px; font-weight:normal; }
 
     #signalPanel {
         position: absolute; left: 8px; top: 8px;
@@ -181,6 +230,47 @@
         z-index: 2001; box-sizing: border-box; overflow-y: auto;
         padding: 14px 16px; display: none;
     }
+
+    /* Лента крупных сделок. Узкая панель справа, а не поверх графика:
+       смотреть её надо ОДНОВРЕМЕННО с ценой, иначе смысла нет. */
+    #tapePanel {
+        position: absolute; right: 0; top: 0; width: 268px; height: 100%;
+        /* Непрозрачный var(--panel), а не rgba: сквозь полупрозрачную панель
+           просвечивают свечи и ленту невозможно читать. */
+        background: var(--panel);
+        border-left: 1px solid var(--btn-border);
+        color: var(--text); font-size: 11px;
+        z-index: 2000; box-sizing: border-box; display: none;
+        flex-direction: column;
+    }
+    #tapePanel.on { display: flex; }
+    #tapeHead {
+        padding: 7px 10px; border-bottom: 1px solid var(--btn-border);
+        display: flex; align-items: center; justify-content: space-between;
+        font-size: 11px; color: var(--muted); flex: 0 0 auto;
+    }
+    #tapeHead b { color: var(--text); font-size: 12px; }
+    #tapeRows { overflow-y: auto; flex: 1 1 auto; }
+    .tape-row {
+        display: grid; grid-template-columns: 46px 1fr auto;
+        gap: 6px; padding: 3px 10px; align-items: baseline;
+        border-bottom: 1px solid rgba(128,128,128,0.12);
+        font-variant-numeric: tabular-nums;
+    }
+    .tape-row.buy  { border-left: 3px solid #26a69a; }
+    .tape-row.sell { border-left: 3px solid #ef5350; }
+    .tape-time { color: var(--muted); font-size: 10px; }
+    .tape-price { text-align: left; }
+    .tape-quote { font-weight: bold; text-align: right; }
+    .tape-row.buy  .tape-quote { color: #26a69a; }
+    .tape-row.sell .tape-quote { color: #ef5350; }
+    /* Свежая сделка коротко подсвечивается — глаз ловит появление. */
+    .tape-row.fresh { animation: tapeFlash 1.1s ease-out; }
+    @keyframes tapeFlash {
+        from { background: rgba(41,98,255,0.28); }
+        to   { background: transparent; }
+    }
+    #tapeEmpty { padding: 14px 10px; color: var(--muted); line-height: 1.5; }
     #briefContent { line-height: 1.6; }
     #briefContent h2 {
         font-size: 15px; color: #fff; margin: 0 0 10px 0;
@@ -275,7 +365,7 @@
         .toolbar select, .toolbar button {
             font-size: 11px; padding: 2px 6px; white-space: nowrap; flex-shrink: 0; height: 26px;
         }
-        .expand, .scrollRight, .resetZoom { padding: 5px 10px; font-size: 14px; }
+        .expand, .scrollRight { padding: 5px 10px; font-size: 14px; }
         .zoomBtn { width: 28px; height: 28px; font-size: 16px; }
     }
 </style>
@@ -310,6 +400,15 @@
         <span id="chartTypeToggle">
             <button type="button" onclick="setChartTypeFromMenu('candles')" data-charttype-btn="candles">🕯 Свечи</button>
             <button type="button" onclick="setChartTypeFromMenu('bars')" data-charttype-btn="bars">📊 Бары</button>
+        </span>
+    </div>
+    <!-- Объём: только у инструментов, которые его дают (Lighter). У FXCM
+         это поток котировок, там строка неактивна. -->
+    <div id="volumeRow">
+        <span>Объём</span>
+        <span id="volumeToggle">
+            <button type="button" onclick="setVolumeVisible(true)"  data-volume-btn="on">Показать</button>
+            <button type="button" onclick="setVolumeVisible(false)" data-volume-btn="off">Скрыть</button>
         </span>
     </div>
 </div>
@@ -422,11 +521,14 @@
 <div class="column" id="column1">
     <div class="price-pane" id="pane1">
         <div class="toolbar">
+            <!-- Список перестраивается из WS-сообщения instruments
+                 (populateSymbolSelect). Эти опции — только на первый кадр,
+                 до ответа хаба; value несёт ПОЛНЫЙ символ с провайдером. -->
             <select id="symbolSelect" class="tb">
-                <option value="AUD/USD">AUD/USD</option>
-                <option value="EUR/USD">EUR/USD</option>
-                <option value="USD/CAD">USD/CAD</option>
-                <option value="USD/JPY">USD/JPY</option>
+                <option value="fxcm:AUD/USD">AUD/USD</option>
+                <option value="fxcm:EUR/USD">EUR/USD</option>
+                <option value="fxcm:USD/CAD">USD/CAD</option>
+                <option value="fxcm:USD/JPY">USD/JPY</option>
             </select>
             <select id="tf1" class="tb"></select>
             <div class="tb-div"></div>
@@ -450,11 +552,14 @@
         <div class="chart-wrapper" id="wrapper1">
             <div class="chart" id="chart1"></div>
             <div class="tv-countdown" id="countdown1"></div>
-            <div class="zoomCenter">
-                <div class="zoomBtn" onclick="zoomChart(1,-1)">−</div>
-                <div class="zoomBtn" onclick="zoomChart(1,1)">+</div>
+            <div class="vol-legend" id="volLegend1"></div>
+            <div class="zoomZone">
+                <div class="zoomCenter">
+                    <div class="zoomBtn" onclick="zoomChart(1,-1)" title="Отдалить">−</div>
+                    <div class="zoomBtn" onclick="zoomChart(1,1)" title="Приблизить">+</div>
+                    <div class="zoomBtn zoom-reset" onclick="autoScaleChart(1)" title="Сбросить масштаб">⟲</div>
+                </div>
             </div>
-            <div class="resetZoom" onclick="autoScaleChart(1)">A</div>
             <div class="scrollRight" onclick="homeChart(1)">⌂</div>
             <div class="expand" onclick="toggleFull(1)">⛶</div>
         </div>
@@ -477,18 +582,31 @@
             <div class="tb-spacer"></div>
             <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
             <button id="signalLogBtn" class="tb-txt" onclick="toggleSignalPanel()" data-tip="Сигналы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
+            <button id="tapeBtn" class="tb-ic" onclick="toggleTape()" data-tip="Лента крупных сделок"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
         </div>
         <div class="chart-wrapper" id="wrapper2">
             <div id="signalPanel"></div>
             <div id="briefPanel" style="display:none;"><div id="briefContent"></div></div>
+            <!-- Лента крупных сделок: только для инструментов с биржевым
+                 объёмом, порог — 95-й процентиль за скользящий час. -->
+            <div id="tapePanel">
+                <div id="tapeHead">
+                    <span><b>Лента</b> <span id="tapeSymbol"></span></span>
+                    <span id="tapeThreshold"></span>
+                </div>
+                <div id="tapeRows"></div>
+            </div>
             <div class="chart" id="chart2"></div>
             <div class="tv-countdown" id="countdown2"></div>
-            <div class="zoomCenter">
-                <div class="zoomBtn" onclick="zoomChart(2,-1)">−</div>
-                <div class="zoomBtn" onclick="zoomChart(2,1)">+</div>
+            <div class="vol-legend" id="volLegend2"></div>
+            <div class="zoomZone">
+                <div class="zoomCenter">
+                    <div class="zoomBtn" onclick="zoomChart(2,-1)" title="Отдалить">−</div>
+                    <div class="zoomBtn" onclick="zoomChart(2,1)" title="Приблизить">+</div>
+                    <div class="zoomBtn zoom-reset" onclick="autoScaleChart(2)" title="Сбросить масштаб">⟲</div>
+                </div>
             </div>
-            <div class="resetZoom" onclick="autoScaleChart(2)">A</div>
             <div class="scrollRight" onclick="homeChart(2)">⌂</div>
             <div class="expand" onclick="toggleFull(2)">⛶</div>
         </div>
@@ -586,10 +704,51 @@ const CHART_TYPES = ["candles", "bars"];
 // ============================================================================
 // Global state
 // ============================================================================
+// ── Формат символа (Фаза 3) ────────────────────────────────────────────────
+// Символ стал "provider:symbol" ("fxcm:EUR/USD", "lighter:BTC"). Причина: у
+// Lighter есть USDJPY, USDCAD, AUDUSD — те же пары, что у FXCM, и по голому
+// тикеру их не различить. Полный символ уходит на сервер и служит ключом;
+// пользователю показывается короткое имя.
+const SYMBOL_SCHEMA = 3;
+
+/**
+ * Короткое имя символа для показа пользователю.
+ * @param {string} sym Полный символ ("lighter:BTC") или уже короткий.
+ * @returns {string} Имя без префикса провайдера ("BTC").
+ */
+function displaySymbol(sym) {
+    if (!sym) return "";
+    const i = sym.indexOf(":");
+    return i === -1 ? sym : sym.slice(i + 1);
+}
+
+/**
+ * Имя символа, пригодное для имени файла.
+ * Убирает и префикс, и слэш: двоеточие в имени файла запрещено в Windows,
+ * а слэш — во всех ОС.
+ * @param {string} sym Полный символ.
+ * @returns {string} Например "EURUSD" или "BTC".
+ */
+function fileSafeSymbol(sym) {
+    return displaySymbol(sym).replace(/\//g, "");
+}
+
 const layout = StorageLayer.loadLayout(DEFAULT_COLORS);
 const panes  = [1, 2];
 
-if (!layout.symbol)     layout.symbol = "AUD/USD";
+// Разовый сброс сохранённого состояния при переходе на новый формат символа.
+// Согласовано с владельцем: старые ключи (layout.symbol, layout.drawings[sym])
+// содержат голые имена, и держать код, понимающий оба формата, дороже, чем
+// один раз начать чисто.
+if ((layout.symbolSchema || 0) < SYMBOL_SCHEMA) {
+    try { localStorage.removeItem("layoutState"); } catch (e) {}
+    for (const k of Object.keys(layout)) delete layout[k];
+    Object.assign(layout, StorageLayer.loadLayout(DEFAULT_COLORS));
+    layout.symbolSchema = SYMBOL_SCHEMA;
+    console.info("layoutState сброшен: символы перешли в формат provider:symbol");
+}
+
+if (!layout.symbol)     layout.symbol = "fxcm:AUD/USD";
 if (!layout.indicators) layout.indicators = {};
 
 let currentSymbol = layout.symbol;
@@ -598,6 +757,11 @@ let currentSymbol = layout.symbol;
 // шлёт хаб по данным брокера). Раньше precision был захардкожен 5 для всех, а у
 // USD/JPY на самом деле 3 знака — цена рисовалась с двумя лишними нулями.
 let instrumentPrecision = {};
+
+// Символы, у которых есть НАСТОЯЩИЙ биржевой объём (Lighter). У FXCM его нет:
+// там поток котировок, а не сделок. По этому набору решается, показывать ли
+// гистограмму объёма и ленту крупных сделок.
+const instrumentsWithVolume = new Set();
 function applyPriceFormat(id) {
     const st = panesState[id];
     if (!st || !st.series) return;
@@ -624,7 +788,9 @@ function populateSymbolSelect(symbols) {
     select.innerHTML = "";
     for (const sym of symbols) {
         const opt = document.createElement("option");
-        opt.value = sym; opt.text = sym;
+        // value — полный символ (уходит на сервер), text — короткий (виден
+        // пользователю). Префикс провайдера в интерфейсе не показываем.
+        opt.value = sym; opt.text = displaySymbol(sym);
         select.appendChild(opt);
     }
     // Сохраняем текущий выбор, если он ещё есть в новом списке.
@@ -675,9 +841,9 @@ function updateConnDot() {
     if (noLink) {
         cls = "conn-down";  tip = "Связь с сервером потеряна";
     } else if (age != null && age < MARKET_SILENCE) {
-        cls = "conn-live";  tip = currentSymbol + " — рынок открыт (идут котировки)";
+        cls = "conn-live";  tip = displaySymbol(currentSymbol) + " — рынок открыт (идут котировки)";
     } else {
-        cls = "conn-idle";  tip = currentSymbol + " — рынок закрыт (нет котировок)";
+        cls = "conn-idle";  tip = displaySymbol(currentSymbol) + " — рынок закрыт (нет котировок)";
     }
     dot.className = "conn-dot " + cls;
     dot.setAttribute("data-tip", tip);
@@ -742,7 +908,13 @@ function updateCursor(el, type) { el.style.cursor = type; }
 function deselectLine() {
     Object.values(panesState).forEach(st => {
         if (st.selectedLine) {
-            st.selectedLine.line.applyOptions({ color: st.selectedLine.color, lineWidth: st.selectedLine.width });
+            const obj = st.selectedLine;
+            // Сработавший алерт красный и толще — вернуть его в обычный
+            // color/width значило бы стереть признак срабатывания.
+            const restore = (obj.type === "alert" && obj.triggered)
+                ? { color: "#ff0000", lineWidth: 2 }
+                : { color: obj.color ?? "#000000", lineWidth: obj.width ?? 1 };
+            obj.line.applyOptions(restore);
             st.selectedLine = null;
         }
     });
@@ -766,13 +938,37 @@ function addHorizontalLine(id, price) {
     return obj;
 }
 
+function moveAlert(paneId, obj, newPrice) {
+    // Хаб на update_alert снимает triggered: уровень новый, алерт снова
+    // заряжен. Не сбросив признак здесь, мы оставим линию красной с 🔕 —
+    // она повторно сработает, но выглядеть будет уже сработавшей, и
+    // отличить заряженный алерт от отработавшего станет невозможно.
+    panesState[paneId].ws.send(JSON.stringify({
+        type: "update_alert", symbol: currentSymbol, id: obj.id, price: newPrice
+    }));
+    // Перерисовка и запись — только если алерт БЫЛ сработавшим: moveAlert
+    // зовётся на каждом mousemove, и трогать localStorage на каждый пиксель
+    // ни к чему.
+    if (obj.triggered) {
+        obj.triggered = false;
+        obj.line.applyOptions({ color: "#2962FF", lineWidth: 1, title: "🔔" });
+        // storage.js восстанавливает цвет и иконку по triggered — без записи
+        // перезагрузка страницы вернула бы линию в «сработавший» вид.
+        StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+    }
+}
+
 function addAlertLine(id, price) {
     const { series } = panesState[id];
     const line = series.createPriceLine({
         price, color: "#000000", lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "🔔"
     });
-    const obj = { id: null, paneId: id, type: "alert", price, symbol: currentSymbol, triggered: false, line };
+    // color/width обязательны: deselectLine возвращает линию в них после
+    // снятия выделения. Без них applyOptions получает undefined, LWC его
+    // игнорирует — и линия навсегда остаётся синей.
+    const obj = { id: null, paneId: id, type: "alert", price, symbol: currentSymbol,
+                  triggered: false, line, color: "#000000", width: 1 };
     pendingAlerts[price] = obj;
     drawings[id].push(obj);
     panesState[id].ws.send(JSON.stringify({ type: "add_alert", symbol: currentSymbol, price }));
@@ -798,6 +994,14 @@ function handleMessage(id, state, msg) {
 
     if (msg.type === "heartbeat") { onHeartbeat(msg.data); return; }
 
+    // Фильтр по requestId отсекает ответы на устаревшие запросы (пользователь
+    // успел переключить ТФ, пока грузилась история). Но широковещательные
+    // сообщения requestId не несут, и их надо пропускать по типу.
+    //
+    // instruments и large_trade сюда добавлены в Фазе 3. Раньше instruments
+    // молча отсекались (requestId=undefined никогда не равен state.requestId),
+    // и селектор пар жил на захардкоженной HTML-разметке — баг был невидим,
+    // пока от instruments не стали зависеть precision и объём.
     if (
         msg.type !== "alert" &&
         msg.type !== "alert_created" &&
@@ -805,18 +1009,36 @@ function handleMessage(id, state, msg) {
         msg.type !== "signal" &&
         msg.type !== "briefing" &&
         msg.type !== "signals_history" &&
+        msg.type !== "instruments" &&
+        msg.type !== "large_trade" &&
         msg.requestId !== state.requestId
     ) return;
 
     if (msg.type === "history") {
         if (!state.chart) createChartInternal(id, state.tfSeconds);
 
+        // Сброс перекрестия перед самой подменой данных — на случай, если
+        // курсор успел «залочить» точку, пока грузилась история (см. setTF).
+        try { state.chart.clearCrosshairPosition(); } catch (e) {}
+
+        // ПУСТАЯ история тоже обязана очистить серию. Раньше весь блок стоял
+        // под `if (msg.data?.length)`, и при переключении на инструмент, чья
+        // история ещё не готова (рэндж-бары строятся бэкфилом в фоне), на
+        // графике оставались бары ПРЕДЫДУЩЕЙ пары. Дальше приходили живые
+        // бары нового инструмента — с временем раньше оставшихся, и LWC падал
+        // с "Cannot update oldest data", а график показывал два ряда разом.
+        if (!msg.data?.length) {
+            state.data = [];
+            state.lastCandle = null;
+            try { state.series.setData([]); } catch (e) {}
+            setVolumeData(id, []);
+            renderVolumeLegend(id, null);
+        }
+
         if (msg.data?.length) {
-            // Сброс перекрестия перед самой подменой данных — на случай, если
-            // курсор успел «залочить» точку, пока грузилась история (см. setTF).
-            try { state.chart.clearCrosshairPosition(); } catch (e) {}
             state.data = msg.data;
             state.series.setData(state.data);
+            setVolumeData(id, state.data);
             refreshSignalMarkers();
             state.lastCandle = msg.data.at(-1);
 
@@ -853,6 +1075,9 @@ function handleMessage(id, state, msg) {
 
     if (msg.type === "update" && msg.candle) {
         state.series.update(msg.candle);
+        updateVolumeBar(id, msg.candle);
+        // Свежая цена — для подбора R при следующем переключении сюда.
+        if (msg.candle.close > 0) lastKnownPrice[currentSymbol] = msg.candle.close;
 
         const last = state.data[state.data.length - 1];
         let isNewBar = false;
@@ -878,6 +1103,10 @@ function handleMessage(id, state, msg) {
         if (_signalsVisible && isNewBar) refreshSignalMarkers();
     }
 
+    // Лента живёт на панели 2, но событие приходит в обе — обрабатываем один
+    // раз, иначе каждая сделка добавлялась бы дважды.
+    if (msg.type === "large_trade" && id === 1) addTapeTrade(msg);
+
     if (msg.type === "analysis") updateMarketEngine(msg);
     if (msg.type === "signal")   showSignal(msg);
     if (msg.type === "briefing") { lastBriefingData = msg.data; if (briefVisible) renderBriefing(); }
@@ -888,19 +1117,46 @@ function handleMessage(id, state, msg) {
         const symbols = [];
         for (const provider in msg.data) {
             for (const inst of msg.data[provider]) {
+                // Хаб отдаёт инструменты сгруппированными по провайдеру, а
+                // symbol внутри — голый. Полный символ собираем здесь: дальше
+                // по фронту он живёт только в виде "provider:symbol".
+                const full = provider + ":" + inst.symbol;
                 const d = (inst.price_decimals == null) ? 5 : inst.price_decimals;
-                instrumentPrecision[inst.symbol] = { precision: d, minMove: Math.pow(10, -d) };
-                symbols.push(inst.symbol);
+                instrumentPrecision[full] = { precision: d, minMove: Math.pow(10, -d) };
+                if (inst.has_volume) instrumentsWithVolume.add(full);
+                // mark_price от биржи — единственная цена инструмента, известная
+                // ДО того, как его открыли. По ней подбирается стартовый R.
+                const mark = parseFloat(inst.meta?.mark_price);
+                if (mark > 0 && !lastKnownPrice[full]) lastKnownPrice[full] = mark;
+                symbols.push(full);
             }
         }
         Object.keys(panesState).forEach(id => applyPriceFormat(id));
         // Селектор пар — из instruments, а не из захардкоженной HTML-разметки.
         populateSymbolSelect(symbols);
+        // Только теперь известно, у кого есть объём: до instruments набор пуст,
+        // и серия не создалась бы даже на крипте.
+        [1, 2].forEach(id => {
+            const st = panesState[id];
+            if (!st?.chart) return;
+            ensureVolumeSeries(id);
+            if (st.volumeSeries && st.data?.length) setVolumeData(id, st.data);
+        });
+        syncVolumeButtons();
+        // Заглушку ленты тоже надо переписать: resetTape() на старте отработал
+        // с ПУСТЫМ instrumentsWithVolume и написал «нет биржевого объёма» даже
+        // для крипты. Обновляем, только если сделок ещё не было — иначе
+        // затёрли бы уже накопленную ленту.
+        {
+            const rows = document.getElementById("tapeRows");
+            if (rows && !rows.querySelector(".tape-row")) resetTape();
+            else renderTapeHeader();
+        }
     }
 
     if (msg.type === "alert" && msg.symbol === currentSymbol) {
         playAlertSound();
-        showAlertPopup(msg.symbol + " @ " + msg.price);
+        showAlertPopup(displaySymbol(msg.symbol) + " @ " + msg.price);
         panes.forEach(paneId => {
             drawings[paneId].forEach(obj => {
                 if (obj.type === "alert" && obj.id === msg.id) {
@@ -1062,6 +1318,22 @@ function createPane(id) {
         // Движение мыши по одному графику отражается крестиком на другом
         // (по цене и времени курсора). _crosshairSyncing гасит обратный вызов,
         // т.к. setCrosshairPosition сам триггерит subscribeCrosshairMove.
+        // Легенда следует за курсором: под ним показываются объём и дельта
+        // того бара, на который смотришь. Отдельной подпиской, до синхронизации
+        // перекрестий — та завязана на syncEnabled и при выключенной
+        // синхронизации выходит раньше.
+        st.chart.subscribeCrosshairMove(param => {
+            if (!st.volumeSeries) return;
+            if (!param.point || typeof param.time !== "number") {
+                st.legendPinned = false;
+                renderVolumeLegend(paneId, st.data?.[st.data.length - 1]);
+                return;
+            }
+            st.legendPinned = true;
+            const bar = st.data?.find(b => b.time === param.time);
+            if (bar) renderVolumeLegend(paneId, bar);
+        });
+
         st.chart.subscribeCrosshairMove(param => {
             if (_crosshairSyncing || !syncEnabled) return;
             const otherId = paneId === 1 ? 2 : 1;
@@ -1263,7 +1535,7 @@ function setupInteractionHandlers(paneId, st, els) {
                 stLocal.selectedLine.price = newPrice;
                 stLocal.selectedLine.line.applyOptions({ price: newPrice });
                 if (stLocal.selectedLine.type === "alert") {
-                    panesState[id].ws.send(JSON.stringify({ type: "update_alert", symbol: currentSymbol, id: stLocal.selectedLine.id, price: newPrice }));
+                    moveAlert(id, stLocal.selectedLine, newPrice);
                 }
                 return;
             }
@@ -1559,7 +1831,7 @@ function setupInteractionHandlers(paneId, st, els) {
         stLocal.selectedLine.price = newPrice;
         stLocal.selectedLine.line.applyOptions({ price: newPrice });
         if (stLocal.selectedLine.type === "alert") {
-            panesState[id].ws.send(JSON.stringify({ type: "update_alert", symbol: currentSymbol, id: stLocal.selectedLine.id, price: newPrice }));
+            moveAlert(id, stLocal.selectedLine, newPrice);
         }
     }
     els.wrapper.addEventListener("mousemove", onMoveHLine);
@@ -1698,10 +1970,30 @@ function setTF(paneId, tf) {
         // меньшим числом баров LWC дёргает устаревший логический индекс курсора
         // во время рассинхрона и бросает "Value is null" на каждое движение мыши.
         try { st.chart.clearCrosshairPosition(); } catch (e) {}
+
+        // Бары старого ТФ убираем сразу: при переходе на рэндж-ТФ история
+        // строится бэкфилом в фоне, и до её прихода на графике оставался бы
+        // прежний ряд — с ним LWC роняет "Cannot update oldest data" на
+        // первом же живом баре (см. switchSymbol).
+        st.data = [];
+        st.lastCandle = null;
+        try { st.series?.setData([]); } catch (e) {}
+        if (st.volumeSeries) { try { st.volumeSeries.setData([]); } catch (e) {} }
+        renderVolumeLegend(paneId, null);
         st.chart.applyOptions({ timeScale:
             { secondsVisible: !st.tfSeconds || st.tfSeconds < 60 } });
     }
     layout[`pane${paneId}`].tf = tf;
+
+    // Рэндж-ТФ запоминается НА ИНСТРУМЕНТ. R задан в поинтах, а поинт у
+    // инструментов различается в тысячи раз: R500 — это ~$50 на BTC (темп M5)
+    // и 0.05 на LIT (цена $2.2, бар в жизни не закроется). Без этой памяти
+    // при каждом переключении пары приходилось бы подбирать R заново.
+    // Обычные ТФ (M1/H1/…) осмысленны для всех, их держим на панели.
+    if (parseRangeTF(tf)) {
+        layout.rangeTf = layout.rangeTf || {};
+        layout.rangeTf[currentSymbol] = tf;
+    }
     StorageLayer.autoSave(layout);
     DrawingController.resetTool();
 
@@ -1716,12 +2008,26 @@ function setTF(paneId, tf) {
 function switchSymbol(symbol) {
     currentSymbol = symbol;
     resetMarketDot();   // индикатор рынка — заново с тиков нового инструмента
+    resetTape();        // лента чужого инструмента к новому отношения не имеет
 
     [1, 2].forEach(paneId => {
         const st = panesState[paneId];
         if (!st) return;
         drawings[paneId].forEach(obj => { if (obj.line) st.series.removePriceLine(obj.line); });
         if (st.drawingEngine) { st.drawingEngine.drawings = []; st.drawingEngine.render(); }
+
+        // Данные ПРЕДЫДУЩЕГО инструмента убираем сразу, не дожидаясь истории
+        // нового. На обычных ТФ история приходит мгновенно и подменяет их, а
+        // рэндж-бары строятся бэкфилом в фоне — секунды, за которые на графике
+        // висели чужие бары. Дальше приходил живой бар нового инструмента со
+        // временем раньше оставшихся, и LWC падал с "Cannot update oldest
+        // data", рисуя два ряда сразу.
+        st.data = [];
+        st.lastCandle = null;
+        try { st.chart?.clearCrosshairPosition(); } catch (e) {}
+        try { st.series?.setData([]); } catch (e) {}
+        if (st.volumeSeries) { try { st.volumeSeries.setData([]); } catch (e) {} }
+        renderVolumeLegend(paneId, null);
     });
     drawings[1] = []; drawings[2] = [];
 
@@ -1733,7 +2039,27 @@ function switchSymbol(symbol) {
         if (!state) return;
         state.indicatorsLoaded = false; // force reload on next history
         applyPriceFormat(id);           // precision нового символа
-        const tf = layout[`pane${id}`]?.tf || "M1";
+        // Объём есть не у всех: у FXCM это поток котировок, а не сделок.
+        // Снимаем/ставим серию сразу, не дожидаясь истории, иначе на
+        // форексе остались бы висеть столбцы от прошлого инструмента.
+        ensureVolumeSeries(id);
+
+        // Если панель стоит на рэндж-ТФ, берём R, ЗАПОМНЕННЫЙ ДЛЯ НОВОГО
+        // инструмента: R в поинтах несопоставим между парами (R500 = ~$50 на
+        // BTC и 0.05 на LIT), и тащить чужое значение бессмысленно. Нет
+        // запомненного — считаем разумное значение от текущей цены.
+        let tf = layout[`pane${id}`]?.tf || "M1";
+        if (parseRangeTF(tf)) {
+            const remembered = layout.rangeTf?.[currentSymbol];
+            tf = remembered || suggestRangeTF(currentSymbol) || tf;
+            layout[`pane${id}`] = layout[`pane${id}`] || {};
+            layout[`pane${id}`].tf = tf;
+            const els2 = getPaneElements(id);
+            if (els2?.tfSelect) {
+                ensureRangeOption(els2.tfSelect, tf);
+                els2.tfSelect.value = tf;
+            }
+        }
         const rs = state.ws && state.ws.readyState;
 
         if (rs === WebSocket.OPEN) {
@@ -1824,7 +2150,7 @@ function exportLayout() {
     const now = new Date();
     const pad = n => String(n).padStart(2,'0');
     const date = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-    const filename = `${currentSymbol.replace("/","")}_${layout.pane1.tf||"M1"}_${layout.pane2.tf||"M1"}_${layout.split}_${date}.json`;
+    const filename = `${fileSafeSymbol(currentSymbol)}_${layout.pane1.tf||"M1"}_${layout.pane2.tf||"M1"}_${layout.split}_${date}.json`;
     const blob = new Blob([JSON.stringify(layout, null, 2)], { type: "application/json" });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
@@ -1856,6 +2182,185 @@ function makeSeries(chart, chartType) {
         { priceFormat: { type: 'price', precision: 5, minMove: 0.00001 } },
         0
     );
+}
+
+// ── Гистограмма объёма ─────────────────────────────────────────────────────
+// Живёт ОВЕРЛЕЕМ на главной пане, а не отдельной паной. Причина техническая:
+// IndicatorManager._teardownAllOscillatorSeries() сносит все паны кроме
+// нулевой при каждой перестройке осцилляторов — отдельная пана объёма
+// уничтожалась бы при добавлении любого RSI. Оверлей поверх свечей вдобавок
+// привычнее: так это сделано в TradingView.
+//
+// Собственная шкала (VOLUME_SCALE_ID) с большим отступом сверху: объём
+// прижат к низу и занимает нижнюю четверть, не перекрывая цену.
+const VOLUME_SCALE_ID = "vol";
+
+/**
+ * Создать серию объёма на панели, если инструмент даёт объём.
+ * @param {number} paneId Номер панели (1 или 2).
+ * @returns {void}
+ */
+function ensureVolumeSeries(paneId) {
+    const st = panesState[paneId];
+    if (!st || !st.chart) return;
+
+    const wanted = instrumentsWithVolume.has(currentSymbol) &&
+                   layout.showVolume !== false;
+
+    if (!wanted) {
+        if (st.volumeSeries) {
+            try { st.chart.removeSeries(st.volumeSeries); } catch (e) {}
+            st.volumeSeries = null;
+        }
+        return;
+    }
+    if (st.volumeSeries) return;
+
+    st.volumeSeries = st.chart.addSeries(LightweightCharts.HistogramSeries, {
+        priceFormat:       { type: "volume" },
+        priceScaleId:      VOLUME_SCALE_ID,
+        priceLineVisible:  false,
+        lastValueVisible:  false,
+    }, 0);
+
+    st.chart.priceScale(VOLUME_SCALE_ID).applyOptions({
+        // 0.75 сверху — объёму достаётся нижняя четверть панели.
+        scaleMargins: { top: 0.75, bottom: 0 },
+        visible: false,
+    });
+}
+
+/**
+ * Цвет столбца объёма — по знаку ДЕЛЬТЫ, а не по направлению свечи.
+ *
+ * Дельта = агрессивные покупки минус продажи. Красить по ней, а не по
+ * телу свечи, — единственный способ увидеть расхождение цены и давления
+ * бесплатно, не занимая места на экране. Пример из живых данных: свеча
+ * падает, а дельта +58.8% — покупатели давили весь бар, но цену не
+ * удержали. По цвету тела свечи этого не видно вообще.
+ *
+ * Провайдер без стороны агрессора дельту не даёт (у FXCM её нет вовсе,
+ * у REST-бэкфила Lighter — тоже: он отдаёт объём без разбивки). Тогда
+ * откатываемся на направление свечи, чтобы бэкфил не выглядел серым
+ * провалом рядом с живыми барами.
+ *
+ * @param {object} bar Свеча с полями open/close и, возможно, delta.
+ * @returns {string} Цвет с прозрачностью.
+ */
+function volumeBarColor(bar) {
+    const positive = (bar.delta != null) ? (bar.delta >= 0)
+                                         : (bar.close >= bar.open);
+    return positive ? "rgba(38,166,154,0.5)" : "rgba(239,83,80,0.5)";
+}
+
+/**
+ * Привести свечи к точкам гистограммы объёма.
+ * Бары без объёма (FXCM) отбрасываются — рисовать нули незачем.
+ * @param {Array<object>} bars Свечи из истории.
+ * @returns {Array<object>} Точки для HistogramSeries.
+ */
+function volumePoints(bars) {
+    const out = [];
+    for (const b of bars) {
+        if (b.vol_base == null) continue;
+        out.push({ time: b.time, value: b.vol_base, color: volumeBarColor(b) });
+    }
+    return out;
+}
+
+/**
+ * Обновить легенду объёма и дельты.
+ * Показывает бар под курсором, а без курсора — последний.
+ * @param {number} paneId Номер панели.
+ * @param {object} bar Свеча или null.
+ * @returns {void}
+ */
+function renderVolumeLegend(paneId, bar) {
+    const el = document.getElementById("volLegend" + paneId);
+    if (!el) return;
+
+    const st = panesState[paneId];
+    if (!st || !st.volumeSeries || !bar || bar.vol_base == null) {
+        el.classList.remove("on");
+        el.innerHTML = "";
+        return;
+    }
+
+    let html = "Vol <b>" + formatTapeSize(bar.vol_base) + "</b>";
+    let title = "Объём бара в базовых единицах";
+
+    if (bar.delta != null) {
+        const buyers = bar.delta >= 0;
+        const cls  = buyers ? "d-pos" : "d-neg";
+        const sign = buyers ? "+" : "−";
+        const share = bar.vol_base
+            ? Math.round(100 * Math.abs(bar.delta) / bar.vol_base) : 0;
+        html += '  Δ <span class="' + cls + '">' + sign +
+                formatTapeSize(Math.abs(bar.delta)) + " (" + share + "%)</span>";
+
+        // Расхождение дельты и свечи — самое ценное, что показывает дельта,
+        // и заметить его по одному цвету столбца трудно. Помечаем явно.
+        const priceUp = bar.close >= bar.open;
+        if (buyers !== priceUp) {
+            html += ' <span class="' + cls + '" title="Цена и давление разошлись">⚠</span>';
+            title = priceUp
+                ? "Цена выросла, но преобладали агрессивные ПРОДАЖИ — рост без покупателей"
+                : "Цена упала, но преобладали агрессивные ПОКУПКИ — падение вопреки покупкам";
+        } else {
+            title = buyers
+                ? "Покупатели давили и цена росла — согласованно"
+                : "Продавцы давили и цена падала — согласованно";
+        }
+        title += ". Цвет столбца объёма = знак дельты, не направление свечи.";
+    }
+    el.innerHTML = html;
+    el.title = title;
+    el.classList.add("on");
+
+    // Встаём ПОД легендой индикаторов: она живёт в том же углу и растёт
+    // вниз по числу индикаторов (js/indicators.js:_createLegend). Без этого
+    // строки накладываются — видно на графике с любым добавленным
+    // индикатором.
+    const indLegend = st.indicatorManager?._legendEl;
+    const offset = (indLegend && indLegend.offsetHeight)
+        ? indLegend.offsetHeight + 8 : 6;
+    el.style.top = offset + "px";
+}
+
+/**
+ * Записать историю объёма в серию панели.
+ * @param {number} paneId Номер панели.
+ * @param {Array<object>} bars Свечи.
+ * @returns {void}
+ */
+function setVolumeData(paneId, bars) {
+    ensureVolumeSeries(paneId);
+    const st = panesState[paneId];
+    if (!st || !st.volumeSeries) {
+        renderVolumeLegend(paneId, null);
+        return;
+    }
+    try { st.volumeSeries.setData(volumePoints(bars)); } catch (e) {}
+    renderVolumeLegend(paneId, bars[bars.length - 1]);
+}
+
+/**
+ * Обновить последний столбец объёма живой свечой.
+ * @param {number} paneId Номер панели.
+ * @param {object} bar Живая свеча.
+ * @returns {void}
+ */
+function updateVolumeBar(paneId, bar) {
+    const st = panesState[paneId];
+    if (!st || !st.volumeSeries || bar.vol_base == null) return;
+    try {
+        st.volumeSeries.update({
+            time: bar.time, value: bar.vol_base, color: volumeBarColor(bar),
+        });
+    } catch (e) {}
+    // Легенду двигаем только когда курсор не удерживает конкретный бар:
+    // иначе цифры прыгали бы под курсором на каждом тике.
+    if (!st.legendPinned) renderVolumeLegend(paneId, bar);
 }
 
 // Переключить тип отрисовки панели, перенеся данные, цвета, precision,
@@ -2120,6 +2625,183 @@ function showSignal(data) {
 
 // ===== BRIEFING PANEL =====
 
+// ── Подбор рэндж-ТФ под инструмент ─────────────────────────────────────────
+// R задаётся в ПОИНТАХ (минимальных тиках цены), как в TradingView. Но поинт
+// у инструментов различается в тысячи раз: R500 = ~$50 на BTC (темп ≈M5) и
+// 0.05 на LIT при цене $2.2 — там бар не закроется никогда. Поэтому при
+// первом переключении на инструмент R считается от его цены.
+//
+// Ориентир 0.08% хода ≈ темп M5 на крипте (замерено на BTC: R500 = $50 =
+// 0.077%, бар в среднем за 6 минут).
+const RANGE_TARGET_PCT = 0.0008;
+
+// Последняя известная цена по инструменту. Нужна для подбора R в момент
+// переключения, когда данные графика уже очищены, а история нового
+// инструмента ещё не пришла. Заполняется из instruments (mark_price) и
+// обновляется живыми тиками.
+const lastKnownPrice = {};
+
+/**
+ * Предложить рэндж-ТФ для инструмента по его последней известной цене.
+ * @param {string} sym Полный символ ("lighter:BTC").
+ * @returns {string|null} Строка вида "R:500" либо null, если цена неизвестна.
+ */
+function suggestRangeTF(sym) {
+    const info  = instrumentPrecision[sym];
+    const price = lastKnownPrice[sym];
+    if (!info || !info.minMove || !price) return null;
+
+    const points = Math.round(price * RANGE_TARGET_PCT / info.minMove);
+    return points >= 1 ? "R:" + points : null;
+}
+
+/**
+ * Добавить опцию рэндж-ТФ в селектор, если её там ещё нет.
+ * Значения R подбираются под инструмент и не входят в фиксированный список.
+ * @param {HTMLSelectElement} select Селектор таймфреймов.
+ * @param {string} tf Значение вида "R:500".
+ * @returns {void}
+ */
+function ensureRangeOption(select, tf) {
+    if (!select || !tf) return;
+    if (Array.from(select.options).some(o => o.value === tf)) return;
+    const opt = document.createElement("option");
+    opt.value = tf;
+    opt.text  = tf.replace(":", "");   // "R:500" → "R500"
+    select.appendChild(opt);
+}
+
+// ── Лента крупных сделок ───────────────────────────────────────────────────
+// Хаб шлёт large_trade широковещательно по всем инструментам; фильтруем по
+// текущему символу — смотрят всегда один. Порог считает сервер (95-й
+// процентиль за скользящий час), фронт его только показывает.
+let tapeVisible = false;
+const TAPE_MAX_ROWS = 60;
+let _tapeLastThreshold = null;
+
+/**
+ * Показать или скрыть панель ленты.
+ * @returns {void}
+ */
+function toggleTape() {
+    tapeVisible = !tapeVisible;
+    layout.showTape = tapeVisible;
+    StorageLayer.autoSave(layout);
+    applyTapeVisibility();
+}
+
+/**
+ * Привести панель и кнопку в соответствие состоянию.
+ * @returns {void}
+ */
+function applyTapeVisibility() {
+    const panel = document.getElementById("tapePanel");
+    const btn   = document.getElementById("tapeBtn");
+    if (!panel) return;
+    panel.classList.toggle("on", tapeVisible);
+    if (btn) btn.classList.toggle("on", tapeVisible);
+    if (tapeVisible) renderTapeHeader();
+}
+
+/**
+ * Обновить шапку ленты: символ и текущий порог.
+ * @returns {void}
+ */
+function renderTapeHeader() {
+    const sym = document.getElementById("tapeSymbol");
+    const thr = document.getElementById("tapeThreshold");
+    if (sym) sym.textContent = displaySymbol(currentSymbol);
+    if (!thr) return;
+    if (!instrumentsWithVolume.has(currentSymbol)) {
+        thr.textContent = "";
+    } else if (_tapeLastThreshold == null) {
+        thr.textContent = "ждёт данных";
+    } else {
+        thr.textContent = "> " + formatTapeSize(_tapeLastThreshold);
+    }
+}
+
+/**
+ * Компактно отформатировать размер сделки.
+ * @param {number} v Размер в базовых единицах.
+ * @returns {string}
+ */
+function formatTapeSize(v) {
+    if (v >= 1000) return v.toFixed(0);
+    if (v >= 1)    return v.toFixed(2);
+    return v.toPrecision(3);
+}
+
+/**
+ * Компактно отформатировать оборот в долларах.
+ * @param {number} v Оборот.
+ * @returns {string}
+ */
+function formatTapeQuote(v) {
+    if (v >= 1e6) return "$" + (v / 1e6).toFixed(2) + "M";
+    if (v >= 1e3) return "$" + (v / 1e3).toFixed(1) + "k";
+    return "$" + v.toFixed(0);
+}
+
+/**
+ * Добавить сделку в ленту.
+ * Чужие инструменты игнорируются: события приходят по всем 12 сразу.
+ * @param {object} msg Сообщение large_trade от хаба.
+ * @returns {void}
+ */
+function addTapeTrade(msg) {
+    if (msg.symbol !== currentSymbol) return;
+    _tapeLastThreshold = msg.threshold;
+    if (!tapeVisible) return;
+
+    const rows = document.getElementById("tapeRows");
+    if (!rows) return;
+
+    const empty = document.getElementById("tapeEmpty");
+    if (empty) empty.remove();
+
+    const d = new Date((msg.ts + TZ_OFFSET * 3600) * 1000);
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    const ss = String(d.getUTCSeconds()).padStart(2, "0");
+
+    const row = document.createElement("div");
+    row.className = "tape-row fresh " + (msg.side === "buy" ? "buy" : "sell");
+    row.innerHTML =
+        '<span class="tape-time">' + hh + ":" + mm + ":" + ss + '</span>' +
+        '<span class="tape-price">' + msg.price + '</span>' +
+        '<span class="tape-quote">' + formatTapeQuote(msg.quote) + '</span>';
+    row.title = (msg.side === "buy" ? "Покупка" : "Продажа") +
+                " " + formatTapeSize(msg.size) +
+                " по " + msg.price;
+
+    rows.prepend(row);
+    // Лента растёт бесконечно, если её не подрезать: по BTC это ~7500
+    // событий за 8 часов, и DOM распух бы до неработоспособности.
+    while (rows.childElementCount > TAPE_MAX_ROWS) rows.lastElementChild.remove();
+
+    renderTapeHeader();
+}
+
+/**
+ * Очистить ленту (смена символа) и показать поясняющую заглушку.
+ * @returns {void}
+ */
+function resetTape() {
+    _tapeLastThreshold = null;
+    const rows = document.getElementById("tapeRows");
+    if (rows) {
+        rows.innerHTML = "";
+        const note = document.createElement("div");
+        note.id = "tapeEmpty";
+        note.textContent = instrumentsWithVolume.has(currentSymbol)
+            ? "Ждём крупных сделок. Порог — крупнее 95% сделок за последний час; пока статистика не набрана, лента молчит."
+            : "У этого инструмента нет биржевого объёма — лента доступна только на Lighter.";
+        rows.appendChild(note);
+    }
+    renderTapeHeader();
+}
+
 function toggleBriefing() {
     briefVisible = !briefVisible;
     const panel = document.getElementById("briefPanel");
@@ -2148,11 +2830,14 @@ function renderBriefing() {
         return;
     }
 
-    const pairData = lastBriefingData.pairs[currentSymbol];
+    // Брифинг пишет pre_session_brief.py со СВОИМИ ключами — голыми парами
+    // ("EUR/USD"). Менять его формат ради префикса незачем: ищем по
+    // короткому имени.
+    const pairData = lastBriefingData.pairs[displaySymbol(currentSymbol)];
     if (!pairData) {
         content.innerHTML =
             "<div style='color:#888;text-align:center;margin-top:40px'>" +
-            "Нет брифинга для " + currentSymbol + "</div>";
+            "Нет брифинга для " + displaySymbol(currentSymbol) + "</div>";
         return;
     }
 
@@ -2207,7 +2892,7 @@ function renderBriefing() {
         " | Риск: " + (globalCtx.risk_appetite || "N/A") +
         "</div>";
 
-    html += "<h2>" + currentSymbol +
+    html += "<h2>" + displaySymbol(currentSymbol) +
         " <span class='" + dirClass + "' style='font-size:16px;margin-left:8px'>" +
         arrow + " " + dirLabel + " (conf: " + (pairData.direction_confidence || "?") + "/5)" +
         "</span></h2>";
@@ -2268,7 +2953,7 @@ function renderBriefing() {
 
     // Накопленный контекст
     const accCtx = lastBriefingData.accumulated_context || {};
-    const pairCtx = accCtx[currentSymbol];
+    const pairCtx = accCtx[displaySymbol(currentSymbol)];
     if (pairCtx && pairCtx.length > 0) {
         html += "<div class='section'>" +
             "<div class='section-title'>Накопленный контекст</div><ul style='color:#aaa;font-size:11px'>" +
@@ -2803,6 +3488,40 @@ function syncChartTypeButtons(paneId) {
     document.querySelectorAll("#chartTypeToggle button").forEach(b =>
         b.classList.toggle("on", b.dataset.charttypeBtn === cur));
 }
+
+/**
+ * Показать или скрыть гистограмму объёма на обеих панелях.
+ * Настройка глобальная, а не по панели: панели показывают один инструмент,
+ * и объём у него либо есть, либо нет.
+ * @param {boolean} visible Показывать ли объём.
+ * @returns {void}
+ */
+function setVolumeVisible(visible) {
+    layout.showVolume = !!visible;
+    StorageLayer.autoSave(layout);
+    [1, 2].forEach(id => {
+        ensureVolumeSeries(id);
+        const st = panesState[id];
+        if (st?.volumeSeries && st.data?.length) setVolumeData(id, st.data);
+    });
+    syncVolumeButtons();
+}
+
+/**
+ * Подсветить активную кнопку объёма и погасить строку, если объёма нет.
+ * @returns {void}
+ */
+function syncVolumeButtons() {
+    const has = instrumentsWithVolume.has(currentSymbol);
+    const on  = has && layout.showVolume !== false;
+    document.querySelectorAll("#volumeToggle button").forEach(b =>
+        b.classList.toggle("on", b.dataset.volumeBtn === (on ? "on" : "off")));
+    const row = document.getElementById("volumeRow");
+    if (row) {
+        row.style.opacity = has ? "" : "0.45";
+        row.title = has ? "" : "У этого инструмента нет биржевого объёма";
+    }
+}
 function setTheme(theme) {
     layout.theme = (theme === "dark") ? "dark" : "light";
     applyTheme(layout.theme);
@@ -2894,6 +3613,11 @@ function initialize() {
     // Sync btn initial state
     const syncBtn = document.getElementById("chartSyncBtn");
     if (syncBtn && syncEnabled) syncBtn.classList.add("on");
+
+    // Лента — состояние из сохранённого layout.
+    tapeVisible = layout.showTape === true;
+    applyTapeVisibility();
+    resetTape();
 
     // Symbol selector
     const symbolSelect = document.getElementById("symbolSelect");

@@ -1,6 +1,9 @@
 {
   "db_path": "/root/projects/terminal/market.db",
   "keep_bars": 2000,
+  "keep_bars_by_tf": {
+    "M1": 10080
+  },
   "ws_port": 8765,
   "bus_host": "127.0.0.1",
   "bus_port": 8766,
@@ -14,7 +17,12 @@
   "data_dir": "data",
   "health_port": 8787,
   "briefing_file": "/root/projects/terminal/briefing.json",
+  "tick_retention_days": {
+    "lighter": 14
+  },
   "markets": {
-    "fxcm": ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"]
+    "fxcm": ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"],
+    "lighter": ["BTC", "ETH", "HYPE", "SOL", "WTI", "LIT",
+                "ZEC", "XAU", "BNB", "SPCX", "MU", "XAG"]
   }
 }

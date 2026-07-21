@@ -28,7 +28,21 @@ CREATE TABLE IF NOT EXISTS candles (
     c         REAL NOT NULL,
     vol_base  REAL,
     vol_quote REAL,
+    delta     REAL,               -- агрессорный дисбаланс (Фаза 3)
     PRIMARY KEY (provider, symbol, tf, time)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS volume_profile (
+    provider  TEXT NOT NULL,
+    symbol    TEXT NOT NULL,
+    period    TEXT NOT NULL,     -- ключ периода, напр. "20260718" (сутки UTC)
+    bucket    INTEGER NOT NULL,  -- индекс корзины (логарифмическая сетка)
+    price_low  REAL NOT NULL,
+    price_high REAL NOT NULL,
+    vol_buy   REAL NOT NULL,     -- агрессивные покупки, базовые единицы
+    vol_sell  REAL NOT NULL,     -- агрессивные продажи, базовые единицы
+    vol_quote REAL NOT NULL,     -- оборот в котируемой валюте
+    PRIMARY KEY (provider, symbol, period, bucket)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS instruments (
@@ -57,8 +71,32 @@ def init_db(path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     conn = sqlite3.connect(path)
     conn.executescript(SCHEMA_SQL)
+    _migrate(conn)
     conn.commit()
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Догнать схему на уже существующей базе.
+
+    CREATE TABLE IF NOT EXISTS не трогает таблицу, которая уже есть, поэтому
+    боевая market.db не получила бы колонок, добавленных после её создания.
+    ALTER TABLE ADD COLUMN в SQLite дёшев (метаданные, без переписывания
+    файла) и заполняет старые строки NULL — для FXCM это и есть правда:
+    объёма у него нет.
+
+    Args:
+        conn: Открытое соединение.
+
+    Returns:
+        None.
+    """
+    have = {row[1] for row in conn.execute("PRAGMA table_info(candles)")}
+    for column, decl in (("vol_base", "REAL"),
+                         ("vol_quote", "REAL"),
+                         ("delta", "REAL")):
+        if column not in have:
+            conn.execute("ALTER TABLE candles ADD COLUMN %s %s" % (column, decl))
 
 
 def upsert_candle(conn: sqlite3.Connection, provider: str, symbol: str,
@@ -74,13 +112,13 @@ def upsert_candle(conn: sqlite3.Connection, provider: str, symbol: str,
         symbol:   Trading pair (e.g. "EUR/USD", "BTC").
         tf:       Timeframe string (e.g. "M1", "H1").
         candle:   Dict with keys time, open, high, low, close and optional
-                  vol_base, vol_quote.
+                  vol_base, vol_quote, delta.
     """
     with conn:
         conn.execute(
             """INSERT OR REPLACE INTO candles
-               (provider, symbol, tf, time, o, h, l, c, vol_base, vol_quote)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (provider, symbol, tf, time, o, h, l, c, vol_base, vol_quote, delta)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 provider, symbol, tf,
                 candle["time"],
@@ -90,6 +128,7 @@ def upsert_candle(conn: sqlite3.Connection, provider: str, symbol: str,
                 candle["close"],
                 candle.get("vol_base"),
                 candle.get("vol_quote"),
+                candle.get("delta"),
             ),
         )
 
@@ -108,13 +147,13 @@ def upsert_candles_batch(conn: sqlite3.Connection, provider: str, symbol: str,
     with conn:
         conn.executemany(
             """INSERT OR REPLACE INTO candles
-               (provider, symbol, tf, time, o, h, l, c, vol_base, vol_quote)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (provider, symbol, tf, time, o, h, l, c, vol_base, vol_quote, delta)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     provider, symbol, tf,
                     c["time"], c["open"], c["high"], c["low"], c["close"],
-                    c.get("vol_base"), c.get("vol_quote"),
+                    c.get("vol_base"), c.get("vol_quote"), c.get("delta"),
                 )
                 for c in candles
             ],
@@ -133,18 +172,20 @@ def load_history(conn: sqlite3.Connection, provider: str, symbol: str,
 
     Returns:
         List of candle dicts with keys: time, open, high, low, close,
-        vol_base, vol_quote.
+        vol_base, vol_quote. The delta key appears only when the row has one,
+        so FXCM candles keep the exact shape they had before Фаза 3.
     """
     rows = conn.execute(
-        """SELECT time, o, h, l, c, vol_base, vol_quote
+        """SELECT time, o, h, l, c, vol_base, vol_quote, delta
            FROM candles
            WHERE provider=? AND symbol=? AND tf=?
            ORDER BY time ASC""",
         (provider, symbol, tf),
     ).fetchall()
 
-    return [
-        {
+    out = []
+    for row in rows:
+        candle = {
             "time":  row[0],
             "open":  row[1],
             "high":  row[2],
@@ -153,8 +194,10 @@ def load_history(conn: sqlite3.Connection, provider: str, symbol: str,
             "vol_base":  row[5],
             "vol_quote": row[6],
         }
-        for row in rows
-    ]
+        if row[7] is not None:
+            candle["delta"] = row[7]
+        out.append(candle)
+    return out
 
 
 def get_candle_count(conn: sqlite3.Connection, provider: str, symbol: str,
@@ -225,6 +268,71 @@ def vacuum(conn: sqlite3.Connection) -> None:
     """
     conn.commit()          # VACUUM cannot run inside a transaction
     conn.execute("VACUUM")
+
+
+def save_volume_profile(conn: sqlite3.Connection, provider: str, symbol: str,
+                        period: str, rows) -> None:
+    """Persist one period's volume profile, replacing what was there.
+
+    Called repeatedly for the period still in progress, so it must be
+    idempotent: INSERT OR REPLACE on the full primary key overwrites the
+    bucket rather than accumulating a second copy of it.
+
+    Args:
+        conn:     Open SQLite connection.
+        provider: Feed identifier.
+        symbol:   Instrument.
+        period:   Period key (e.g. "20260718" for a UTC day).
+        rows:     Sequence of (bucket, price_low, price_high, vol_buy,
+                  vol_sell, vol_quote) — the output of VolumeProfile.to_rows().
+
+    Returns:
+        None.
+    """
+    with conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO volume_profile
+               (provider, symbol, period, bucket,
+                price_low, price_high, vol_buy, vol_sell, vol_quote)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(provider, symbol, period, r[0], r[1], r[2], r[3], r[4], r[5])
+             for r in rows],
+        )
+
+
+def load_volume_profile(conn: sqlite3.Connection, provider: str, symbol: str,
+                        period: str) -> list:
+    """Read one period's volume profile, cheapest price first.
+
+    Args:
+        conn:     Open SQLite connection.
+        provider: Feed identifier.
+        symbol:   Instrument.
+        period:   Period key.
+
+    Returns:
+        List of dicts: bucket, price_low, price_high, vol_buy, vol_sell,
+        vol_quote.
+    """
+    rows = conn.execute(
+        """SELECT bucket, price_low, price_high, vol_buy, vol_sell, vol_quote
+           FROM volume_profile
+           WHERE provider=? AND symbol=? AND period=?
+           ORDER BY bucket ASC""",
+        (provider, symbol, period),
+    ).fetchall()
+
+    return [
+        {
+            "bucket":     row[0],
+            "price_low":  row[1],
+            "price_high": row[2],
+            "vol_buy":    row[3],
+            "vol_sell":   row[4],
+            "vol_quote":  row[5],
+        }
+        for row in rows
+    ]
 
 
 def upsert_instrument(conn: sqlite3.Connection, provider: str, symbol: str,

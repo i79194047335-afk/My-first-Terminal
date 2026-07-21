@@ -30,16 +30,24 @@ import websockets
 
 from core.bus import BusServer
 from core.candles import CandleBuilder, aggregate_higher_tf
-from core.db import init_db, load_history, load_instruments, trim_window, \
+from core.db import init_db, load_history, load_instruments, \
+    load_volume_profile, save_volume_profile, trim_window, \
     upsert_candle, upsert_candles_batch, upsert_instrument
+from core.large_trades import LargeTradeFilter
 from core.logfmt import setup as _log_setup
 from core.market_hours import forex_open as market_open
 from core.range_bars import RangeBarBuilder, backfill_tail
+from core.volume_profile import VolumeProfile
 
 log = _log_setup("hub")
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "retention.json")
+
+# Как часто сбрасывать профили объёма в БД. На пике по BTC идёт ~15 сделок
+# в секунду; писать все корзины на каждой — впустую жечь диск, картина
+# меняется постепенно.
+PROFILE_FLUSH_SEC = 60
 
 
 def load_config(path=CONFIG_PATH):
@@ -77,6 +85,10 @@ class Hub:
         self._tf_seconds = config["tf_seconds"]
         self._broker_tf  = tuple(config.get("broker_tf", ("H1", "H4", "D1")))
         self._keep_bars  = config["keep_bars"]
+        # Глубина окна по ТФ. Одно число на все таймфреймы неудобно: 2000
+        # баров — это 5 лет на D1 и всего 33 часа на M1. keep_bars_by_tf
+        # переопределяет глубину точечно, остальные ТФ живут на keep_bars.
+        self._keep_bars_by_tf = config.get("keep_bars_by_tf") or {}
 
         self._conn        = None
         self._builders    = {}   # (provider, symbol) -> CandleBuilder
@@ -110,6 +122,20 @@ class Hub:
         self._range_builders = {}   # (provider, symbol, pips) -> RangeBarBuilder
         self._range_pending  = {}   # (provider, symbol, pips) -> {"buffer": [...]}
 
+        # Профиль объёма: (provider, symbol) -> {"period": ключ, "profile": VP}.
+        # Копится ТОЛЬКО из тиков — свеча не помнит, на каких ценах внутри неё
+        # прошёл объём, поэтому задним числом профиль не восстановить. Пишется
+        # периодически (не на каждом тике) и хранится вечно: корзина стоит
+        # десяток чисел, а тиков через 14 дней уже не будет.
+        self._profiles = {}
+        self._profile_dirty = set()
+        self._profile_flush_ts = 0.0
+
+        # Лента крупных сделок: (provider, symbol) -> LargeTradeFilter.
+        # НЕ хранится: это живой поток, интересный в момент события. Порог —
+        # 95-й процентиль за скользящий час, свой у каждого инструмента.
+        self._large_filters = {}
+
         self._db_queue = queue.Queue(maxsize=5000)
 
         self.ticks_received = 0
@@ -121,6 +147,17 @@ class Hub:
         self._started_ts   = time.time()
         self._last_tick_ts = 0.0
         self._last_tick_by_symbol = {}   # symbol -> ts последнего РЕАЛЬНОГО тика
+
+    def keep_bars_for(self, tf):
+        """Глубина окна для таймфрейма.
+
+        Args:
+            tf: Таймфрейм ("M1", "H4", …).
+
+        Returns:
+            Int: сколько баров хранить. keep_bars_by_tf[tf], иначе keep_bars.
+        """
+        return self._keep_bars_by_tf.get(tf, self._keep_bars)
 
     # ── восстановление после рестарта ───────────────────────────────────
 
@@ -361,14 +398,15 @@ class Hub:
             merged[c["time"]] = c
 
         out = [merged[t] for t in sorted(merged)]
-        if len(out) > self._keep_bars:
-            out = out[-self._keep_bars:]
+        keep = self.keep_bars_for(tf)
+        if len(out) > keep:
+            out = out[-keep:]
         self._history[key][tf] = out
 
         # В БД — той же коннекцией главного потока: пачка приходит раз в старт,
         # через очередь db_writer (maxsize=5000) 10 000 минуток не пролезли бы.
         upsert_candles_batch(self._conn, key[0], key[1], tf, out)
-        trim_window(self._conn, key[0], key[1], tf, self._keep_bars)
+        trim_window(self._conn, key[0], key[1], tf, self.keep_bars_for(tf))
 
     def _handle_tick(self, msg):
         """Нарезать тик в свечи, сохранить закрытые, разослать живую.
@@ -403,19 +441,28 @@ class Hub:
         self._check_alerts(symbol, self._last_price.get(symbol, price), price)
         self._last_price[symbol] = price
 
-        closed = builder.ingest(price, msg["ts"])
+        # size/side есть только у бирж с настоящим объёмом (Lighter). У FXCM
+        # size=None, и свеча остаётся чистым OHLC, как была до Фазы 3.
+        closed = builder.ingest(price, msg["ts"],
+                                size=msg.get("size"), side=msg.get("side"))
 
         for tf, candle in closed.items():
             self.closed_candles += 1
             bars = self._history[key].setdefault(tf, [])
             bars.append(candle)
+            keep = self.keep_bars_for(tf)
             # Держим в памяти ровно окно ретеншена: в server.py этот список рос
             # без границ.
-            if len(bars) > self._keep_bars:
-                del bars[:len(bars) - self._keep_bars]
+            if len(bars) > keep:
+                del bars[:len(bars) - keep]
             self._enqueue_closed(provider, symbol, tf, candle)
 
-        self._range_ingest(provider, symbol, price, msg["ts"])
+        self._profile_ingest(provider, symbol, price, msg.get("size"),
+                             msg.get("side"), msg["ts"])
+        self._large_trade_check(provider, symbol, price, msg.get("size"),
+                                msg.get("side"), msg["ts"])
+        self._range_ingest(provider, symbol, price, msg["ts"],
+                           msg.get("size"), msg.get("side"))
         self._broadcast_update(provider, symbol)
 
     def _handle_instruments(self, msg):
@@ -444,6 +491,196 @@ class Hub:
 
         self._broadcast(json.dumps({"type": "instruments",
                                     "data": self._instruments}))
+
+    # ── профиль объёма ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _profile_period(ts):
+        """Ключ периода профиля по времени тика.
+
+        Период — сутки UTC. Это НЕ идеально для синтетики на традиционные
+        рынки (XAG/MU/SPCX/XAU): они живут по расписанию базового актива, и
+        календарные сутки смешивают активную сессию с почти пустыми
+        выходными. Замер 2026-07-18: XAG в субботу торгуется 19% минуток
+        против 76% в пятницу. Профиль по сессиям — задача отдельного слоя;
+        сутки UTC выбраны как честный первый шаг, совпадающий с ротацией
+        тиковых файлов.
+
+        Args:
+            ts: Время тика, unix-секунды.
+
+        Returns:
+            Строка вида "20260718".
+        """
+        return time.strftime("%Y%m%d", time.gmtime(ts))
+
+    def _profile_ingest(self, provider, symbol, price, size, side, ts):
+        """Учесть тик в профиле объёма инструмента.
+
+        Тик без объёма (FXCM) игнорируется: профиль строится по
+        ИСПОЛНЕННОМУ объёму, а поток котировок его не несёт.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+            price:    Цена сделки.
+            size:     Объём в базовых единицах или None.
+            side:     Сторона агрессора ("buy"/"sell") или None.
+            ts:       Время тика, unix-секунды.
+
+        Returns:
+            None.
+        """
+        if not size:
+            return
+
+        key = (provider, symbol)
+        period = self._profile_period(ts)
+        state = self._profiles.get(key)
+
+        if state is None or state["period"] != period:
+            # Сутки сменились — прошлый профиль дописываем и начинаем новый.
+            # Восстановление из БД: рестарт в середине дня не должен обнулять
+            # уже накопленное.
+            if state is not None:
+                self._flush_profile(key, state)
+            profile = VolumeProfile()
+            saved = self._profile_saved_rows(provider, symbol, period)
+            if saved:
+                profile.load_rows(saved)
+            state = {"period": period, "profile": profile}
+            self._profiles[key] = state
+
+        try:
+            state["profile"].add(price, size, side)
+        except ValueError as err:
+            # Цена <= 0 в логарифмической сетке не имеет смысла. Тик уже
+            # учтён в свече, поэтому здесь достаточно не уронить нарезку.
+            log.warning("профиль %s:%s — тик пропущен (%s)", provider, symbol, err)
+            return
+
+        self._profile_dirty.add(key)
+
+    def _profile_saved_rows(self, provider, symbol, period):
+        """Прочитать ранее сохранённые корзины периода.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+            period:   Ключ периода.
+
+        Returns:
+            Список кортежей (bucket, vol_buy, vol_sell, vol_quote); пустой,
+            если ничего не сохранено или чтение не удалось.
+        """
+        conn = getattr(self, "_conn", None)
+        if conn is None:
+            return []
+        try:
+            rows = load_volume_profile(conn, provider, symbol, period)
+        except Exception as err:
+            log.warning("профиль %s:%s — не прочитать сохранённое (%r)",
+                        provider, symbol, err)
+            return []
+        return [(r["bucket"], r["vol_buy"], r["vol_sell"], r["vol_quote"])
+                for r in rows]
+
+    def _flush_profile(self, key, state):
+        """Записать один профиль в БД.
+
+        Args:
+            key:   Кортеж (provider, symbol).
+            state: Словарь {"period": ..., "profile": VolumeProfile}.
+
+        Returns:
+            None.
+        """
+        rows = state["profile"].to_rows()
+        if not rows:
+            return
+        try:
+            self._db_queue.put_nowait(
+                ("__profile__", key[0], key[1], state["period"], rows))
+        except queue.Full:
+            self.db_dropped += 1
+            log.warning("очередь БД полна — профиль %s:%s потерян", *key)
+
+    def flush_profiles(self, force=False):
+        """Сбросить изменившиеся профили в БД.
+
+        Пишем раз в PROFILE_FLUSH_SEC, а не на каждом тике: на пике по BTC
+        это ~15 сделок в секунду, и запись всех корзин на каждой из них
+        просто съела бы диск ради данных, которые всё равно меняются
+        постепенно.
+
+        Args:
+            force: Писать независимо от того, прошёл ли интервал.
+
+        Returns:
+            None.
+        """
+        now = time.time()
+        if not force and now - self._profile_flush_ts < PROFILE_FLUSH_SEC:
+            return
+        self._profile_flush_ts = now
+
+        for key in list(self._profile_dirty):
+            state = self._profiles.get(key)
+            if state is not None:
+                self._flush_profile(key, state)
+        self._profile_dirty.clear()
+
+    # ── лента крупных сделок ────────────────────────────────────────────
+
+    def _large_trade_check(self, provider, symbol, price, size, side, ts):
+        """Проверить сделку на «крупность» и разослать, если да.
+
+        Порог — 95-й процентиль размера за скользящий час, свой у каждого
+        инструмента. Ничего не хранится: лента интересна в момент события,
+        а история крупных сделок восстановима из тикового архива.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Инструмент.
+            price:    Цена сделки.
+            size:     Размер в базовых единицах или None (FXCM — не лента).
+            side:     Сторона агрессора или None.
+            ts:       Время сделки, unix-секунды.
+
+        Returns:
+            None.
+        """
+        if not size:
+            return
+
+        key = (provider, symbol)
+        flt = self._large_filters.get(key)
+        if flt is None:
+            flt = LargeTradeFilter()
+            self._large_filters[key] = flt
+
+        is_large, level = flt.add(size, ts)
+        if not is_large:
+            return
+
+        self._broadcast_threadsafe(json.dumps({
+            "type":     "large_trade",
+            "provider": provider,
+            # Событие широковещательное, фронт сам решает, его ли это символ.
+            # Шлём в каноническом виде с префиксом: провайдер тут известен
+            # точно, а по голому тикеру фронт не отличил бы USDJPY у Lighter
+            # от USD/JPY у FXCM.
+            "symbol":   "%s:%s" % (provider, symbol),
+            "ts":       ts,
+            "price":    price,
+            "size":     size,
+            "side":     side,
+            "quote":    size * price,
+            # Порог, ПО КОТОРОМУ принято решение (не текущий): по нему на
+            # фронте видно, насколько сделка крупная, и size > threshold
+            # выполняется всегда.
+            "threshold": level,
+        }))
 
     # ── запись в SQLite (отдельный поток) ───────────────────────────────
 
@@ -482,7 +719,21 @@ class Hub:
         count = 0
 
         while True:
-            provider, symbol, tf, candle = self._db_queue.get()
+            item = self._db_queue.get()
+
+            # Профили едут по той же очереди, что и свечи: одна коннекция,
+            # один поток, никакой межпоточной возни с sqlite3. Различаем по
+            # маркеру в первом поле — он не может совпасть с провайдером.
+            if item[0] == "__profile__":
+                _, provider, symbol, period, rows = item
+                try:
+                    save_volume_profile(conn, provider, symbol, period, rows)
+                except Exception as err:
+                    log.warning("db_writer: профиль %s:%s — %r",
+                                provider, symbol, err)
+                continue
+
+            provider, symbol, tf, candle = item
             try:
                 upsert_candle(conn, provider, symbol, tf, candle)
                 count += 1
@@ -492,7 +743,7 @@ class Hub:
                         for sym in syms:
                             for tf_name in self._tf_seconds:
                                 trim_window(conn, prov, sym, tf_name,
-                                            self._keep_bars)
+                                            self.keep_bars_for(tf_name))
             except Exception as err:
                 log.warning("db_writer: %r — свеча пропущена", err)
 
@@ -594,7 +845,7 @@ class Hub:
                 return 10.0 ** -item["price_decimals"]
         return 0.00001
 
-    def _range_ingest(self, provider, symbol, price, ts):
+    def _range_ingest(self, provider, symbol, price, ts, size=None, side=None):
         """Прогнать живой тик через рэндж-контур этой пары.
 
         Пока идёт бэкфил, тики копятся в буфере ожидания — иначе окно бэкфила
@@ -605,16 +856,18 @@ class Hub:
             symbol:   Инструмент.
             price:    Цена тика.
             ts:       Unix-время тика (float).
+            size:     Объём сделки или None (у FXCM объёма нет).
+            side:     Сторона агрессора или None.
 
         Returns:
             None.
         """
         for key, entry in self._range_pending.items():
             if key[0] == provider and key[1] == symbol:
-                entry["buffer"].append((price, ts))
+                entry["buffer"].append((price, ts, size, side))
         for key, rb in self._range_builders.items():
             if key[0] == provider and key[1] == symbol:
-                closed = rb.ingest(price, ts)
+                closed = rb.ingest(price, ts, size, side)
                 # У рэндж-бара тик-пробойщик МУТИРУЕТ закрывающийся бар и сразу
                 # открывает новый — финальное состояние закрытого без этой
                 # отправки не ушло бы клиенту никогда (broadcast шлёт current).
@@ -642,14 +895,15 @@ class Hub:
                     and self.parse_range_tf(info["tf"]) == pips):
                 self._send(ws, json.dumps({
                     "type":      "update",
-                    "symbol":    symbol,
+                    # Под именем, под каким подписался клиент (см. _on_set_tf).
+                    "symbol":    info.get("wire") or symbol,
                     "tf":        info["tf"],
                     "requestId": info["requestId"],
                     "candle":    closed,
                 }))
 
     async def _on_set_range_tf(self, ws, provider, symbol, tf, pips,
-                               request_id):
+                               request_id, wire=None):
         """Подписать клиента на рэндж-ТФ; при первом запросе — бэкфил в фоне.
 
         Готовый билдер → история сразу; бэкфил уже идёт → клиент просто ждёт
@@ -663,11 +917,18 @@ class Hub:
             tf:         Строка ТФ как прислал фронт ("R:5").
             pips:       Разобранный диапазон в поинтах.
             request_id: requestId клиента.
+            wire:       Имя символа, под которым его знает фронт (с префиксом
+                        провайдера или без). None — взять из записи клиента.
 
         Returns:
             None.
         """
+        # wire не теряем: _on_set_tf уже записал сюда имя от фронта, и
+        # рэндж-ветка не должна его затирать — иначе после переключения на
+        # "R:5" обновления пойдут под другим именем и график замрёт.
+        wire = wire or (self._clients.get(ws) or {}).get("wire") or symbol
         self._clients[ws] = {"provider": provider, "symbol": symbol,
+                             "wire": wire,
                              "tf": tf, "requestId": request_id}
         key = (provider, symbol, pips)
 
@@ -730,9 +991,9 @@ class Hub:
         """
         provider, symbol, pips = key
         entry = self._range_pending.pop(key, {"buffer": []})
-        for price, ts in entry["buffer"]:
+        for price, ts, size, side in entry["buffer"]:
             if last_ts is None or ts > last_ts:
-                builder.ingest(price, ts)
+                builder.ingest(price, ts, size, side)
         self._range_builders[key] = builder
 
         log.info("рэндж %s:%s R=%s готов: %d баров (буфер %d тиков)",
@@ -758,10 +1019,12 @@ class Hub:
         Returns:
             None. Мёртвый сокет молча выбрасывается из клиентов.
         """
+        # Имя берём из записи клиента: там лежит то, под каким он подписался.
+        wire = (self._clients.get(ws) or {}).get("wire") or symbol
         try:
             await ws.send(json.dumps({
                 "type":      "history",
-                "symbol":    symbol,
+                "symbol":    wire,
                 "tf":        tf,
                 "requestId": request_id,
                 "data":      builder.history(),
@@ -770,7 +1033,7 @@ class Hub:
             if current:
                 await ws.send(json.dumps({
                     "type":      "update",
-                    "symbol":    symbol,
+                    "symbol":    wire,
                     "tf":        tf,
                     "requestId": request_id,
                     "candle":    current,
@@ -780,11 +1043,39 @@ class Hub:
 
     # ── WebSocket для браузера ──────────────────────────────────────────
 
-    def _provider_of(self, symbol):
-        """Найти провайдера, у которого есть такой символ.
+    def resolve_symbol(self, symbol):
+        """Разобрать символ фронта в пару (провайдер, инструмент).
 
-        Временная мера на период миграции: фронт пока шлёт голый "EUR/USD" без
-        провайдера. После Фазы 2.5 символы станут "fxcm:EUR/USD".
+        Основной формат — "provider:symbol" ("fxcm:EUR/USD", "lighter:BTC").
+        Префикс появился в Фазе 3: у Lighter есть USDJPY, USDCAD, AUDUSD —
+        те же пары, что у FXCM, и по голому тикеру их уже не различить.
+
+        Голый символ без префикса тоже принимается: так шлёт фронт, который
+        ещё не обновился, и старые вкладки не должны отваливаться в момент
+        выкатки. Провайдер тогда ищется перебором, как раньше.
+
+        Args:
+            symbol: Строка от фронта.
+
+        Returns:
+            Кортеж (provider, symbol) либо (None, symbol), если инструмент
+            не найден ни у одного провайдера.
+        """
+        markets = (getattr(self, "_config", None) or {}).get("markets") or {}
+
+        if ":" in symbol:
+            provider, _, bare = symbol.partition(":")
+            if bare in (markets.get(provider) or ()):
+                return provider, bare
+            return None, bare
+
+        for provider, symbols in markets.items():
+            if symbol in symbols:
+                return provider, symbol
+        return None, symbol
+
+    def _provider_of(self, symbol):
+        """Найти провайдера по символу (с префиксом или без).
 
         Args:
             symbol: Инструмент.
@@ -792,10 +1083,28 @@ class Hub:
         Returns:
             Имя провайдера или None.
         """
-        for provider, symbols in self._config["markets"].items():
-            if symbol in symbols:
-                return provider
-        return None
+        return self.resolve_symbol(symbol)[0]
+
+    def display_symbol(self, symbol):
+        """Собрать имя символа в том виде, в каком его знает фронт.
+
+        Обратное к resolve_symbol. Внутри хаба символ везде ЧИСТЫЙ (ключ
+        алертов, имя из шины), а фронт с Фазы 3 сравнивает пришедший symbol
+        со своим currentSymbol — то есть с префиксом. Событие, отправленное
+        под чистым именем, фронт молча отбросит: ни звука, ни попапа, при
+        том что алерт уже помечен triggered и повторно не сработает.
+
+        Args:
+            symbol: Чистый символ (как в шине).
+
+        Returns:
+            "provider:symbol", либо исходная строка, если провайдер не
+            определяется (тогда фронт-совместимость и так невозможна).
+        """
+        if ":" in symbol:
+            return symbol
+        provider = self._provider_of(symbol)
+        return provider + ":" + symbol if provider else symbol
 
     async def ws_handler(self, ws):
         """Обслужить одно браузерное подключение.
@@ -858,26 +1167,33 @@ class Hub:
         Returns:
             None.
         """
-        symbol     = data["symbol"]
+        requested  = data["symbol"]
         tf         = data["tf"]
         request_id = data.get("requestId", 0)
 
-        provider = self._provider_of(symbol)
+        # Внутри хаба символ ВСЕГДА чистый ("EUR/USD"): ключи истории, БД и
+        # билдеров такие с Фазы 1. Наружу возвращаем ровно то, что прислал
+        # фронт, — иначе он не сопоставит ответ со своим currentSymbol.
+        provider, symbol = self.resolve_symbol(requested)
         if provider is None:
-            log.warning("set_tf на неизвестный символ %s — игнор", symbol)
+            log.warning("set_tf на неизвестный символ %s — игнор", requested)
             return
 
         pips = self.parse_range_tf(tf)
         if pips is not None:
             await self._on_set_range_tf(ws, provider, symbol, tf, pips,
-                                        request_id)
+                                        request_id, wire=requested)
             return
 
         if tf not in self._tf_seconds:
             log.warning("set_tf на неизвестный %s %s — игнор", symbol, tf)
             return
 
+        # wire — как символ зовёт ФРОНТ (с префиксом или без). Живые
+        # обновления обязаны уходить под тем же именем, иначе браузер не
+        # сопоставит их со своим currentSymbol и график замрёт.
         self._clients[ws] = {"provider": provider, "symbol": symbol,
+                             "wire": requested,
                              "tf": tf, "requestId": request_id}
 
         key     = (provider, symbol)
@@ -885,7 +1201,7 @@ class Hub:
 
         await ws.send(json.dumps({
             "type":      "history",
-            "symbol":    symbol,
+            "symbol":    requested,
             "tf":        tf,
             "requestId": request_id,
             "data":      history,
@@ -899,7 +1215,7 @@ class Hub:
         if current:
             await ws.send(json.dumps({
                 "type":      "update",
-                "symbol":    symbol,
+                "symbol":    requested,
                 "tf":        tf,
                 "requestId": request_id,
                 "candle":    current,
@@ -919,7 +1235,17 @@ class Hub:
         Returns:
             None.
         """
-        symbol = data["symbol"]
+        requested = data["symbol"]
+        # Ключ алертов — ЧИСТЫЙ символ: срабатывание проверяется в _check_alerts
+        # по имени из шины, где префикса нет. Клали бы сюда "lighter:BTC" —
+        # алерт создавался бы, но не срабатывал никогда.
+        symbol = self.resolve_symbol(requested)[1]
+        # Запомнить формат имени клиента: add_alert может прийти ДО set_symbol
+        # (фронт восстанавливает алерты из localStorage сразу после connect).
+        # Без этого срабатывание уйдёт ему в каноничном виде, а он ждёт своё.
+        info = self._clients.get(ws)
+        if info is not None and not info.get("wire"):
+            info["wire"] = requested
         price  = round(float(data["price"]), 5)
         alert  = {"id": self._alert_id, "price": price, "triggered": False}
         self._alerts.setdefault(symbol, []).append(alert)
@@ -927,7 +1253,8 @@ class Hub:
 
         await ws.send(json.dumps({
             "type":   "alert_created",
-            "symbol": symbol,
+            # Наружу — как прислал фронт: он ищет свой алерт по symbol+id.
+            "symbol": requested,
             "price":  price,
             "id":     alert["id"],
         }))
@@ -946,6 +1273,8 @@ class Hub:
         price    = data.get("price")
         if symbol is None or alert_id is None or price is None:
             return
+        # Ключ алертов чистый — см. _on_add_alert.
+        symbol = self.resolve_symbol(symbol)[1]
         price = round(float(price), 5)
         for alert in self._alerts.get(symbol, []):
             if alert["id"] == alert_id:
@@ -967,6 +1296,8 @@ class Hub:
         alert_id = data.get("id")
         if symbol is None or alert_id is None:
             return
+        # Ключ алертов чистый — см. _on_add_alert.
+        symbol = self.resolve_symbol(symbol)[1]
         alert_id = int(alert_id)
         if symbol in self._alerts:
             self._alerts[symbol] = [a for a in self._alerts[symbol]
@@ -1001,8 +1332,10 @@ class Hub:
             if not candle:
                 continue
             self._send(ws, json.dumps({
+                # Под тем именем, под каким клиент подписался: фронт с
+                # префиксом получит "lighter:BTC", старый — голый "BTC".
+                "symbol":    info.get("wire") or symbol,
                 "type":      "update",
-                "symbol":    symbol,
                 "tf":        info["tf"],
                 "requestId": info["requestId"],
                 "candle":    candle,
@@ -1034,12 +1367,48 @@ class Hub:
                      symbol, alert["id"], level, price)
                 # Событие срабатывания — ВСЕМ клиентам (фронт принимает его
                 # независимо от requestId и подписки на символ).
-                self._broadcast(json.dumps({
-                    "type":   "alert",
-                    "symbol": symbol,
-                    "price":  level,
-                    "id":     alert["id"],
-                }))
+                # Каждому клиенту — в ЕГО формате имени. Фронт фильтрует
+                # событие по совпадению с currentSymbol, а форматы у клиентов
+                # разные: обновлённая вкладка ждёт "lighter:BTC", старая —
+                # голое "BTC". Один общий JSON обязательно промахнётся мимо
+                # половины из них, причём молча: алерт уже помечен triggered
+                # и повторно не сработает.
+                self._broadcast_alert(symbol, level, alert["id"])
+
+    def _broadcast_alert(self, symbol, level, alert_id):
+        """Разослать срабатывание алерта, каждому клиенту — под его именем.
+
+        Отличается от _broadcast тем, что JSON собирается для каждого
+        клиента отдельно: symbol берётся из его "wire" (как он сам назвал
+        инструмент при подписке), а не из внутреннего чистого имени. Фронт
+        сверяет msg.symbol с currentSymbol и чужой формат отбрасывает
+        БЕЗ ОШИБКИ — ни звука, ни попапа, при том что алерт уже сгорел.
+
+        Клиенту, который этот инструмент не смотрит, шлём каноничное имя:
+        событие всё равно нужно доставить (алерты глобальны, фронт
+        принимает их независимо от подписки).
+
+        Args:
+            symbol:   Чистый символ (как в шине).
+            level:    Уровень, который пересекла цена.
+            alert_id: Идентификатор алерта.
+
+        Returns:
+            None.
+        """
+        canonical = self.display_symbol(symbol)
+        for ws, info in list(self._clients.items()):
+            wire = (info or {}).get("wire")
+            # wire годится, только если это ТОТ ЖЕ инструмент: клиент может
+            # смотреть другой, и его имя к этому алерту отношения не имеет.
+            if not wire or self.resolve_symbol(wire)[1] != symbol:
+                wire = canonical
+            self._send(ws, json.dumps({
+                "type":   "alert",
+                "symbol": wire,
+                "price":  level,
+                "id":     alert_id,
+            }))
 
     def _broadcast(self, payload):
         """Разослать готовый JSON всем клиентам (алерты, инструменты).
@@ -1113,8 +1482,17 @@ class Hub:
         # Возраст последнего РЕАЛЬНОГО тика по каждому символу — фронт красит по
         # нему индикатор рынка выбранного инструмента (крипта 24/7 сама покажет
         # «открыт», форекс на выходных — «закрыт»).
-        symbols_age = {sym: round(now - ts, 1)
-                       for sym, ts in self._last_tick_by_symbol.items()}
+        # Ключи — И чистые, И с префиксом провайдера: фронт после Фазы 3
+        # спрашивает "lighter:BTC", старые вкладки — голый "BTC". Отдать
+        # только один вариант значило бы, что у половины клиентов индикатор
+        # рынка навсегда застынет в положении «закрыт».
+        symbols_age = {}
+        for sym, ts in self._last_tick_by_symbol.items():
+            age_sec = round(now - ts, 1)
+            symbols_age[sym] = age_sec
+            provider = self._provider_of(sym)
+            if provider:
+                symbols_age["%s:%s" % (provider, sym)] = age_sec
 
         return {
             "status":    "stale" if stale else "ok",
@@ -1142,6 +1520,29 @@ async def _stats_loop(hub, every=60):
     while True:
         await asyncio.sleep(every)
         log.info("%s", hub.stats)
+
+
+async def _profile_flush_loop(hub, every=PROFILE_FLUSH_SEC):
+    """Периодически сбрасывать профили объёма в БД.
+
+    Отдельным циклом, а не внутри обработки тика: сброс не должен зависеть
+    от того, идут ли сделки. Иначе профиль неликвидного инструмента (XAG
+    в выходные — 19% активных минуток) висел бы в памяти незаписанным и
+    терялся при рестарте.
+
+    Args:
+        hub:   Экземпляр Hub.
+        every: Период в секундах.
+
+    Returns:
+        None (бесконечный цикл).
+    """
+    while True:
+        await asyncio.sleep(every)
+        try:
+            hub.flush_profiles(force=True)
+        except Exception as err:
+            log.warning("сброс профилей не удался: %r", err)
 
 
 async def _heartbeat_loop(hub, every=10):
@@ -1220,6 +1621,7 @@ async def main():
     await start_health_server(hub, config.get("health_port", 8787))
 
     asyncio.ensure_future(_stats_loop(hub))
+    asyncio.ensure_future(_profile_flush_loop(hub))
     asyncio.ensure_future(_heartbeat_loop(hub))
     await asyncio.Future()
 

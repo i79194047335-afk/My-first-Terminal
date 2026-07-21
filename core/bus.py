@@ -60,7 +60,7 @@ class BusError(Exception):
 
 # ── конструкторы сообщений ─────────────────────────────────────────────
 
-def make_tick(provider, symbol, ts, price, size=None):
+def make_tick(provider, symbol, ts, price, size=None, side=None):
     """Собрать сообщение 'tick'.
 
     Args:
@@ -69,6 +69,9 @@ def make_tick(provider, symbol, ts, price, size=None):
         ts:       Время в unix-СЕКУНДАХ (int/float).
         price:    Цена (mid для форекса, last trade для крипты).
         size:     Объём сделки или None, если провайдер его не даёт (FXCM).
+        side:     Сторона АГРЕССОРА ("buy"/"sell") или None. Нужна для дельты
+                  свечи: OHLC не говорит, кто продавил цену внутри бара.
+                  У FXCM стороны нет — там поток котировок, а не сделок.
 
     Returns:
         Dict сообщения шины.
@@ -80,6 +83,7 @@ def make_tick(provider, symbol, ts, price, size=None):
         "ts":       ts,
         "price":    price,
         "size":     size,
+        "side":     side,
     }
 
 
@@ -194,6 +198,14 @@ def validate(msg):
                 raise BusError("tick[%s]: size не число и не None: %r" % (symbol, size))
             if size < 0:
                 raise BusError("tick[%s]: size должен быть >= 0, получено %r" % (symbol, size))
+
+        # Сторона агрессора проверяется строго: опечатка ("BUY", "b", 1) не
+        # уронила бы нарезку, а молча перекосила дельту — такой баг ловится
+        # уже по кривому индикатору, а не по логу.
+        side = msg.get("side")
+        if side is not None and side not in ("buy", "sell"):
+            raise BusError("tick[%s]: side должен быть 'buy'/'sell'/None, получено %r"
+                           % (symbol, side))
 
     elif mtype == "candles":
         symbol = msg.get("symbol")

@@ -41,7 +41,8 @@ class TestAlertUnit(unittest.TestCase):
         h = self._hub()
         h._alerts[SYMBOL] = [{"id": 1, "price": 1.1750, "triggered": False}]
         fired = []
-        h._broadcast = lambda p: fired.append(json.loads(p))
+        h._clients[object()] = {"wire": SYMBOL}
+        h._send = lambda ws, p: fired.append(json.loads(p))
 
         h._check_alerts(SYMBOL, 1.1749, 1.1751)   # пересекли снизу вверх
         self.assertEqual(len(fired), 1)
@@ -54,7 +55,8 @@ class TestAlertUnit(unittest.TestCase):
         h = self._hub()
         h._alerts[SYMBOL] = [{"id": 1, "price": 1.1750, "triggered": False}]
         fired = []
-        h._broadcast = lambda p: fired.append(json.loads(p))
+        h._clients[object()] = {"wire": SYMBOL}
+        h._send = lambda ws, p: fired.append(json.loads(p))
 
         h._check_alerts(SYMBOL, 1.1751, 1.1749)   # сверху вниз — тоже срабатывает
         self.assertEqual(len(fired), 1)
@@ -63,7 +65,8 @@ class TestAlertUnit(unittest.TestCase):
         h = self._hub()
         h._alerts[SYMBOL] = [{"id": 1, "price": 1.1750, "triggered": False}]
         fired = []
-        h._broadcast = lambda p: fired.append(json.loads(p))
+        h._clients[object()] = {"wire": SYMBOL}
+        h._send = lambda ws, p: fired.append(json.loads(p))
 
         h._check_alerts(SYMBOL, 1.1740, 1.1745)   # уровень не задет
         self.assertEqual(fired, [])
@@ -73,7 +76,8 @@ class TestAlertUnit(unittest.TestCase):
         h = self._hub()
         h._alerts[SYMBOL] = [{"id": 1, "price": 1.1750, "triggered": False}]
         fired = []
-        h._broadcast = lambda p: fired.append(json.loads(p))
+        h._clients[object()] = {"wire": SYMBOL}
+        h._send = lambda ws, p: fired.append(json.loads(p))
 
         h._check_alerts(SYMBOL, 1.1749, 1.1751)
         h._check_alerts(SYMBOL, 1.1751, 1.1749)   # снова через уровень
