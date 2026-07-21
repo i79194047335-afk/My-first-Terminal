@@ -411,6 +411,16 @@
             <button type="button" onclick="setVolumeVisible(false)" data-volume-btn="off">Скрыть</button>
         </span>
     </div>
+    <!-- Стакан: живая гистограмма лимитных заявок справа. Только у бирж —
+         у FXCM стакана нет вовсе, там строка неактивна. Ничего не хранится:
+         подписка у биржи заводится, только пока индикатор включён. -->
+    <div id="orderbookRow">
+        <span>Стакан</span>
+        <span id="orderbookToggle">
+            <button type="button" onclick="setOrderbookVisible(true)"  data-orderbook-btn="on">Показать</button>
+            <button type="button" onclick="setOrderbookVisible(false)" data-orderbook-btn="off">Скрыть</button>
+        </span>
+    </div>
 </div>
 
 <!-- Line / overlay context menu -->
@@ -618,6 +628,7 @@
 <script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
 <script src="js/time-mapper.js"></script>
 <script src="js/drawing-engine.js"></script>
+<script src="js/orderbook-overlay.js"></script>
 <script src="js/position-tool.js"></script>
 <script src="js/indicators.js"></script>
 <script src="js/storage.js"></script>
@@ -1107,6 +1118,16 @@ function handleMessage(id, state, msg) {
     // раз, иначе каждая сделка добавлялась бы дважды.
     if (msg.type === "large_trade" && id === 1) addTapeTrade(msg);
 
+    // Срез стакана. Сверяем символ: на переключении инструмента в полёте
+    // может быть срез от предыдущего, и нарисовать его было бы враньём —
+    // стены встали бы по ценам другого рынка.
+    if (msg.type === "orderbook") {
+        const st = panesState[id];
+        if (st?.orderbookOverlay && msg.symbol === currentSymbol) {
+            st.orderbookOverlay.setBook(msg);
+        }
+    }
+
     if (msg.type === "analysis") updateMarketEngine(msg);
     if (msg.type === "signal")   showSignal(msg);
     if (msg.type === "briefing") { lastBriefingData = msg.data; if (briefVisible) renderBriefing(); }
@@ -1143,6 +1164,7 @@ function handleMessage(id, state, msg) {
             if (st.volumeSeries && st.data?.length) setVolumeData(id, st.data);
         });
         syncVolumeButtons();
+        syncOrderbookButtons();
         // Заглушку ленты тоже надо переписать: resetTape() на старте отработал
         // с ПУСТЫМ instrumentsWithVolume и написал «нет биржевого объёма» даже
         // для крипты. Обновляем, только если сделок ещё не было — иначе
@@ -1313,6 +1335,13 @@ function createPane(id) {
 
         // Drawing overlay
         st.drawingEngine = new DrawingEngine(paneId, st.chart, st.series, chartDiv);
+
+        // Гистограмма стакана — под рисунками, над графиком.
+        st.orderbookOverlay = new OrderbookOverlay(paneId, st.chart, st.series, chartDiv);
+        if (layout[`pane${paneId}`]?.orderbook) {
+            st.orderbookOverlay.setEnabled(true);
+            requestOrderbook(paneId, true);
+        }
 
         // Синхронное отображение курсоров на обеих панелях.
         // Движение мыши по одному графику отражается крестиком на другом
@@ -2028,6 +2057,9 @@ function switchSymbol(symbol) {
         try { st.series?.setData([]); } catch (e) {}
         if (st.volumeSeries) { try { st.volumeSeries.setData([]); } catch (e) {} }
         renderVolumeLegend(paneId, null);
+        // Стакан предыдущего инструмента — чужие цены. Держать его до
+        // прихода нового значило бы рисовать стены не того рынка.
+        if (st.orderbookOverlay) st.orderbookOverlay.setBook(null);
     });
     drawings[1] = []; drawings[2] = [];
 
@@ -2039,6 +2071,13 @@ function switchSymbol(symbol) {
         if (!state) return;
         state.indicatorsLoaded = false; // force reload on next history
         applyPriceFormat(id);           // precision нового символа
+        // Стакан: у нового инструмента его может не быть (форекс). Хабу
+        // сообщаем в любом случае — он сам решит, у кого отписаться.
+        if (state.orderbookOverlay) {
+            const want = layout.showOrderbook === true && orderbookAvailable();
+            state.orderbookOverlay.setEnabled(want);
+            requestOrderbook(id, want);
+        }
         // Объём есть не у всех: у FXCM это поток котировок, а не сделок.
         // Снимаем/ставим серию сразу, не дожидаясь истории, иначе на
         // форексе остались бы висеть столбцы от прошлого инструмента.
@@ -2078,6 +2117,7 @@ function switchSymbol(symbol) {
             wireSocket(id, state, getPaneElements(id));
         }
     });
+    syncOrderbookButtons();
     refreshSignalMarkers();
     // Если панель брифинга открыта — перерендерить для нового символа
     if (briefVisible) renderBriefing();
@@ -3496,6 +3536,67 @@ function syncChartTypeButtons(paneId) {
  * @param {boolean} visible Показывать ли объём.
  * @returns {void}
  */
+/**
+ * Попросить хаб включить или выключить поток стакана для панели.
+ *
+ * Подписка у биржи заводится только на время просмотра — она стоит около
+ * 1.1 ГБ в сутки на инструмент, поэтому «на всякий случай» её не держат.
+ * @param {number} paneId Панель.
+ * @param {boolean} on Нужен ли поток.
+ * @returns {void}
+ */
+function requestOrderbook(paneId, on) {
+    const ws = panesState[paneId]?.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "orderbook", enabled: !!on }));
+    }
+}
+
+/**
+ * Показать или скрыть гистограмму стакана.
+ * @param {boolean} visible Показывать ли.
+ * @returns {void}
+ */
+function setOrderbookVisible(visible) {
+    const on = !!visible && orderbookAvailable();
+    layout.showOrderbook = on;
+    StorageLayer.autoSave(layout);
+    [1, 2].forEach(id => {
+        const st = panesState[id];
+        if (!st?.orderbookOverlay) return;
+        st.orderbookOverlay.setEnabled(on);
+        requestOrderbook(id, on);
+    });
+    syncOrderbookButtons();
+}
+
+/**
+ * Есть ли у текущего инструмента стакан.
+ *
+ * Стакан даёт только биржа. У FXCM его нет вовсе: там поток котировок, а не
+ * книга заявок, и рисовать нечего.
+ * @returns {boolean}
+ */
+function orderbookAvailable() {
+    return instrumentsWithVolume.has(currentSymbol);
+}
+
+/**
+ * Подсветить активную кнопку стакана и погасить строку, если стакана нет.
+ * @returns {void}
+ */
+function syncOrderbookButtons() {
+    const has = orderbookAvailable();
+    const on  = has && layout.showOrderbook === true;
+    document.querySelectorAll("#orderbookToggle button").forEach(b =>
+        b.classList.toggle("on", b.dataset.orderbookBtn === (on ? "on" : "off")));
+    const row = document.getElementById("orderbookRow");
+    if (row) {
+        row.style.opacity = has ? "" : "0.45";
+        row.title = has ? "" : "У этого инструмента нет стакана (только биржи)";
+    }
+}
+
 function setVolumeVisible(visible) {
     layout.showVolume = !!visible;
     StorageLayer.autoSave(layout);
