@@ -3010,6 +3010,54 @@ function toggleBriefing() {
     }
 }
 
+/**
+ * Отрисовать общий блок по крипторынку.
+ *
+ * Отдельно от парного брифинга: у крипты нет поштучного разбора, зато есть
+ * то, чего нет у форекса — новости про биржу, где мы торгуем.
+ * @param {HTMLElement} el Контейнер.
+ * @param {object} c Блок crypto из брифинга.
+ * @returns {void}
+ */
+function renderCryptoBriefing(el, c) {
+    const dir  = (c.direction || "NEUTRAL").toLowerCase();
+    const col  = dir === "up" ? "#26a69a" : dir === "down" ? "#ef5350" : "#888";
+    const esc  = s => String(s ?? "").replace(/[<>&]/g,
+        ch => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[ch]));
+    const sect = (title, body) => body
+        ? "<div style='margin:12px 0'><div style='opacity:.65;font-size:11px;"
+          + "text-transform:uppercase;letter-spacing:.4px'>" + title
+          + "</div><div style='margin-top:4px'>" + esc(body) + "</div></div>"
+        : "";
+
+    // Новости про биржу — первыми и заметно: они бьют по всем инструментам.
+    const alerts = (c.venue_alerts || []).filter(Boolean);
+    const alertsHtml = alerts.length
+        ? "<div style='margin:12px 0;padding:8px 10px;border-radius:6px;"
+          + "background:rgba(239,83,80,.15);border:1px solid rgba(239,83,80,.4)'>"
+          + "<div style='font-weight:600;margin-bottom:4px'>⚠ Биржа Lighter</div>"
+          + alerts.map(a => "<div>• " + esc(a) + "</div>").join("") + "</div>"
+        : "";
+
+    const events = (c.key_events || []).filter(Boolean);
+    const eventsHtml = events.length
+        ? sect("События", events.join(" · ")) : "";
+
+    el.innerHTML =
+        "<div style='font-weight:600;font-size:14px'>Крипторынок "
+        + "<span style='color:" + col + "'>" + esc(c.direction || "NEUTRAL")
+        + "</span>"
+        + (c.direction_confidence
+            ? " <span style='opacity:.6;font-size:12px'>уверенность "
+              + esc(c.direction_confidence) + "/5</span>" : "")
+        + "</div>"
+        + alertsHtml
+        + sect("Картина", c.summary)
+        + sect("Наши инструменты", c.our_assets)
+        + eventsHtml
+        + sect("За чем следить", c.watch_for);
+}
+
 function renderBriefing() {
     const content = document.getElementById("briefContent");
     if (!content) return;
@@ -3026,6 +3074,13 @@ function renderBriefing() {
     // короткому имени.
     const pairData = lastBriefingData.pairs[displaySymbol(currentSymbol)];
     if (!pairData) {
+        // Крипта разбирается ОБЩИМ блоком, а не поштучно: по каждой монете
+        // отдельно новостей не набирается. Показываем его вместо заглушки.
+        const c = lastBriefingData.crypto;
+        if (c && instrumentsWithVolume.has(currentSymbol)) {
+            renderCryptoBriefing(content, c);
+            return;
+        }
         content.innerHTML =
             "<div style='color:#888;text-align:center;margin-top:40px'>" +
             "Нет брифинга для " + displaySymbol(currentSymbol) + "</div>";

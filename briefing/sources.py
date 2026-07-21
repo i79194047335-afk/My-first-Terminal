@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 import feedparser
 import urllib.request
 import json
+import re as _re
 
 # Часовой пояс отображения — время машины владельца (UTC+5). Хранение везде в
 # UTC (ts), сдвиг только на строках для человека.
@@ -43,6 +44,16 @@ RSS_FEEDS = [
     {"name": "CNBC",          "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"},
     {"name": "FT Home",       "url": "https://www.ft.com/rss/home/uk"},
     # Investing/MarketWatch убраны — общерыночные, ~0 релевантного forex.
+    # Крипта (Фаза 3: в терминале 12 биржевых инструментов). Проверены
+    # живьём 2026-07-22 — статус 200, непустые. Мёртвые на эту дату и
+    # потому НЕ включённые: CoinDesk, Bitcoin Magazine, Blockworks,
+    # CryptoBriefing, CoinGape (все отдают HTTPError).
+    {"name": "Cointelegraph", "url": "https://cointelegraph.com/rss"},
+    {"name": "The Block",     "url": "https://www.theblock.co/rss.xml"},
+    {"name": "Decrypt",       "url": "https://decrypt.co/feed"},
+    {"name": "CryptoSlate",   "url": "https://cryptoslate.com/feed/"},
+    {"name": "BeInCrypto",    "url": "https://beincrypto.com/feed/"},
+    {"name": "Protos",        "url": "https://protos.com/feed/"},
 ]
 
 # Сколько записей с фида просматривать ДО фильтра. Было [:5] — резало втрое
@@ -69,7 +80,69 @@ FOREX_KEYWORDS = [
     "risk appetite", "safe haven", "risk-off", "risk-on",
     "inflation", "CPI", "GDP", "PMI", "employment", "NFP", "payrolls",
 ]
-_KW_LOWER = [k.lower() for k in FOREX_KEYWORDS]
+
+# Крипта. Отдельным списком, а не вперемешку с форексом: по нему считается
+# признак "про наши активы" — заголовок про XRP или мем-коины релевантен
+# крипторынку вообще, но к нашим 12 инструментам отношения не имеет.
+CRYPTO_KEYWORDS = [
+    # Наши инструменты и их сети (символы из retention.json).
+    "bitcoin", "BTC", "ethereum", "ETH", "ether",
+    "solana", "SOL", "BNB", "Binance Coin", "hyperliquid", "HYPE",
+    "zcash", "ZEC", "chainlink", "LINK",
+    # Общие драйверы крипторынка.
+    "crypto", "cryptocurrency", "digital asset", "stablecoin", "USDT", "USDC",
+    "ETF", "spot ETF", "halving", "staking", "DeFi", "perpetual", "perps",
+    "funding rate", "open interest", "liquidation",
+    # Регулирование и институты — самые сильные новости, как просил владелец.
+    # ИМЕНА КОМПАНИЙ только те, что вне крипты почти не встречаются:
+    # BlackRock и Circle убраны — ловили новости про рабочие профессии и
+    # про «circle» в обычном значении. Их крипто-контекст и так придёт
+    # через ETF/stablecoin/SEC.
+    "CFTC", "MiCA", "spot ETF", "spot approval",
+    "Coinbase", "Binance", "Tether", "Kraken", "Grayscale",
+    "CBDC", "OFAC",
+    # Инфраструктура: сети и мосты, чьи сбои двигают цену сразу.
+    # "Optimism" и "L2" убраны — это обычные слова ("investor optimism"
+    # ловил новости про немецкий инвест-климат). Их контекст всё равно
+    # придёт через "rollup"/"layer 2"/"zkSync".
+    "layer 2", "rollup", "zkSync", "zk-rollup", "Arbitrum",
+    "bridge hack", "exploit", "onchain", "on-chain",
+]
+
+# Биржа, на которой мы торгуем. Совпадение здесь — максимальная важность:
+# сбой, листинг или изменение правил Lighter бьёт по ВСЕМ нашим инструментам
+# сразу, независимо от того, что делает рынок.
+VENUE_KEYWORDS = [
+    "lighter", "zklighter", "elliot",
+]
+
+_KW_LOWER        = [k.lower() for k in FOREX_KEYWORDS]
+_CRYPTO_KW_LOWER = [k.lower() for k in CRYPTO_KEYWORDS]
+_VENUE_KW_LOWER  = [k.lower() for k in VENUE_KEYWORDS]
+
+
+def _compile_kw(words):
+    """Скомпилировать ключевые слова в регулярку с границами слов.
+
+    Короткие тикеры НЕЛЬЗЯ искать подстрокой: "ETH" находится внутри
+    "Hegseth", "SEC" — внутри "Secretary", "SOL" — внутри "solar". Живая
+    проверка 2026-07-22 дала 85 ложных крипто-совпадений на 174 новостях,
+    включая заголовки про нефть и Apple.
+
+    Args:
+        words: Список ключевых слов (регистр не важен).
+
+    Returns:
+        Скомпилированный regex, срабатывающий по границам слов.
+    """
+    escaped = [_re.escape(w.lower()) for w in words]
+    # \b по краям: "eth" не совпадёт внутри "hegseth", но совпадёт в "ETH/USD".
+    return _re.compile(r"\b(?:" + "|".join(escaped) + r")\b")
+
+
+_FOREX_RE  = _compile_kw(FOREX_KEYWORDS)
+_CRYPTO_RE = _compile_kw(CRYPTO_KEYWORDS)
+_VENUE_RE  = _compile_kw(VENUE_KEYWORDS)
 
 
 def _fmt_display(ts):
@@ -139,7 +212,15 @@ def fetch_news():
                 title = entry.get("title", "").strip()
                 summary = entry.get("summary", entry.get("description", "")).strip()
                 text = (title + " " + summary).lower()
-                if not any(kw in text for kw in _KW_LOWER):
+
+                # Три независимые категории. Новость берётся, если попала
+                # хоть в одну, но пометки идут в промпт: модель должна
+                # знать, что новость про НАШУ биржу весит больше, чем
+                # общерыночная.
+                is_forex  = bool(_FOREX_RE.search(text))
+                is_crypto = bool(_CRYPTO_RE.search(text))
+                is_venue  = bool(_VENUE_RE.search(text))
+                if not (is_forex or is_crypto or is_venue):
                     continue
 
                 ts = _entry_ts(entry)
@@ -150,6 +231,11 @@ def fetch_news():
                     "link": entry.get("link", ""),
                     "ts": ts,
                     "time_display": _fmt_display(ts),
+                    "forex":  is_forex,
+                    "crypto": is_crypto,
+                    # Упоминание площадки, где мы реально торгуем. Бьёт по
+                    # всем инструментам разом — отсюда отдельный флаг.
+                    "venue":  is_venue,
                 })
                 relevant += 1
 

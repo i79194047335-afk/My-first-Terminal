@@ -94,6 +94,15 @@ def build_system_prompt(session_key, session_label_ru, market_open=True):
     "USD/JPY": {...}, "AUD/USD": {...}, "USD/CAD": {...}
   },
   "accumulated_context": {"EUR/USD": ["наблюдение для след. брифинга"], "USD/JPY":[...], "AUD/USD":[...], "USD/CAD":[...]},
+  "crypto": {
+    "direction": "UP|DOWN|NEUTRAL",
+    "direction_confidence": 1-5,
+    "summary": "200-350 симв: картина крипторынка — BTC и ETH задают тон, что с риск-аппетитом, приток/отток в ETF, регуляторный фон",
+    "our_assets": "150-250 симв: что из ленты касается ИМЕННО наших инструментов (BTC, ETH, SOL, BNB, HYPE, ZEC и токенизированные XAU/XAG/WTI/MU/SPCX). Если ничего — так и скажи",
+    "venue_alerts": ["новости про биржу Lighter, её сеть или zk-инфраструктуру — ПУСТОЙ список, если таких нет"],
+    "key_events": ["события крипторынка (время UTC+5)"],
+    "watch_for": "150-250 симв: что переломит картину"
+  },
   "global_context": {
     "key_events_today": ["главные события (время UTC+5)"],
     "risk_factors": ["конкретные риски, геополитика, что сломает bias"],
@@ -101,7 +110,20 @@ def build_system_prompt(session_key, session_label_ru, market_open=True):
     "session_volatility": "LOW|NORMAL|HIGH",
     "recommendation": "180-280 симв: общая картина сессии, где сильнее конвикшен, что игнорировать"
   }
-}""" % (role, pairs, ctx)
+}
+
+БЛОК "crypto" — ОБЩИЙ по рынку, без разбивки по монетам. Приоритет важности,
+от высшего к низшему:
+  1. Новости про биржу Lighter, её сеть или zk-инфраструктуру. Такое бьёт по
+     ВСЕМ нашим крипто-инструментам разом — выноси в venue_alerts дословно.
+  2. Новости, прямо называющие наши активы (BTC, ETH, SOL, BNB, HYPE, ZEC) —
+     в our_assets.
+  3. Регуляторика, ETF, институциональные потоки, крупные взломы — в summary.
+  4. Общий шум крипторынка (альткоины вне нашего списка, мем-коины) —
+     ИГНОРИРУЙ, он к терминалу отношения не имеет.
+
+Крипта торгуется 24/7: понятия «сессия» для неё нет, но риск-аппетит общий с
+форексом — если акции и валюты уходят в risk-off, отметь это и для крипты.""" % (role, pairs, ctx)
 
 
 def _fmt_technical(sym, t):
@@ -167,9 +189,32 @@ def build_user_prompt(technical, news_items, news_diag, calendar,
     line, total, low = news_summary(news_diag)
     parts.append("\nНОВОСТНАЯ ЛЕНТА (%d заголовков, %s):"
                  % (total, "ЛЕНТА ХУДАЯ — мало источников" if low else "ок"))
-    for it in news_items[:40]:
+    # Отбор в ленту промпта. Простое [:40] отдало бы всё место форексу:
+    # форекс-фиды идут первыми в списке источников, и крипта до модели могла
+    # не дойти вовсе. Поэтому квоты по категориям, а новости про НАШУ БИРЖУ
+    # идут вперёд всех — они бьют по всем инструментам сразу.
+    venue  = [i for i in news_items if i.get("venue")]
+    crypto = [i for i in news_items if i.get("crypto") and not i.get("venue")]
+    forex  = [i for i in news_items if i.get("forex")
+              and not i.get("crypto") and not i.get("venue")]
+    # Новости без единого флага. Появляются, если фильтр менялся, а список
+    # пришёл из старого кэша или от стороннего вызова: молча терять их
+    # нельзя — до правки они попадали в промпт наравне со всеми.
+    other = [i for i in news_items
+             if not i.get("venue") and not i.get("crypto") and not i.get("forex")]
+
+    selected = venue + forex[:22] + crypto[:18] + other
+    for it in selected[:45]:
         when = it.get("time_display") or "?"
-        parts.append("  [%s] %s: %s" % (when, it["source"], it["title"]))
+        # Метка категории: модель должна видеть, что новость про биржу или
+        # про наши активы, а не угадывать это по тексту.
+        if it.get("venue"):
+            tag = "[БИРЖА LIGHTER] "
+        elif it.get("crypto"):
+            tag = "[крипта] "
+        else:
+            tag = ""
+        parts.append("  [%s] %s: %s%s" % (when, it["source"], tag, it["title"]))
 
     # Экономический календарь.
     if calendar:
