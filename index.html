@@ -1007,6 +1007,15 @@ function isDrawingActive() {
 // ============================================================================
 // SINGLE WebSocket message handler (used by both createPane and switchSymbol)
 // ============================================================================
+// Типы, которые хаб шлёт ВСЕМ и без requestId. Забыть тип в этом наборе —
+// значит молча потерять сообщение: фильтр ниже отбросит его, потому что
+// undefined никогда не равен state.requestId. Так уже терялись instruments
+// (селектор пар жил на захардкоженной разметке) и срез стакана.
+const BROADCAST_TYPES = new Set([
+    "alert", "alert_created", "analysis", "signal", "briefing",
+    "signals_history", "instruments", "large_trade", "orderbook",
+]);
+
 function handleMessage(id, state, msg) {
     const els = getPaneElements(id);
 
@@ -1020,17 +1029,8 @@ function handleMessage(id, state, msg) {
     // молча отсекались (requestId=undefined никогда не равен state.requestId),
     // и селектор пар жил на захардкоженной HTML-разметке — баг был невидим,
     // пока от instruments не стали зависеть precision и объём.
-    if (
-        msg.type !== "alert" &&
-        msg.type !== "alert_created" &&
-        msg.type !== "analysis" &&
-        msg.type !== "signal" &&
-        msg.type !== "briefing" &&
-        msg.type !== "signals_history" &&
-        msg.type !== "instruments" &&
-        msg.type !== "large_trade" &&
-        msg.requestId !== state.requestId
-    ) return;
+    if (!BROADCAST_TYPES.has(msg.type) && msg.requestId !== state.requestId)
+        return;
 
     if (msg.type === "history") {
         if (!state.chart) createChartInternal(id, state.tfSeconds);
