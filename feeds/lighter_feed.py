@@ -4,10 +4,18 @@
 Всё, что фид умеет:
   1. держать WS-соединение с Lighter и слушать сделки (канал trade/{market_id});
   2. слать тики, историю и метаданные инструментов хабу через core/bus;
-  3. писать сырые тики в data/*.csv — сырьё для рэндж-баров.
+  3. писать сырые тики в data/*.csv — сырьё для рэндж-баров;
+  4. вести локальные книги заявок (стакан) и раз в секунду слать хабу срез.
 
-Чего фид НЕ делает: не режет свечи, не пишет в SQLite, не говорит с браузером,
-не ходит в стакан. Это работа хаба (hub.py) — или не нужно вовсе.
+Чего фид НЕ делает: не режет свечи, не пишет в SQLite, не говорит с браузером.
+Это работа хаба (hub.py).
+
+СТАКАН ПОДПИСЫВАЕТСЯ ПО КОМАНДЕ ХАБА, а не сам. Одна подписка стоит ~1.1 ГБ
+в сутки (замер на BTC: 16.7 обновлений/сек), поэтому книги держатся только для
+инструментов, которые кто-то смотрит прямо сейчас. Хаб знает, кто смотрит, и
+шлёт команду `orderbook_sub` через обратный канал шины; сама переподписка
+делается в _consume, где есть живой websocket биржи. Стакан НЕ хранится
+нигде — это состояние «сейчас», живущее до следующего среза.
 
 Запуск:  python3.10 -m feeds.lighter_feed   (из корня проекта)
 
@@ -39,9 +47,11 @@ import websockets
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.bus import BusClient, make_candles, make_instruments, make_tick
+from core.bus import BusClient, make_candles, make_instruments, \
+    make_orderbook, make_tick
 from core.logfmt import setup as _log_setup
 from feeds.lighter_raw import Deduper, normalize_trade
+from feeds.orderbook import OrderBook
 
 log = _log_setup("feed-lighter")
 
@@ -50,6 +60,11 @@ DATA_DIR = "data"
 
 WS_URL   = os.getenv("LIGHTER_WS_URL", "wss://mainnet.zklighter.elliot.ai/stream")
 REST_URL = os.getenv("LIGHTER_REST_URL", "https://mainnet.zklighter.elliot.ai")
+
+# Полуширина среза стакана в процентах от mid. Замер на BTC: книга тянется на
+# 79% вниз и 366% вверх, ±0.5% отсекает ~4000 уровней до ~700 — всё, что реально
+# попадает на экран. Шире смысла нет: дальние уровни не видны ни на одном зуме.
+BOOK_PCT = 0.5
 
 # Белый список: 12 инструментов, отобранных по суточному обороту (замер
 # 2026-07-18). Ниже XAG обрыв ликвидности — там профиль объёма будет дырявым.
@@ -383,7 +398,117 @@ def tick_writer(tick_queue):
 
 # ── WS: поток сделок ──────────────────────────────────────────────────
 
-async def _consume(ws, bus, tick_queue, dedupers, stats):
+def _market_id_of(channel):
+    """Достать market_id из имени канала ("order_book:1" / "order_book/1").
+
+    Args:
+        channel: Строка канала из кадра биржи.
+
+    Returns:
+        Int market_id или None, если разобрать не вышло.
+    """
+    for sep in (":", "/"):
+        if sep in channel:
+            try:
+                return int(channel.rsplit(sep, 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def _handle_book_frame(mtype, msg, books, stats):
+    """Применить кадр стакана к локальной книге.
+
+    Args:
+        mtype: Тип кадра ("subscribed/order_book" или "update/order_book").
+        msg:   Разобранный кадр.
+        books: Dict market_id → OrderBook.
+        stats: Счётчики для лога.
+
+    Returns:
+        None.
+    """
+    market_id = _market_id_of(msg.get("channel", ""))
+    if market_id is None:
+        log.warning("кривой channel стакана: %r", msg.get("channel"))
+        return
+
+    book = books.get(market_id)
+    if book is None:
+        # Кадр рынка, на который мы уже отписались: биржа могла прислать его
+        # до того, как отписка дошла. Молча игнорируем.
+        return
+
+    ob = msg.get("order_book") or {}
+    if mtype == "subscribed/order_book":
+        book.apply_snapshot(ob.get("bids"), ob.get("asks"))
+        stats["book_snap"] = stats.get("book_snap", 0) + 1
+    else:
+        book.apply_delta(ob.get("bids"), ob.get("asks"))
+        stats["book_delta"] = stats.get("book_delta", 0) + 1
+
+
+async def _book_publisher(bus, books, interval=1.0):
+    """Раз в секунду слать хабу срезы всех отслеживаемых стаканов.
+
+    Публикуем по таймеру, а не на каждой дельте: биржа шлёт ~17 обновлений
+    в секунду на рынок, и гнать их все на фронт незачем — глаз не отличит,
+    а трафик вырос бы в 17 раз.
+
+    Args:
+        bus:      BusClient.
+        books:    Dict market_id → OrderBook.
+        interval: Период публикации в секундах.
+
+    Returns:
+        None (вечный цикл).
+    """
+    while True:
+        await asyncio.sleep(interval)
+        now = time.time()
+        for market_id, book in list(books.items()):
+            symbol = MARKET_TO_SYMBOL.get(market_id)
+            if symbol is None or not book.ready:
+                continue
+            bids, asks = book.snapshot(pct=BOOK_PCT)
+            if not bids and not asks:
+                continue
+            bus.send_threadsafe(
+                make_orderbook(PROVIDER, symbol, now, bids, asks))
+
+
+async def _sync_book_subs(ws, books, wanted, subscribed):
+    """Привести подписки на стаканы в соответствие с набором wanted.
+
+    Хаб командами меняет wanted (кто-то открыл/закрыл индикатор), а сюда
+    приходит только разница. Подписка на стакан стоит ~1.1 ГБ/сутки на
+    инструмент, поэтому лишних держать нельзя.
+
+    Args:
+        ws:         Открытый websocket биржи.
+        books:      Dict market_id → OrderBook.
+        wanted:     Set нужных market_id.
+        subscribed: Set уже подписанных market_id (изменяется на месте).
+
+    Returns:
+        None.
+    """
+    for mid in sorted(wanted - subscribed):
+        await ws.send(json.dumps({"type": "subscribe",
+                                  "channel": "order_book/%d" % mid}))
+        books[mid] = OrderBook()
+        subscribed.add(mid)
+        log.info("стакан: подписка на %s", MARKET_TO_SYMBOL.get(mid, mid))
+
+    for mid in sorted(subscribed - wanted):
+        await ws.send(json.dumps({"type": "unsubscribe",
+                                  "channel": "order_book/%d" % mid}))
+        books.pop(mid, None)
+        subscribed.discard(mid)
+        log.info("стакан: отписка от %s", MARKET_TO_SYMBOL.get(mid, mid))
+
+
+async def _consume(ws, bus, tick_queue, dedupers, stats, books, wanted):
     """Обработать поток кадров одного WS-соединения.
 
     Args:
@@ -392,6 +517,8 @@ async def _consume(ws, bus, tick_queue, dedupers, stats):
         tick_queue: Очередь на запись в CSV.
         dedupers:   Dict market_id → Deduper.
         stats:      Dict счётчиков для периодического лога.
+        books:      Dict market_id → OrderBook.
+        wanted:     Set market_id с нужными стаканами (меняет хаб).
 
     Returns:
         None (выходит, когда соединение закрылось).
@@ -400,9 +527,19 @@ async def _consume(ws, bus, tick_queue, dedupers, stats):
         await ws.send(json.dumps({"type": "subscribe", "channel": "trade/%d" % mid}))
     log.info("подписка на %d рынков", len(MARKETS))
 
+    # Подписки на стаканы восстанавливаются с нуля: это новое соединение.
+    subscribed = set()
+    await _sync_book_subs(ws, books, wanted, subscribed)
+
     unknown_types = set()
 
     async for raw in ws:
+        # Команда хаба могла изменить набор нужных стаканов. Проверяем здесь,
+        # а не по таймеру: кадры идут постоянно (сделки + пинги), так что
+        # реакция мгновенная, а лишней задачи в цикле событий не появляется.
+        if subscribed != wanted:
+            await _sync_book_subs(ws, books, wanted, subscribed)
+
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError as err:
@@ -416,6 +553,13 @@ async def _consume(ws, bus, tick_queue, dedupers, stats):
             await ws.send(json.dumps({"type": "pong"}))
             continue
         if mtype == "connected":
+            continue
+
+        # Стакан: снапшот при подписке, дальше дельты. В отличие от сделок,
+        # снапшот здесь ОБЯЗАТЕЛЕН — дельты описывают изменения относительно
+        # него, и без него книга была бы вымышленной.
+        if mtype in ("subscribed/order_book", "update/order_book"):
+            _handle_book_frame(mtype, msg, books, stats)
             continue
 
         # `subscribed/trade` — снапшот последних ~50 сделок. Они придут ещё раз
@@ -477,7 +621,7 @@ async def _consume(ws, bus, tick_queue, dedupers, stats):
             stats["ok"] += 1
 
 
-async def ws_loop(bus, tick_queue):
+async def ws_loop(bus, tick_queue, books, wanted):
     """Вечный цикл: соединение с Lighter, слушать сделки, переподключаться.
 
     Backoff экспоненциальный (1→60 с), попытки бесконечны. При каждом
@@ -487,6 +631,9 @@ async def ws_loop(bus, tick_queue):
     Args:
         bus:        BusClient.
         tick_queue: Очередь на запись в CSV.
+        books:      Dict market_id → OrderBook (общий с обработчиком команд).
+        wanted:     Set market_id, на стаканы которых надо быть подписанным.
+                    Хаб меняет его командами; переподписка выполняется здесь.
 
     Returns:
         None (работает вечно).
@@ -501,7 +648,13 @@ async def ws_loop(bus, tick_queue):
                 log.info("подключён к %s", WS_URL)
                 delay = RECONNECT_MIN_SEC
                 dedupers = {mid: Deduper() for mid in MARKETS.values()}
-                await _consume(ws, bus, tick_queue, dedupers, stats)
+                # Книги после обрыва недействительны: дельты, пришедшие в
+                # разрыве, потеряны, и старое состояние разошлось бы с биржей
+                # молча. Подписки восстанавливаются заново в _consume.
+                for book in books.values():
+                    book.reset()
+                await _consume(ws, bus, tick_queue, dedupers, stats,
+                               books, wanted)
             log.warning("WS закрыт биржей, переподключение через %.0f с", delay)
         except asyncio.CancelledError:
             raise
@@ -537,7 +690,40 @@ async def main():
     _purge_old_ticks()
 
     tick_queue = queue.Queue(maxsize=200000)
-    bus = BusClient(PROVIDER)
+
+    # Стаканы: книги живут только у подписанных рынков, wanted меняет хаб.
+    # Подписка стоит ~1.1 ГБ/сутки на инструмент — держим ровно те, что
+    # кто-то смотрит прямо сейчас.
+    books  = {}
+    wanted = set()
+
+    def _on_command(cmd):
+        """Применить команду хаба (подписка на стакан).
+
+        Сама переподписка выполняется в _consume: только там есть живой
+        websocket биржи. Здесь лишь обновляется намерение.
+
+        Args:
+            cmd: Dict команды.
+
+        Returns:
+            None.
+        """
+        if cmd.get("type") != "orderbook_sub":
+            log.warning("неизвестная команда хаба: %r", cmd.get("type"))
+            return
+        symbols = cmd.get("symbols") or []
+        new = {MARKETS[s] for s in symbols if s in MARKETS}
+        unknown = [s for s in symbols if s not in MARKETS]
+        if unknown:
+            log.warning("стакан: неизвестные символы в команде: %s", unknown)
+        if new != wanted:
+            wanted.clear()
+            wanted.update(new)
+            log.info("стакан: хаб просит %s",
+                     sorted(MARKET_TO_SYMBOL.get(m, m) for m in new) or "ничего")
+
+    bus = BusClient(PROVIDER, on_command=_on_command)
 
     threading.Thread(target=tick_writer, args=(tick_queue,), daemon=True).start()
 
@@ -564,7 +750,8 @@ async def main():
     threading.Thread(target=_bootstrap, daemon=True).start()
 
     asyncio.ensure_future(_stats_loop(bus))
-    asyncio.ensure_future(ws_loop(bus, tick_queue))
+    asyncio.ensure_future(ws_loop(bus, tick_queue, books, wanted))
+    asyncio.ensure_future(_book_publisher(bus, books))
     await bus.run()   # вечный цикл: коннект к хабу + отправка очереди
 
 
