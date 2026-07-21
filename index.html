@@ -52,6 +52,13 @@
     #volumeToggle button { border:0; border-radius:0; background:var(--btn); color:var(--text);
         padding:4px 10px; font-size:12px; cursor:pointer; }
     #volumeToggle button.on { background:var(--accent); color:#fff; }
+    /* Стакан — та же раскладка, что у объёма: строка «подпись + пара кнопок». */
+    #orderbookRow { display:flex; align-items:center; justify-content:space-between; gap:12px;
+        margin:4px 0; }
+    #orderbookToggle { display:inline-flex; border:1px solid var(--btn-border); border-radius:5px; overflow:hidden; }
+    #orderbookToggle button { border:0; border-radius:0; background:var(--btn); color:var(--text);
+        padding:4px 10px; font-size:12px; cursor:pointer; }
+    #orderbookToggle button.on { background:var(--accent); color:#fff; }
 
     #container {
         display: flex;
