@@ -9,11 +9,26 @@
   "bus_port": 8766,
   "trim_every": 200,
   "tf_seconds": {
-    "S5": 5, "S10": 10, "S15": 15, "S30": 30,
-    "M1": 60, "M3": 180, "M5": 300, "M15": 900,
-    "H1": 3600, "H4": 14400, "D1": 86400
+    "S5": 5,
+    "S10": 10,
+    "S15": 15,
+    "S30": 30,
+    "M1": 60,
+    "M3": 180,
+    "M5": 300,
+    "M15": 900,
+    "H1": 3600,
+    "H4": 14400,
+    "D1": 86400
   },
-  "broker_tf": ["H1", "H4", "D1"],
+  "broker_tf": {
+    "fxcm": [
+      "H1",
+      "H4",
+      "D1"
+    ],
+    "lighter": []
+  },
   "data_dir": "data",
   "health_port": 8787,
   "briefing_file": "/root/projects/terminal/briefing.json",
@@ -21,8 +36,25 @@
     "lighter": 14
   },
   "markets": {
-    "fxcm": ["EUR/USD", "AUD/USD", "USD/CAD", "USD/JPY"],
-    "lighter": ["BTC", "ETH", "HYPE", "SOL", "WTI", "LIT",
-                "ZEC", "XAU", "BNB", "SPCX", "MU", "XAG"]
+    "fxcm": [
+      "EUR/USD",
+      "AUD/USD",
+      "USD/CAD",
+      "USD/JPY"
+    ],
+    "lighter": [
+      "BTC",
+      "ETH",
+      "HYPE",
+      "SOL",
+      "WTI",
+      "LIT",
+      "ZEC",
+      "XAU",
+      "BNB",
+      "SPCX",
+      "MU",
+      "XAG"
+    ]
   }
 }

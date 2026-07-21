@@ -238,6 +238,40 @@ class TestSubscriptionAccounting(OrderbookHubTest):
         _run(self.hub._sync_orderbook_subs())   # не должно падать
 
 
+class TestBrokerTfPerProvider(OrderbookHubTest):
+    """Какие ТФ провайдер отдаёт готовыми, а какие хаб собирает сам."""
+
+    def test_fxcm_gives_h1_h4_d1(self):
+        """У FXCM старшие ТФ приходят от брокера со своей сеткой."""
+        self.assertEqual(self.hub.broker_tf_for("fxcm"), ("H1", "H4", "D1"))
+
+    def test_lighter_gives_nothing(self):
+        """У Lighter старшие ТФ хаб собирает из M1.
+
+        Фид грузит только 1m. Пока broker_tf был общим списком, H1/H4/D1
+        числились «брокерскими» для ВСЕХ — их никто не поставлял и никто не
+        собирал, и на крипте в БД лежало по 3 свечи H1 вместо тысяч.
+        """
+        self.assertEqual(self.hub.broker_tf_for("lighter"), ())
+
+    def test_unknown_provider_builds_everything(self):
+        """Незнакомый провайдер — считаем, что готового не даёт ничего."""
+        self.assertEqual(self.hub.broker_tf_for("nope"), ())
+
+    def test_legacy_flat_list_still_works(self):
+        """Старый формат (общий список) применяется ко всем провайдерам.
+
+        Конфиг мог остаться непереписанным — тогда поведение обязано быть
+        прежним, а не «никто ничего не отдаёт».
+        """
+        config = copy.deepcopy(hubmod.load_config())
+        config["broker_tf"] = ["H1", "H4"]
+        config["db_path"] = self.path + ".legacy"
+        legacy = Hub(config)
+        self.assertEqual(legacy.broker_tf_for("fxcm"), ("H1", "H4"))
+        self.assertEqual(legacy.broker_tf_for("lighter"), ("H1", "H4"))
+
+
 class TestBroadcast(OrderbookHubTest):
     """Раздача среза браузерам."""
 

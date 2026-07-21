@@ -18,8 +18,12 @@ class OrderbookOverlay {
 
     // Доля ширины графика под гистограмму.
     static WIDTH_RATIO = 0.14;
-    // Целевая высота корзины в пикселях: ~50 полос на экран при любом зуме.
-    static BUCKET_PX = 4;
+    // Минимальная высота корзины в пикселях — из неё выводится ценовой шаг
+    // сетки. 20 подобрано так, чтобы шаг совпадал с интервалом между
+    // подписями ценовой шкалы: на масштабе 571–579 / 620px это даёт 0.5,
+    // ровно как рисует LWC. Меньше — сетка мельче шкалы и столбцы дробятся
+    // на волоски, больше — грубее, и соседние уровни цен слипаются.
+    static MIN_BUCKET_PX = 20;
     // Прозрачность заливки.
     static ALPHA = 0.5;
 
@@ -98,22 +102,37 @@ class OrderbookOverlay {
         return this.canvas.height - this.chart.timeScale().height();
     }
 
-    // Склеить уровни в корзины по ~BUCKET_PX пикселей.
+    // Ценовой шаг сетки — интервал между соседними подписями на шкале.
     //
-    // Ключевой момент: корзина задаётся ЦЕНОВЫМ шагом, вычисленным из
-    // текущего масштаба, поэтому при зуме полосы дробятся, а при отдалении
-    // сливаются — число полос на экране остаётся постоянным.
-    _bucketize(levels, bottomPx) {
-        if (!levels || !levels.length) return [];
-
-        // Цена, приходящаяся на один пиксель — из двух точек ценовой шкалы.
+    // LWC его не отдаёт, поэтому считаем тем же приёмом, что используют сами
+    // шкалы: берём «сырой» шаг из масштаба и округляем вверх до ближайшего
+    // красивого числа (1/2/5 × 10^n). Для шкалы 571.5 / 572.0 / 572.5 это
+    // даёт ровно 0.5.
+    _gridStep(bottomPx) {
         const pTop = this.series.coordinateToPrice(0);
         const pBot = this.series.coordinateToPrice(bottomPx);
-        if (pTop === null || pBot === null) return [];
-        const pricePerPx = Math.abs(pTop - pBot) / Math.max(bottomPx, 1);
-        if (!(pricePerPx > 0)) return [];
+        if (pTop === null || pBot === null) return null;
 
-        const step = pricePerPx * OrderbookOverlay.BUCKET_PX;
+        const pricePerPx = Math.abs(pTop - pBot) / Math.max(bottomPx, 1);
+        if (!(pricePerPx > 0)) return null;
+
+        const raw = pricePerPx * OrderbookOverlay.MIN_BUCKET_PX;
+        const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+        const norm = raw / mag;
+        const nice = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+        return nice * mag;
+    }
+
+    // Склеить уровни в корзины ПО СЕТКЕ ЦЕНОВОЙ ШКАЛЫ.
+    //
+    // Одна полоса = один интервал между соседними подписями цен, и в ней
+    // суммарный объём всех лимиток этого диапазона. Так столбец читается
+    // против шкалы напрямую: видно, сколько заявок стоит между 572.0 и 572.5.
+    _bucketize(levels, bottomPx) {
+        if (!levels || !levels.length) return [];
+        const step = this._gridStep(bottomPx);
+        if (!step) return [];
+
         const buckets = new Map();
         for (const [price, size] of levels) {
             const key = Math.floor(price / step);
@@ -122,7 +141,14 @@ class OrderbookOverlay {
 
         const out = [];
         for (const [key, size] of buckets) {
-            out.push({ price: (key + 0.5) * step, size });
+            // Границы корзины — чтобы полоса заняла интервал целиком, а не
+            // висела тонкой чертой по центру.
+            out.push({
+                price: (key + 0.5) * step,
+                lo:    key * step,
+                hi:    (key + 1) * step,
+                size,
+            });
         }
         return out;
     }
@@ -156,7 +182,6 @@ class OrderbookOverlay {
         // Правый край — ЛЕВЕЕ ценовой шкалы, а не по краю канваса: иначе
         // полосы наезжают на подписи цен и читать их невозможно.
         const rightX = this.canvas.width - this.priceScaleWidth();
-        const h = Math.max(1, OrderbookOverlay.BUCKET_PX - 1);
 
         // Тот же порог, что делит стороны: цена между лучшими bid и ask.
         const bestBid = this.book.bids.length ? this.book.bids[0][0] : -Infinity;
@@ -169,8 +194,18 @@ class OrderbookOverlay {
         for (const b of visible) {
             const isAsk = mid !== null ? b.price > mid : false;
             const w = Math.max(1, Math.round(fullW * (b.size / maxSize)));
+
+            // Высота полосы — весь ценовой интервал корзины, минус пиксель на
+            // просвет. Столбец занимает строку между соседними подписями
+            // шкалы, а не висит тонкой чертой по центру.
+            const yHi = this.series.priceToCoordinate(b.hi);
+            const yLo = this.series.priceToCoordinate(b.lo);
+            let top = Math.round(yHi);
+            let h   = Math.max(1, Math.round(Math.abs(yLo - yHi)) - 1);
+            if (!isFinite(top)) { top = Math.round(b.y); h = 1; }
+
             ctx.fillStyle = isAsk ? "#ef5350" : "#26a69a";
-            ctx.fillRect(rightX - w, Math.round(b.y) - h / 2, w, h);
+            ctx.fillRect(rightX - w, top, w, h);
         }
         ctx.restore();
     }

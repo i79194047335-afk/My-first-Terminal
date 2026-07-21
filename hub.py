@@ -83,7 +83,21 @@ class Hub:
         """
         self._config     = config
         self._tf_seconds = config["tf_seconds"]
-        self._broker_tf  = tuple(config.get("broker_tf", ("H1", "H4", "D1")))
+        # ТФ, которые провайдер отдаёт ГОТОВЫМИ (и потому несут его сетку).
+        # Список per-provider: FXCM отдаёт H1/H4/D1 сам, а фид Lighter грузит
+        # только 1m — там старшие ТФ обязан собирать хаб. Общий список на всех
+        # оставлял крипту с тремя свечами H1 вместо тысяч: они не приходили от
+        # фида и не собирались, потому что числились «брокерскими».
+        broker_tf = config.get("broker_tf", ("H1", "H4", "D1"))
+        if isinstance(broker_tf, dict):
+            self._broker_tf_by_provider = {p: tuple(v)
+                                           for p, v in broker_tf.items()}
+            self._broker_tf = ()
+        else:
+            # Старый формат — один список на всех: применяем ко всем
+            # провайдерам, как было до Фазы 3.
+            self._broker_tf_by_provider = {}
+            self._broker_tf = tuple(broker_tf)
         self._keep_bars  = config["keep_bars"]
         # Глубина окна по ТФ. Одно число на все таймфреймы неудобно: 2000
         # баров — это 5 лет на D1 и всего 33 часа на M1. keep_bars_by_tf
@@ -153,6 +167,21 @@ class Hub:
         self._last_tick_ts = 0.0
         self._last_tick_by_symbol = {}   # symbol -> ts последнего РЕАЛЬНОГО тика
 
+    def broker_tf_for(self, provider):
+        """ТФ, которые данный провайдер отдаёт готовыми.
+
+        Args:
+            provider: Имя провайдера.
+
+        Returns:
+            Кортеж имён ТФ. Пустой — значит все старшие ТФ хаб собирает сам
+            из M1.
+        """
+        by_provider = getattr(self, "_broker_tf_by_provider", None)
+        if by_provider:
+            return by_provider.get(provider, ())
+        return getattr(self, "_broker_tf", ())
+
     def keep_bars_for(self, tf):
         """Глубина окна для таймфрейма.
 
@@ -200,7 +229,8 @@ class Hub:
                 # Смещение сетки учим ТОЛЬКО по ТФ, которые грузятся у брокера
                 # напрямую (H1/H4/D1): только они несут его сетку. Остальные
                 # режем сами по UTC — там смещение 0.
-                broker_bars = {tf: hist[tf] for tf in self._broker_tf if hist.get(tf)}
+                broker_bars = {tf: hist[tf] for tf in self.broker_tf_for(provider)
+                               if hist.get(tf)}
                 offsets = CandleBuilder.detect_offsets(broker_bars, self._tf_seconds)
 
                 builder = CandleBuilder(self._tf_seconds, offsets)
@@ -386,7 +416,7 @@ class Hub:
             return
 
         # (2) Смещение сетки — до расчёта бакета, иначе отсечём не то.
-        if tf in self._broker_tf:
+        if tf in self.broker_tf_for(provider):
             builder.set_offsets(
                 CandleBuilder.detect_offsets({tf: data}, self._tf_seconds))
 
@@ -406,7 +436,7 @@ class Hub:
         if tf == "M1":
             m1 = self._history[key]["M1"]
             for other, other_sec in self._tf_seconds.items():
-                if other_sec <= 60 or other in self._broker_tf:
+                if other_sec <= 60 or other in self.broker_tf_for(provider):
                     continue
                 derived = aggregate_higher_tf(m1, other_sec)
                 derived = [c for c in derived if c["time"] < cur_bucket]
