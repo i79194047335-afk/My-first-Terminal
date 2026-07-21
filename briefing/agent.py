@@ -14,7 +14,6 @@ import os
 
 from openai import OpenAI
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE    = "https://api.deepseek.com"
 # deepseek-v4-pro — умнее flash (=алиас deepseek-chat): тоньше видит расхождения
 # консенсуса с техникой, глубже reasoning (сравнение 2026-07-18). Медленнее
@@ -45,10 +44,16 @@ def generate(system_prompt, user_prompt, max_tokens=DEFAULT_MAX_TOKENS,
     Raises:
         AgentError: нет ключа, ошибка API, или ответ — не валидный JSON.
     """
-    if not DEEPSEEK_API_KEY:
+    # Ключ читается В МОМЕНТ ВЫЗОВА, а не при импорте. Раньше он лежал в
+    # константе модуля, и это тихо убивало брифинг из крона: run.py делает
+    # `from briefing.agent import generate` РАНЬШЕ, чем зовёт load_dotenv(),
+    # так что на момент импорта .env ещё не прочитан и константа замерзала
+    # пустой. Вручную работало — там ключ был в окружении до старта.
+    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not api_key:
         raise AgentError("нет DEEPSEEK_API_KEY в окружении")
 
-    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE)
+    client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE)
     try:
         resp = client.chat.completions.create(
             model=DEEPSEEK_MODEL,
