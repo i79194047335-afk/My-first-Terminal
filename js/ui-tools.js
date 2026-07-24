@@ -8,7 +8,7 @@
 
 // Кнопки панели 1, которые подсвечивает setTool. Панель 2 исторически не
 // подсвечивается (у неё свои id hlineBtn2 и т.д.) — поведение не меняем.
-const TOOL_BTN_IDS = ["lineOverlayBtn", "hlineBtn1", "rectOverlayBtn", "posBtn1"];
+const TOOL_BTN_IDS = ["lineOverlayBtn", "hlineBtn1", "rectOverlayBtn", "posBtn1", "fibBtn1"];
 
 function clearToolHighlights() {
     for (const id of TOOL_BTN_IDS) {
@@ -49,6 +49,13 @@ function setTool(tool) {
     if (tool === "rectOverlay") {
         DrawingController.clearPreview();
         const el = document.getElementById("rectOverlayBtn");
+        if (el) el.classList.add("on");
+        return;
+    }
+
+    if (tool === "fib") {
+        DrawingController.clearPreview();
+        const el = document.getElementById("fibBtn1");
         if (el) el.classList.add("on");
         return;
     }

@@ -459,6 +459,33 @@
     </div>
 </div>
 
+<!-- Fibonacci settings menu: видимость/цвет каждого уровня, свои уровни -->
+<div id="fibMenu" style="position:absolute; display:none; z-index:999999; background:var(--menu-bg);
+     color:var(--text); border:1px solid var(--menu-border); border-radius:6px; padding:8px;
+     font-size:12px; min-width:230px; box-shadow:0 6px 24px rgba(0,0,0,.25);">
+    <div style="font-weight:bold; margin-bottom:6px;">Сетка Фибоначчи</div>
+    <label style="display:flex; align-items:center; gap:6px; margin-bottom:4px; cursor:pointer;">
+        <input type="checkbox" id="fibExtendRight" onchange="setFibFlag('extendRight', this.checked)">
+        <span>Продлевать вправо</span>
+    </label>
+    <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer;">
+        <input type="checkbox" id="fibShowFill" onchange="setFibFlag('showFill', this.checked)">
+        <span>Заливка между уровнями</span>
+    </label>
+    <div style="border-top:1px solid var(--divider); margin:6px 0;"></div>
+    <div id="fibLevelList" style="max-height:260px; overflow-y:auto;"></div>
+    <div style="border-top:1px solid var(--divider); margin:6px 0;"></div>
+    <div style="display:flex; align-items:center; gap:6px;">
+        <input type="number" id="fibNewLevel" step="0.001" placeholder="напр. 0.886"
+               style="width:88px; padding:3px 5px; background:var(--btn); color:var(--text);
+                      border:1px solid var(--btn-border); border-radius:4px;">
+        <button onclick="addFibLevel()" style="padding:3px 10px; cursor:pointer; background:var(--btn);
+                color:var(--text); border:1px solid var(--btn-border); border-radius:4px;">Добавить</button>
+    </div>
+    <div style="border-top:1px solid var(--divider); margin:8px 0 6px;"></div>
+    <div class="menu-item" onclick="deleteSelectedLine()" style="cursor:pointer;">Удалить сетку</div>
+</div>
+
 <!-- Line / overlay context menu -->
 <div id="lineMenu">
     <div style="margin-bottom:6px;">Цвет</div>
@@ -582,6 +609,7 @@
                 <button id="hlineBtn1" class="tb-ic" onclick="setTool('hline')" data-tip="Гор. линия"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18"/></svg></button>
                 <button id="lineOverlayBtn" class="tb-ic" onclick="setTool('lineOverlay')" data-tip="Луч"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20L20 4"/><circle cx="4" cy="20" r="1.6" fill="currentColor" stroke="none"/></svg></button>
                 <button id="rectOverlayBtn" class="tb-ic" onclick="setTool('rectOverlay')" data-tip="Зона"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg></button>
+                <button id="fibBtn1" class="tb-ic" onclick="setTool('fib')" data-tip="Сетка Фибоначчи"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 5h18M3 10h18M3 14h18M3 19h18"/></svg></button>
             </div>
             <button id="posBtn1" class="tb-ic" onclick="togglePositionDropdown(1, event)" data-tip="Позиция"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4v16M6 9l6-5 6 5"/></svg></button>
             <button id="indBtn1" class="tb-ic" onclick="openIndicatorsPanel(1, event)" data-tip="Индикаторы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17l5-6 4 4 5-8 4 5"/></svg></button>
@@ -624,6 +652,7 @@
                 <button id="hlineBtn2" class="tb-ic" onclick="setTool('hline')" data-tip="Гор. линия"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18"/></svg></button>
                 <button id="lineOverlayBtn2" class="tb-ic" onclick="setTool('lineOverlay')" data-tip="Луч"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20L20 4"/><circle cx="4" cy="20" r="1.6" fill="currentColor" stroke="none"/></svg></button>
                 <button id="rectOverlayBtn2" class="tb-ic" onclick="setTool('rectOverlay')" data-tip="Зона"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg></button>
+                <button id="fibBtn2" class="tb-ic" onclick="setTool('fib')" data-tip="Сетка Фибоначчи"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 5h18M3 10h18M3 14h18M3 19h18"/></svg></button>
             </div>
             <button id="posBtn2" class="tb-ic" onclick="togglePositionDropdown(2, event)" data-tip="Позиция"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4v16M6 9l6-5 6 5"/></svg></button>
             <button id="indBtn2" class="tb-ic" onclick="openIndicatorsPanel(2, event)" data-tip="Индикаторы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17l5-6 4 4 5-8 4 5"/></svg></button>
@@ -694,9 +723,9 @@
     const _orig = window.setTool;
     window.setTool = function setTool(tool) {
         _orig(tool);
-        const ids2 = { lineOverlay: "lineOverlayBtn2", rectOverlay: "rectOverlayBtn2", hline: "hlineBtn2", posLong: "posBtn2", posShort: "posBtn2" };
+        const ids2 = { lineOverlay: "lineOverlayBtn2", rectOverlay: "rectOverlayBtn2", hline: "hlineBtn2", posLong: "posBtn2", posShort: "posBtn2", fib: "fibBtn2" };
         const cls2 = { posLong: "on-long", posShort: "on-short" };
-        ["lineOverlayBtn2", "hlineBtn2", "rectOverlayBtn2", "posBtn2"].forEach(id => {
+        ["lineOverlayBtn2", "hlineBtn2", "rectOverlayBtn2", "posBtn2", "fibBtn2"].forEach(id => {
             const b = document.getElementById(id);
             if (b) b.classList.remove("on", "on-long", "on-short");
         });
@@ -1525,7 +1554,7 @@ function setupInteractionHandlers(paneId, st, els) {
 
     els.wrapper.addEventListener("touchstart", e => {
         const tool = DrawingController.getTool();
-        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay" || tool === "hline");
+        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay" || tool === "fib" || tool === "hline");
 
         if (isDrawing) {
             st.chart.applyOptions({ handleScroll: false, handleScale: false });
@@ -1574,7 +1603,7 @@ function setupInteractionHandlers(paneId, st, els) {
     els.wrapper.addEventListener("touchmove", e => {
         e.preventDefault();
         const tool = DrawingController.getTool();
-        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay");
+        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay" || tool === "fib");
         const touch = e.touches[0];
         const rect  = els.wrapper.getBoundingClientRect();
         const tx = touch.clientX - rect.left;
@@ -1655,7 +1684,7 @@ function setupInteractionHandlers(paneId, st, els) {
 
     els.wrapper.addEventListener("touchend", e => {
         const tool = DrawingController.getTool();
-        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay" || tool === "hline");
+        const isDrawing = (tool === "lineOverlay" || tool === "rectOverlay" || tool === "fib" || tool === "hline");
 
         if (isDrawing) {
             const isTap = touchStartX !== null && e.changedTouches.length > 0 &&
@@ -1664,7 +1693,7 @@ function setupInteractionHandlers(paneId, st, els) {
             touchStartX = null; touchStartY = null; touchPrevX = null; touchPrevY = null;
             if (!isTap) return;
 
-            if (tool === "lineOverlay" || tool === "rectOverlay") {
+            if (tool === "lineOverlay" || tool === "rectOverlay" || tool === "fib") {
                 const cx = st.drawingEngine.cursorX, cy = st.drawingEngine.cursorY;
                 if (cx === null || cy === null) return;
                 const rawTime = st.chart.timeScale().coordinateToTime(cx);
@@ -1675,12 +1704,14 @@ function setupInteractionHandlers(paneId, st, els) {
                 if (!DrawingController.getTempStart()) {
                     const startPoint = { time, price };
                     DrawingController.setTempStart(startPoint);
-                    const preview = {
-                        type: tool === "lineOverlay" ? "line" : "rect",
-                        paneId: id, points: [startPoint, { ...startPoint }],
-                        color: "#000000", width: 2,
-                        ...(tool === "rectOverlay" ? { fillColor: "rgba(41,98,255,0.15)", showMidline: true, midColor: "#000000", midWidth: 1, extendRight: true } : {})
-                    };
+                    const preview = tool === "fib"
+                        ? makeFib(id, startPoint, { ...startPoint })
+                        : {
+                            type: tool === "lineOverlay" ? "line" : "rect",
+                            paneId: id, points: [startPoint, { ...startPoint }],
+                            color: "#000000", width: 2,
+                            ...(tool === "rectOverlay" ? { fillColor: "rgba(41,98,255,0.15)", showMidline: true, midColor: "#000000", midWidth: 1, extendRight: true } : {})
+                        };
                     DrawingController.setPreviewLine(preview);
                     st.drawingEngine.addDrawing(preview); return;
                 }
@@ -1690,6 +1721,10 @@ function setupInteractionHandlers(paneId, st, els) {
                 ["lineOverlayBtn","rectOverlayBtn","lineOverlayBtn2","rectOverlayBtn2"].forEach(id => {
                     const b = document.getElementById(id);
                     if (b) { b.style.background = ""; b.style.color = ""; }
+                });
+                ["fibBtn1","fibBtn2"].forEach(bid => {
+                    const b = document.getElementById(bid);
+                    if (b) b.classList.remove("on");
                 });
                 StorageLayer.saveDrawings(id, layout, panesState, drawings);
                 st.chart.applyOptions({ handleScroll: true, handleScale: true }); return;
@@ -1793,6 +1828,31 @@ function setupInteractionHandlers(paneId, st, els) {
             ["rectOverlayBtn","rectOverlayBtn2"].forEach(bid => {
                 const b = document.getElementById(bid);
                 if (b) { b.style.background = ""; b.style.color = ""; }
+            });
+            return;
+        }
+
+        if (DrawingController.getTool() === "fib") {
+            const price = st.series.coordinateToPrice(param.point.y);
+            if (price === null) return;
+            let rawTime = param.time;
+            if (!rawTime) return;
+            const time = typeof rawTime === "object" ? rawTime.timestamp : rawTime;
+            if (typeof time !== "number") return;
+            if (!DrawingController.getTempStart()) {
+                const startPoint = { time, price };
+                DrawingController.setTempStart(startPoint);
+                const preview = makeFib(id, startPoint, { ...startPoint });
+                DrawingController.setPreviewLine(preview);
+                st.drawingEngine.addDrawing(preview); return;
+            }
+            const preview = DrawingController.getPreviewLine();
+            preview.points[1] = { time, price };
+            DrawingController.clearPreview(); DrawingController.resetTool();
+            StorageLayer.saveDrawings(id, layout, panesState, drawings);
+            ["fibBtn1","fibBtn2"].forEach(bid => {
+                const b = document.getElementById(bid);
+                if (b) b.classList.remove("on");
             });
             return;
         }
@@ -1916,7 +1976,7 @@ function setupInteractionHandlers(paneId, st, els) {
             draggedLine.points = DrawingController.originalPoints.map(p => ({ time: p.time + deltaTime, price: p.price + deltaPrice }));
             st.drawingEngine.render(); return;
         }
-        if (DrawingController.getTool() !== "lineOverlay" && DrawingController.getTool() !== "rectOverlay") return;
+        if (DrawingController.getTool() !== "lineOverlay" && DrawingController.getTool() !== "rectOverlay" && DrawingController.getTool() !== "fib") return;
         const tempStart = DrawingController.getTempStart();
         const preview   = DrawingController.getPreviewLine();
         if (!tempStart || !preview) return;
@@ -1958,6 +2018,8 @@ function setupInteractionHandlers(paneId, st, els) {
             overlayHit.selected = true; st.drawingEngine.render();
             if (overlayHit.type === "position") {
                 showPositionMenu(e.pageX, e.pageY, id, overlayHit);
+            } else if (overlayHit.type === "fib") {
+                showFibMenu(e.pageX, e.pageY, id, overlayHit);
             } else {
                 showOverlayMenu(e.pageX, e.pageY, id, overlayHit);
             }
@@ -3320,6 +3382,57 @@ function showAlertPopup(text) {
 // INDICATORS PANEL
 // ============================================================================
 
+// ============================================================================
+// FIBONACCI — сетка уровней
+// ============================================================================
+//
+// Сетка задаётся ДВУМЯ точками: p1 = 0%, p2 = 100%. Цена уровня считается как
+// p1 + (p2 - p1) * value, поэтому значения > 1 (1.272 / 1.618) — это проекции
+// ЗА вторую точку, а отрицательные ушли бы до первой. Так же считает TradingView.
+//
+// Каждый уровень — самостоятельный объект {value, color, visible}: цвет свой у
+// каждой линии, любую можно погасить, а список пополняется своими уровнями.
+
+const FIB_DEFAULT_LEVELS = [
+    { value: 0,     color: "#787b86", visible: true },
+    { value: 0.236, color: "#f23645", visible: true },
+    { value: 0.382, color: "#ff9800", visible: true },
+    { value: 0.5,   color: "#4caf50", visible: true },
+    { value: 0.618, color: "#089981", visible: true },
+    { value: 0.786, color: "#00bcd4", visible: true },
+    { value: 1,     color: "#787b86", visible: true },
+    { value: 1.272, color: "#2962ff", visible: false },
+    { value: 1.618, color: "#9c27b0", visible: false },
+];
+// storage.js — отдельный файл и не видит модульных констант: отдаём дефолт
+// через window, он нужен там как подстраховка при восстановлении.
+window.FIB_DEFAULT_LEVELS = FIB_DEFAULT_LEVELS;
+
+/**
+ * Создать объект сетки Фибоначчи по двум точкам.
+ *
+ * Уровни копируются из FIB_DEFAULT_LEVELS, чтобы правка одной сетки не меняла
+ * остальные и дефолт.
+ * @param {number} paneId Панель.
+ * @param {{time:number, price:number}} p1 Точка 0%.
+ * @param {{time:number, price:number}} p2 Точка 100%.
+ * @returns {Object} Объект рисунка типа "fib".
+ */
+function makeFib(paneId, p1, p2) {
+    return {
+        type: "fib",
+        paneId,
+        points: [p1, p2],
+        levels: FIB_DEFAULT_LEVELS.map(l => ({ ...l })),
+        color: "#787b86",
+        width: 1,
+        extendRight: true,
+        showFill: false,
+        priceDecimals: instrumentPrecision[currentSymbol]?.precision ?? 5,
+        selected: false
+    };
+}
+
 const IND_DEFAULTS = {
     sma:        { params: { period: 20 },                          color: '#2962FF' },
     ema:        { params: { period: 21 },                          color: '#ff9800' },
@@ -3660,7 +3773,13 @@ document.addEventListener("click", e => {
     const chartMenu   = document.getElementById("chartMenu");
     if (contextMenu && !contextMenu.contains(e.target) && chartMenu && !chartMenu.contains(e.target))
         contextMenu.style.display = "none";
-    if (!document.getElementById("lineMenu").contains(e.target)) hideLineMenu();
+    // ВАЖНО: hideLineMenu() обнуляет contextLineObject, а он нужен всё время,
+    // пока пользователь крутит уровни в меню Фибо. Поэтому клик ВНУТРИ fibMenu
+    // не должен приводить к его вызову.
+    const fibMenu = document.getElementById("fibMenu");
+    const inFib   = fibMenu && fibMenu.contains(e.target);
+    if (!inFib && !document.getElementById("lineMenu").contains(e.target)) hideLineMenu();
+    if (fibMenu && fibMenu.style.display === "block" && !inFib) hideFibMenu();
 });
 
 document.addEventListener("keydown", e => {

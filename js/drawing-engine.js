@@ -304,6 +304,99 @@ if (obj.type === "rect") {
     ctx.restore();   // ✅ В САМОМ КОНЦЕ
 }
 
+// ================= FIBONACCI =================
+// Сетка строится по ДВУМ точкам: p1 = 0%, p2 = 100%. Уровень level.value —
+// доля хода: цена = p1 + (p2 - p1) * value. Значит 0 всегда у первой точки,
+// 1 у второй, а 1.618 и т.п. уходят ЗА вторую точку — как в TradingView.
+// Каждый уровень несёт свой цвет и флаг visible (гасится в меню).
+if (obj.type === "fib") {
+
+    const p1 = obj.points[0];
+    const p2 = obj.points[1];
+
+    const x1 = this.timeMapper.getX(p1.time);
+    const x2 = this.timeMapper.getX(p2.time);
+
+    if (x1 === null && x2 === null) continue;
+
+    const paneWidth  = this.chart.timeScale().width();
+    const paneHeight = this.priceAreaBottom();
+
+    const left  = Math.min(x1 ?? x2, x2 ?? x1);
+    const right = Math.max(x1 ?? x2, x2 ?? x1);
+
+    // Автопродление вправо: уровни тянутся до правого края паны.
+    const endX = obj.extendRight ? paneWidth : right;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, paneWidth, paneHeight);
+    ctx.clip();
+
+    const levels = obj.levels || [];
+    const priceOf = v => p1.price + (p2.price - p1.price) * v;
+
+    // ---- Заливка между соседними видимыми уровнями ----
+    if (obj.showFill) {
+        const vis = levels.filter(l => l.visible !== false);
+        for (let i = 0; i < vis.length - 1; i++) {
+            const yA = this.series.priceToCoordinate(priceOf(vis[i].value));
+            const yB = this.series.priceToCoordinate(priceOf(vis[i + 1].value));
+            if (yA === null || yB === null) continue;
+            ctx.fillStyle = (i % 2 === 0)
+                ? "rgba(41,98,255,0.06)"
+                : "rgba(41,98,255,0.12)";
+            ctx.fillRect(left, Math.min(yA, yB), endX - left, Math.abs(yB - yA));
+        }
+    }
+
+    // ---- Линии уровней + подписи ----
+    ctx.font = "10px sans-serif";
+    for (const lvl of levels) {
+
+        if (lvl.visible === false) continue;
+
+        const price = priceOf(lvl.value);
+        const y = this.series.priceToCoordinate(price);
+        if (y === null || y < -50 || y > paneHeight + 50) continue;
+
+        ctx.beginPath();
+        ctx.strokeStyle = obj.selected ? "#2962FF" : (lvl.color || "#888888");
+        ctx.lineWidth = obj.selected ? (obj.width || 1) + 1 : (obj.width || 1);
+        ctx.moveTo(left, y);
+        ctx.lineTo(endX, y);
+        ctx.stroke();
+
+        // Подпись слева от уровня: доля и цена.
+        ctx.fillStyle = lvl.color || "#888888";
+        ctx.textBaseline = "bottom";
+        const dec = obj.priceDecimals ?? 5;
+        ctx.fillText(`${(lvl.value * 100).toFixed(1)}%  ${price.toFixed(dec)}`, left + 3, y - 2);
+    }
+
+    // ---- Опорная линия p1→p2 (диагональ хода) ----
+    const y1 = this.series.priceToCoordinate(p1.price);
+    const y2 = this.series.priceToCoordinate(p2.price);
+    if (y1 !== null && y2 !== null && x1 !== null && x2 !== null) {
+        ctx.beginPath();
+        ctx.strokeStyle = obj.selected ? "#2962FF" : (obj.color || "#888888");
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (obj.selected) {
+            ctx.fillStyle = "#2962FF";
+            ctx.beginPath(); ctx.arc(x1, y1, 4, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(x2, y2, 4, 0, Math.PI * 2); ctx.fill();
+        }
+    }
+
+    ctx.restore();
+}
+
 // ================= POSITION =================
 if (obj.type === "position") {
 
@@ -451,6 +544,35 @@ if (obj.type === "position") {
 
             if (x >= left && x <= right && y >= top - 4 && y <= bottom + 4) {
                 return obj;
+            }
+            continue;
+        }
+
+        // ===== FIB HIT TEST =====
+        // Попадание — рядом с ЛЮБЫМ видимым уровнем в пределах его отрезка
+        // (с учётом автопродления вправо). Так сетку можно взять за любую линию.
+        if (obj.type === "fib") {
+
+            const p1 = obj.points[0];
+            const p2 = obj.points[1];
+
+            const x1 = this.timeMapper.getX(p1.time);
+            const x2 = this.timeMapper.getX(p2.time);
+            if (x1 === null && x2 === null) continue;
+
+            const left  = Math.min(x1 ?? x2, x2 ?? x1);
+            const right = Math.max(x1 ?? x2, x2 ?? x1);
+            const endX  = obj.extendRight ? this.chart.timeScale().width() : right;
+
+            if (x >= left - threshold && x <= endX + threshold) {
+                let hit = false;
+                for (const lvl of (obj.levels || [])) {
+                    if (lvl.visible === false) continue;
+                    const price = p1.price + (p2.price - p1.price) * lvl.value;
+                    const ly = this.series.priceToCoordinate(price);
+                    if (ly !== null && Math.abs(ly - y) < threshold) { hit = true; break; }
+                }
+                if (hit) return obj;
             }
             continue;
         }
@@ -623,7 +745,7 @@ if (obj.type === "rect") {
 
         for (let obj of this.drawings) {
 
-           if (obj.type !== "line" && obj.type !== "rect") continue;
+           if (obj.type !== "line" && obj.type !== "rect" && obj.type !== "fib") continue;
 
             for (let i = 0; i < obj.points.length; i++) {
 

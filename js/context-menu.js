@@ -267,6 +267,14 @@ function deleteSelectedLine() {
     drawings[id] =
         drawings[id].filter(o => o !== contextLineObject);
 
+    // Overlay-объекты (line / rect / fib) живут не в drawings[], а в движке
+    // рисования — без этой чистки «Удалить» на них не срабатывало.
+    if (st.drawingEngine) {
+        st.drawingEngine.drawings =
+            st.drawingEngine.drawings.filter(o => o !== contextLineObject);
+        st.drawingEngine.render();
+    }
+
     StorageLayer.saveDrawings(
         id,
         layout,
@@ -275,6 +283,138 @@ function deleteSelectedLine() {
     );
 
     hideLineMenu();
+    hideFibMenu();
+}
+
+// ============================================================================
+// Меню сетки Фибоначчи
+// ============================================================================
+//
+// Управляет ОДНОЙ выбранной сеткой (contextLineObject): видимость и цвет
+// каждого уровня по отдельности, добавление своих уровней сверх умолчания,
+// автопродление вправо и заливка.
+
+function showFibMenu(x, y, paneId, obj) {
+
+    contextLinePane = paneId;
+    contextLineObject = obj;
+
+    const menu = document.getElementById("fibMenu");
+    if (!menu) return;
+
+    const ext  = document.getElementById("fibExtendRight");
+    const fill = document.getElementById("fibShowFill");
+    if (ext)  ext.checked  = obj.extendRight !== false;
+    if (fill) fill.checked = obj.showFill === true;
+
+    renderFibLevels();
+
+    menu.style.display = "block";
+
+    const menuRect = menu.getBoundingClientRect();
+    let posX = x, posY = y;
+    if (x + menuRect.width  > window.innerWidth)  posX = window.innerWidth  - menuRect.width  - 5;
+    if (y + menuRect.height > window.innerHeight) posY = window.innerHeight - menuRect.height - 5;
+    menu.style.left = Math.max(5, posX) + "px";
+    menu.style.top  = Math.max(5, posY) + "px";
+}
+
+function hideFibMenu() {
+    const menu = document.getElementById("fibMenu");
+    if (menu) menu.style.display = "none";
+}
+
+/**
+ * Перерисовать список уровней в меню из текущей сетки.
+ * Каждая строка: галочка видимости, свой цвет, значение, кнопка удаления.
+ * @returns {void}
+ */
+function renderFibLevels() {
+
+    const box = document.getElementById("fibLevelList");
+    if (!box || !contextLineObject) return;
+
+    const levels = contextLineObject.levels || [];
+
+    box.innerHTML = levels.map((l, i) => `
+        <div style="display:flex; align-items:center; gap:6px; padding:2px 0;">
+            <input type="checkbox" ${l.visible !== false ? "checked" : ""}
+                   onchange="setFibLevelVisible(${i}, this.checked)" style="cursor:pointer;">
+            <input type="color" value="${l.color || '#888888'}"
+                   oninput="setFibLevelColor(${i}, this.value)"
+                   style="width:26px; height:20px; padding:0; border:1px solid var(--btn-border);
+                          background:none; cursor:pointer;">
+            <span style="flex:1; font-variant-numeric:tabular-nums;">${(l.value * 100).toFixed(1)}%</span>
+            <button onclick="removeFibLevel(${i})" title="Удалить уровень"
+                    style="border:0; background:none; color:var(--muted); cursor:pointer;
+                           font-size:14px; line-height:1;">✕</button>
+        </div>`).join("");
+}
+
+/** Сохранить изменения сетки и перерисовать пану. */
+function _fibCommit() {
+    if (!contextLinePane) return;
+    const st = panesState[contextLinePane];
+    if (st?.drawingEngine) st.drawingEngine.render();
+    StorageLayer.saveDrawings(contextLinePane, layout, panesState, drawings);
+}
+
+function setFibFlag(name, on) {
+    if (!contextLineObject) return;
+    contextLineObject[name] = !!on;
+    _fibCommit();
+}
+
+function setFibLevelVisible(i, on) {
+    if (!contextLineObject?.levels?.[i]) return;
+    contextLineObject.levels[i].visible = !!on;
+    _fibCommit();
+}
+
+function setFibLevelColor(i, color) {
+    if (!contextLineObject?.levels?.[i]) return;
+    contextLineObject.levels[i].color = color;
+    _fibCommit();
+}
+
+function removeFibLevel(i) {
+    if (!contextLineObject?.levels) return;
+    contextLineObject.levels.splice(i, 1);
+    renderFibLevels();
+    _fibCommit();
+}
+
+/**
+ * Добавить свой уровень сверх умолчания. Значение — ДОЛЯ хода (0.886), но
+ * ввод в процентах (88.6) тоже принимается: всё, что по модулю больше 5,
+ * трактуется как проценты — на практике доли выше 5 не используют.
+ * @returns {void}
+ */
+function addFibLevel() {
+
+    if (!contextLineObject) return;
+
+    const input = document.getElementById("fibNewLevel");
+    if (!input) return;
+
+    let v = parseFloat(input.value);
+    if (!isFinite(v)) return;
+    if (Math.abs(v) > 5) v = v / 100;
+
+    if (!contextLineObject.levels) contextLineObject.levels = [];
+
+    // Дубли не добавляем — уровень уже есть, просто включим его.
+    const exist = contextLineObject.levels.find(l => Math.abs(l.value - v) < 1e-9);
+    if (exist) {
+        exist.visible = true;
+    } else {
+        contextLineObject.levels.push({ value: v, color: "#2962ff", visible: true });
+        contextLineObject.levels.sort((a, b) => a.value - b.value);
+    }
+
+    input.value = "";
+    renderFibLevels();
+    _fibCommit();
 }
 
 function copyLine() {

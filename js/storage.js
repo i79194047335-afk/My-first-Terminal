@@ -105,6 +105,23 @@ if (st.drawingEngine) {
     });
 }
 
+        if (d.type === "fib") {
+            filtered.push({
+                type: "fib",
+                points: JSON.parse(JSON.stringify(d.points)),
+                // Уровни копируем поштучно: у каждого свой цвет и видимость,
+                // и пользователь мог добавить свои сверх умолчания.
+                levels: (d.levels || []).map(l => ({
+                    value: l.value, color: l.color, visible: l.visible !== false
+                })),
+                color: d.color,
+                width: d.width,
+                extendRight: d.extendRight,
+                showFill: d.showFill,
+                priceDecimals: d.priceDecimals
+            });
+        }
+
         if (d.type === "position") {
             filtered.push({
                 type: "position",
@@ -243,6 +260,26 @@ if (d.type === "alert") {
         selected: false
     });
 }
+		if (d.type === "fib" && st.drawingEngine) {
+
+    st.drawingEngine.drawings.push({
+        type: "fib",
+        paneId: paneId,
+        points: d.points,
+        // Пустой список уровней в сохранённых данных означал бы невидимую
+        // сетку — подстраховываемся дефолтом.
+        levels: (d.levels && d.levels.length)
+            ? d.levels.map(l => ({ value: l.value, color: l.color, visible: l.visible !== false }))
+            : (window.FIB_DEFAULT_LEVELS || []).map(l => ({ ...l })),
+        color: d.color || "#787b86",
+        width: d.width || 1,
+        extendRight: d.extendRight ?? true,
+        showFill: d.showFill ?? false,
+        priceDecimals: d.priceDecimals ?? 5,
+        selected: false
+    });
+}
+
 		if (d.type === "position" && st.drawingEngine) {
 
     st.drawingEngine.drawings.push({
