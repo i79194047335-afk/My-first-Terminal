@@ -14,14 +14,14 @@
         --accent:#2962ff; --accent-soft:#e8effd;
         --menu-bg:#ffffff; --menu-hover:#f0f0f0; --menu-border:#aaaaaa;
         /* цвета графика LWC (применяются через chart.applyOptions) */
-        --chart-bg:#ffffff; --chart-text:#4a4f57; --chart-grid:#ececec; --chart-sep:#cccccc;
+        --chart-bg:#ffffff; --chart-text:#4a4f57; --chart-grid:#ececec; --chart-sep:#9aa1ab;
     }
     :root[data-theme="dark"] {
         --bg:#161a1e; --panel:#1c2127; --btn:#232a31; --btn-border:#333b44;
         --divider:#2c333b; --text:#e8eaed; --muted:#8a9099;
         --accent:#4d84ff; --accent-soft:#22314f;
         --menu-bg:#1c2127; --menu-hover:#2a323b; --menu-border:#333b44;
-        --chart-bg:#161a1e; --chart-text:#9aa0a8; --chart-grid:#222932; --chart-sep:#2c333b;
+        --chart-bg:#161a1e; --chart-text:#9aa0a8; --chart-grid:#222932; --chart-sep:#4a535e;
     }
     body { margin:0; font-family:Arial, sans-serif; background:var(--bg); color:var(--text); }
     #contextMenu, #lineMenu {
@@ -174,6 +174,14 @@
     .tb-more-menu .mi:last-child { border-bottom:0; }
     .tb-more-menu .mi:hover { background:var(--accent-soft); color:var(--accent); }
     .tb-more-menu .mi svg { width:15px; height:15px; }
+    .rh-menu .rh-row { display:flex; align-items:center; gap:8px; padding:7px 12px; font-size:13px;
+        cursor:pointer; border-bottom:1px solid var(--divider); }
+    .rh-menu .rh-row:hover { background:var(--accent-soft); }
+    .rh-menu .rh-row.master { font-weight:600; }
+    .rh-menu .rh-row input[type=checkbox] { cursor:pointer; }
+    .rh-menu .rh-thr { display:flex; align-items:center; gap:8px; padding:8px 12px; font-size:12px; color:var(--muted); }
+    .rh-menu .rh-thr input { width:52px; padding:2px 4px; background:var(--btn); color:var(--text);
+        border:1px solid var(--btn-border); border-radius:4px; font-size:12px; }
 
     .menu-item { cursor:pointer; padding:4px 0; }
 
@@ -577,6 +585,8 @@
             </div>
             <button id="posBtn1" class="tb-ic" onclick="togglePositionDropdown(1, event)" data-tip="Позиция"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4v16M6 9l6-5 6 5"/></svg></button>
             <button id="indBtn1" class="tb-ic" onclick="openIndicatorsPanel(1, event)" data-tip="Индикаторы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17l5-6 4 4 5-8 4 5"/></svg></button>
+            <button id="rhBtn1" class="tb-ic" onclick="toggleRHMenu(1, event)" data-tip="Крюки Росса"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 4h4"/><path d="M14 4v9a4 4 0 01-8 0"/><circle cx="6" cy="13" r="1.5" fill="currentColor" stroke="none"/></svg></button>
+            <div id="rhMenu1" class="tb-more-menu rh-menu"></div>
             <div class="tb-spacer"></div>
             <button id="chartSyncBtn" class="tb-ic" data-tip="Синхронизация панелей"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9a8 8 0 0113-3l3 3M20 15a8 8 0 01-13 3l-3-3"/><path d="M20 4v5h-5M4 20v-5h5"/></svg></button>
             <button id="moreBtn1" class="tb-ic" onclick="toggleMoreMenu(1, event)" data-tip="Ещё"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
@@ -617,6 +627,8 @@
             </div>
             <button id="posBtn2" class="tb-ic" onclick="togglePositionDropdown(2, event)" data-tip="Позиция"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 4v16M6 9l6-5 6 5"/></svg></button>
             <button id="indBtn2" class="tb-ic" onclick="openIndicatorsPanel(2, event)" data-tip="Индикаторы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17l5-6 4 4 5-8 4 5"/></svg></button>
+            <button id="rhBtn2" class="tb-ic" onclick="toggleRHMenu(2, event)" data-tip="Крюки Росса"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 4h4"/><path d="M14 4v9a4 4 0 01-8 0"/><circle cx="6" cy="13" r="1.5" fill="currentColor" stroke="none"/></svg></button>
+            <div id="rhMenu2" class="tb-more-menu rh-menu"></div>
             <div class="tb-spacer"></div>
             <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
             <button id="signalLogBtn" class="tb-txt" onclick="toggleSignalPanel()" data-tip="Сигналы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
@@ -662,6 +674,7 @@
 <script src="js/time-mapper.js"></script>
 <script src="js/drawing-engine.js"></script>
 <script src="js/orderbook-overlay.js"></script>
+<script src="js/rosshooks-overlay.js"></script>
 <script src="js/position-tool.js"></script>
 <script src="js/indicators.js"></script>
 <script src="js/storage.js"></script>
@@ -813,6 +826,9 @@ function applyPriceFormat(id) {
     const precision = p ? p.precision : 5;
     const minMove   = p ? p.minMove   : 0.00001;
     st.series.applyOptions({ priceFormat: { type: 'price', precision, minMove } });
+    // ATR-серия в под-пане тоже в единицах цены — синхронизируем ей формат,
+    // иначе на форексе ATR ~0.0004 округлится до "0.00".
+    st.indicatorManager?.applyPriceFormat({ type: 'price', precision, minMove });
 }
 
 // Перестраивает <option> селектора пар из списка, пришедшего в instruments.
@@ -1102,6 +1118,9 @@ function handleMessage(id, state, msg) {
             } else {
                 state.indicatorManager.recomputeAll(state.data);
             }
+
+            // Крюки Росса — полный пересчёт по свежей истории.
+            state.rossHooks?.setData(state.data);
         }
 
         StorageLayer.restoreDrawings(id, layout, panesState, drawings);
@@ -1140,6 +1159,12 @@ function handleMessage(id, state, msg) {
         // unnecessary here because every indicator is causal (past values never
         // change); history load / param change still call recomputeAll().
         state.indicatorManager?.updateLast(state.data);
+        // Крюки Росса: пересчитываем только на закрытии бара (новый бар может
+        // подтвердить/пробить крюк). На тике внутри бара уровни не трогаем — их
+        // положение и так следует за графиком через подписку на видимый диапазон.
+        if (state.rossHooks?.enabled) {
+            if (isNewBar) state.rossHooks.setData(state.data);
+        }
         // Signal markers are keyed to fixed signal timestamps and only change when
         // a new signal arrives (addSignalToLog → refreshSignalMarkers). Refreshing
         // on every tick re-scans the whole growing _signalLog for nothing; do it
@@ -1205,6 +1230,7 @@ function handleMessage(id, state, msg) {
         });
         syncVolumeButtons();
         syncOrderbookButtons();
+        syncRossHooksButtons();
         // Заглушку ленты тоже надо переписать: resetTape() на старте отработал
         // с ПУСТЫМ instrumentsWithVolume и написал «нет биржевого объёма» даже
         // для крипты. Обновляем, только если сделок ещё не было — иначе
@@ -1368,10 +1394,14 @@ function createPane(id) {
         // Indicator manager — created here, loaded later in handleMessage.
         // stretch hooks persist user-set oscillator pane heights in layout.
         st.indicatorManager = new IndicatorManager(paneId, st.chart, st.series, chartDiv, {
-            load: () => layout.paneStretch?.[paneId] || null,
+            // paneStretch2: новый ключ. Старый `paneStretch` мог содержать
+            // сломанные факторы (≈50/50), захваченные, когда высота задавалась
+            // пикселями и LWC раздавал паны поровну. Смена ключа отбрасывает то
+            // наследие; сюда пишется уже корректная схема (осциллятор ~20%).
+            load: () => layout.paneStretch2?.[paneId] || null,
             save: (map) => {
-                layout.paneStretch = layout.paneStretch || {};
-                layout.paneStretch[paneId] = map;
+                layout.paneStretch2 = layout.paneStretch2 || {};
+                layout.paneStretch2[paneId] = map;
                 StorageLayer.autoSave(layout);
             }
         });
@@ -1385,6 +1415,15 @@ function createPane(id) {
             st.orderbookOverlay.setEnabled(true);
             requestOrderbook(paneId, true);
         }
+
+        // Авторисовалка «Крюков Росса» — над стаканом, под рисунками. Данных
+        // ещё нет; setData придёт с первой историей в handleMessage.
+        st.rossHooks = new RossHooksOverlay(paneId, st.chart, st.series, chartDiv);
+        {
+            const rc = rhParams();
+            st.rossHooks.setParams({ swingMode: "atr", swingMult: rc.swingMult, layers: { ...rc.layers } });
+        }
+        if (layout.showRossHooks === true) st.rossHooks.setEnabled(true);
 
         // Синхронное отображение курсоров на обеих панелях.
         // Движение мыши по одному графику отражается крестиком на другом
@@ -2103,6 +2142,8 @@ function switchSymbol(symbol) {
         // Стакан предыдущего инструмента — чужие цены. Держать его до
         // прихода нового значило бы рисовать стены не того рынка.
         if (st.orderbookOverlay) st.orderbookOverlay.setBook(null);
+        // Крюки прошлого инструмента — по чужим ценам. Гасим до новой истории.
+        if (st.rossHooks) st.rossHooks.setData([]);
     });
     drawings[1] = []; drawings[2] = [];
 
@@ -2161,6 +2202,7 @@ function switchSymbol(symbol) {
         }
     });
     syncOrderbookButtons();
+    syncRossHooksButtons();
     refreshSignalMarkers();
     // Если панель брифинга открыта — перерендерить для нового символа
     if (briefVisible) renderBriefing();
@@ -3285,8 +3327,9 @@ const IND_DEFAULTS = {
     rsi:        { params: { period: 14 },                          color: '#e91e63' },
     macd:       { params: { fast: 12, slow: 26, signal: 9 },       color: '#2962FF' },
     stochastic: { params: { period: 14, smoothK: 3, smoothD: 3 },  color: '#2962FF' },
+    atr:        { params: { period: 14 },                          color: '#26c6da' },
 };
-const IND_LABELS = { sma: 'SMA', ema: 'EMA', bollinger: 'Bollinger', rsi: 'RSI', macd: 'MACD', stochastic: 'Stoch' };
+const IND_LABELS = { sma: 'SMA', ema: 'EMA', bollinger: 'Bollinger', rsi: 'RSI', macd: 'MACD', stochastic: 'Stoch', atr: 'ATR' };
 
 let _indSettingsTarget = null; // { paneId, instanceId }
 let _indSettingsLineWidth = 2;
@@ -3326,6 +3369,7 @@ function _instParamStr(inst) {
     if (inst.type === 'rsi') return `(${p.period})`;
     if (inst.type === 'macd') return `(${p.fast},${p.slow},${p.signal})`;
     if (inst.type === 'stochastic') return `(${p.period},${p.smoothK},${p.smoothD})`;
+    if (inst.type === 'atr') return `(${p.period})`;
     return '';
 }
 
@@ -3406,7 +3450,7 @@ function openIndSettings(instanceId, paneId, btnEl, e) {
             <input type="number" id="indSM_p_mult" value="${p.mult}" min="0.1" max="10" step="0.1"
                    style="width:44px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
         </div>`;
-    } else if (inst.type === 'rsi') {
+    } else if (inst.type === 'rsi' || inst.type === 'atr') {
         paramsHtml = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
             <span>Period</span>
             <input type="number" id="indSM_p_period" value="${p.period}" min="2" max="200"
@@ -3484,7 +3528,7 @@ function applyIndSettings() {
     // Read updated params from injected inputs
     let params = { ...inst.params };
     const gv = id => { const el = document.getElementById(id); return el ? el.value : null; };
-    if (inst.type === 'sma' || inst.type === 'ema' || inst.type === 'rsi') {
+    if (inst.type === 'sma' || inst.type === 'ema' || inst.type === 'rsi' || inst.type === 'atr') {
         params = { ...params, period: parseInt(gv('indSM_p_period')) || inst.params.period };
     } else if (inst.type === 'bollinger') {
         params = { period: parseInt(gv('indSM_p_period')) || inst.params.period,
@@ -3756,6 +3800,154 @@ function requestOrderbook(paneId, on) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "orderbook", enabled: !!on }));
     }
+}
+
+/**
+ * Показать или скрыть авторисовалку «Крюков Росса» на обеих панелях.
+ *
+ * Состояние — глобальное (layout.showRossHooks), крюки живут на любом
+ * инструменте. Данные уже лежат в оверлее (setData из истории), поэтому
+ * включение/выключение — только смена флага и перерисовка.
+ * @param {boolean} visible Показывать ли.
+ * @returns {void}
+ */
+function setRossHooksVisible(visible) {
+    const on = !!visible;
+    layout.showRossHooks = on;
+    StorageLayer.autoSave(layout);
+    [1, 2].forEach(id => {
+        const st = panesState[id];
+        if (!st?.rossHooks) return;
+        // При включении подхватываем текущую историю панели — вдруг оверлей
+        // создан после последней загрузки данных.
+        if (on && st.data?.length) st.rossHooks.setData(st.data);
+        st.rossHooks.setEnabled(on);
+    });
+    syncRossHooksButtons();
+    refreshOpenRHMenu();
+}
+
+/**
+ * Перерисовать открытое меню разметки Росса (обновить галочки/доступность).
+ * @returns {void}
+ */
+function refreshOpenRHMenu() {
+    [1, 2].forEach(id => {
+        const m = document.getElementById("rhMenu" + id);
+        if (m && m.classList.contains("open")) m.innerHTML = rhMenuHTML(id);
+    });
+}
+
+/**
+ * Параметры разметки Росса (свинг-порог + слои). Ленивая инициализация с
+ * дефолтами. Хранится в layout.rossHooks, переживает перезагрузку.
+ * @returns {{swingMult:number, layers:Object}}
+ */
+function rhParams() {
+    if (!layout.rossHooks) layout.rossHooks = {};
+    const rc = layout.rossHooks;
+    if (typeof rc.swingMult !== "number") rc.swingMult = 2.0;
+    if (!rc.layers) rc.layers = { structure: true, pattern123: true, rh: true, rhr: true };
+    return rc;
+}
+
+/**
+ * Применить текущие параметры разметки к оверлеям обеих панелей.
+ * @returns {void}
+ */
+function applyRHParams() {
+    const rc = rhParams();
+    [1, 2].forEach(id => {
+        const st = panesState[id];
+        if (st?.rossHooks) st.rossHooks.setParams({
+            swingMode: "atr", swingMult: rc.swingMult, layers: { ...rc.layers }
+        });
+    });
+}
+
+/**
+ * Включить/выключить слой разметки (structure|pattern123|rh|rhr).
+ * @param {string} name Слой.
+ * @param {boolean} on Показывать ли.
+ * @returns {void}
+ */
+function setRHLayer(name, on) {
+    rhParams().layers[name] = !!on;
+    StorageLayer.autoSave(layout);
+    applyRHParams();
+}
+
+/**
+ * Задать порог свинга (× ATR). Мельче → чувствительнее свинги.
+ * @param {number|string} v Множитель ATR.
+ * @returns {void}
+ */
+function setRHSwing(v) {
+    const n = parseFloat(v);
+    if (isFinite(n) && n > 0) { rhParams().swingMult = n; StorageLayer.autoSave(layout); applyRHParams(); }
+}
+
+/**
+ * Собрать HTML меню разметки Росса из текущего состояния.
+ * @param {number} paneId Панель (для уникальных id инпутов).
+ * @returns {string}
+ */
+function rhMenuHTML(paneId) {
+    const rc = rhParams();
+    const on = layout.showRossHooks === true;
+    const row = (name, label) => {
+        const checked = rc.layers[name] ? "checked" : "";
+        const dis = on ? "" : "disabled";
+        return `<label class="rh-row"><input type="checkbox" ${checked} ${dis}
+            onchange="setRHLayer('${name}', this.checked)"><span>${label}</span></label>`;
+    };
+    return `<label class="rh-row master"><input type="checkbox" ${on ? "checked" : ""}
+                onchange="setRossHooksVisible(this.checked)"><span>Показать разметку</span></label>`
+        + row("structure", "Структура (HH/HL)")
+        + row("pattern123", "Формация 1-2-3")
+        + row("rh", "Крюки RH")
+        + row("rhr", "Развороты RHR")
+        + `<div class="rh-thr"><span>Порог свинга, ×ATR</span>
+             <input type="number" min="0.2" max="10" step="0.1" value="${rc.swingMult}"
+                    ${on ? "" : "disabled"} onchange="setRHSwing(this.value)"></div>`;
+}
+
+/**
+ * Открыть/закрыть меню разметки Росса под кнопкой тулбара панели.
+ * @param {number} paneId Панель.
+ * @param {Event} e Событие клика.
+ * @returns {void}
+ */
+function toggleRHMenu(paneId, e) {
+    if (e) e.stopPropagation();
+    const menu = document.getElementById("rhMenu" + paneId);
+    const btn  = document.getElementById("rhBtn" + paneId);
+    if (!menu || !btn) return;
+    const wasOpen = menu.classList.contains("open");
+    closeMoreMenus();
+    if (wasOpen) return;
+    menu.innerHTML = rhMenuHTML(paneId);
+    const r = btn.getBoundingClientRect();
+    menu.style.position = "fixed";
+    menu.style.top = (r.bottom + 6) + "px";
+    // Пытаемся выровнять по левому краю кнопки, но не вылезаем за экран.
+    let left = r.left;
+    if (left + 210 > window.innerWidth) left = window.innerWidth - 210;
+    menu.style.left = Math.max(6, left) + "px";
+    menu.style.right = "auto";
+    menu.classList.add("open");
+}
+
+/**
+ * Подсветить кнопки крюков в тулбарах обеих панелей по layout.showRossHooks.
+ * @returns {void}
+ */
+function syncRossHooksButtons() {
+    const on = layout.showRossHooks === true;
+    ["rhBtn1", "rhBtn2"].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) b.classList.toggle("on", on);
+    });
 }
 
 /**

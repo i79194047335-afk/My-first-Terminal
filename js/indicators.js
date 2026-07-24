@@ -107,6 +107,36 @@ const IndicatorMath = (() => {
         return { macd: macdLine, signal: signalLine, hist: histLine };
     }
 
+    // ATR — Average True Range (Wilder). Returns array of {time, value}.
+    // True Range_i = max(high-low, |high-prevClose|, |low-prevClose|); the first
+    // bar has no prevClose so TR_0 = high-low. Warmup: value is null until
+    // `period` TR values exist, then seeded with their SMA and smoothed
+    // recursively (ATR_i = (ATR_{i-1}*(period-1) + TR_i) / period). ATR is in
+    // price units (not 0..100), so its pane autoscales freely.
+    function atr(data, period) {
+        const result = data.map(c => ({ time: c.time, value: null }));
+        if (data.length < period + 1) return result;
+
+        const tr = new Array(data.length);
+        tr[0] = data[0].high - data[0].low;
+        for (let i = 1; i < data.length; i++) {
+            const h = data[i].high, l = data[i].low, pc = data[i - 1].close;
+            tr[i] = Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+        }
+
+        // Seed at index `period` with the SMA of TR[1..period] (Wilder skips the
+        // first TR, which lacks a real prevClose, from the initial average).
+        let sum = 0;
+        for (let i = 1; i <= period; i++) sum += tr[i];
+        let prev = sum / period;
+        result[period] = { time: data[period].time, value: prev };
+        for (let i = period + 1; i < data.length; i++) {
+            prev = (prev * (period - 1) + tr[i]) / period;
+            result[i] = { time: data[i].time, value: prev };
+        }
+        return result;
+    }
+
     // Stochastic — returns { k, d } arrays of {time, value}
     // k = smoothed %K (SMA of raw %K over smoothK bars)
     // d = SMA of k over smoothD bars
@@ -145,7 +175,7 @@ const IndicatorMath = (() => {
         return result;
     }
 
-    return { sma, ema, bollinger, rsi, macd, stochastic };
+    return { sma, ema, bollinger, rsi, macd, stochastic, atr };
 })();
 
 window.IndicatorMath = IndicatorMath;
@@ -227,6 +257,15 @@ class IndicatorManager {
             if (inst.type === 'stochastic' && inst._kSeries) {
                 const p = inst.params;
                 lines.push(`<span style="color:${inst.color}">Stoch(${p.period},${p.smoothK},${p.smoothD})</span>`);
+            }
+            if (inst.type === 'atr' && inst._series) {
+                let dec = 5;
+                try {
+                    const cf = this.candleSeries?.options?.().priceFormat;
+                    if (cf && cf.precision != null) dec = cf.precision;
+                } catch (e) {}
+                const v = val(inst._series);
+                lines.push(`<span style="color:${inst.color}">ATR(${inst.params.period}) ${fmt(v, dec)}</span>`);
             }
         }
 
@@ -334,6 +373,10 @@ class IndicatorManager {
                 this._setFilteredData(inst._kSeries, r.k);
                 this._setFilteredData(inst._dSeries, r.d);
             }
+            if (inst.type === 'atr' && inst._series) {
+                this._setFilteredData(inst._series, IndicatorMath.atr(data, inst.params.period));
+                inst._series.applyOptions({ color: inst.color });
+            }
         }
     }
 
@@ -386,6 +429,9 @@ class IndicatorManager {
                 this._updLast(inst._kSeries, r.k);
                 this._updLast(inst._dSeries, r.d);
             }
+            if (inst.type === 'atr' && inst._series) {
+                this._updLast(inst._series, IndicatorMath.atr(slice, inst.params.period));
+            }
         }
     }
 
@@ -417,6 +463,7 @@ class IndicatorManager {
             case 'stochastic': return (p.period || 14) + (p.smoothK || 1) + (p.smoothD || 3) + 5;
             case 'ema':        return Math.max(300, (p.period || 20) * 5);
             case 'rsi':        return Math.max(300, (p.period || 14) * 6);
+            case 'atr':        return Math.max(300, (p.period || 14) * 6);
             case 'macd':       return Math.max(400, (p.slow || 26) * 5 + (p.signal || 9) * 5);
             default:           return 500;
         }
@@ -462,7 +509,7 @@ class IndicatorManager {
     // ---- Internal ----
 
     _isOverlay(type)    { return type === 'sma' || type === 'ema' || type === 'bollinger'; }
-    _isOscillator(type) { return type === 'rsi' || type === 'macd' || type === 'stochastic'; }
+    _isOscillator(type) { return type === 'rsi' || type === 'macd' || type === 'stochastic' || type === 'atr'; }
 
     _addInstanceSeries(inst) {
         const LWC = window.LightweightCharts;
@@ -512,8 +559,6 @@ class IndicatorManager {
         const LWC = window.LightweightCharts;
         this._teardownAllOscillatorSeries();
 
-        const chartHeight = this.chart.panes()[0]?.getHeight?.() || 300;
-        const paneH = Math.round(chartHeight * 0.22);
         const fixedScale = (lo, hi) => () => ({ priceRange: { minValue: lo, maxValue: hi } });
 
         const oscInstances = this._instances.filter(i => this._isOscillator(i.type));
@@ -580,14 +625,57 @@ class IndicatorManager {
                     inst._kSeries = kSeries;
                     inst._dSeries = dSeries;
                 }
+
+                if (type === 'atr') {
+                    // ATR lives in price units, so — unlike RSI/Stoch — it must
+                    // NOT be pinned to a fixed 0..100 range; let the pane
+                    // autoscale to the ATR values themselves.
+                    //
+                    // It also needs the INSTRUMENT's price format: the default
+                    // LWC precision is 2, and forex ATR (~0.0004) would render as
+                    // "0.00" on the axis and legend. Inherit precision/minMove
+                    // from the candle series so ATR shows real digits.
+                    let priceFormat = { type: 'price', precision: 5, minMove: 0.00001 };
+                    try {
+                        const cf = this.candleSeries?.options?.().priceFormat;
+                        if (cf && cf.precision != null && cf.minMove != null) {
+                            priceFormat = { type: 'price', precision: cf.precision, minMove: cf.minMove };
+                        }
+                    } catch (e) {}
+                    const series = this.chart.addSeries(LWC.LineSeries, {
+                        color: inst.color, lineWidth: inst.lineWidth,
+                        priceLineVisible: false, lastValueVisible: true,
+                        priceFormat
+                    }, paneIndex);
+                    inst._series = series;
+                }
             });
 
-            const panes2 = this.chart.panes();
-            if (panes2[paneIndex]) try { panes2[paneIndex].setHeight(paneH); } catch(e) {}
         });
 
-        // Override the default heights above with any user-saved sizes.
+        // Default pane sizing via LWC stretch factors. Heights distribute
+        // PROPORTIONALLY to these weights — pane.setHeight(px) is NOT honoured
+        // (LWC recomputes from stretch factors and drops the pixel request),
+        // which is exactly why oscillator panes ballooned to ~half the chart.
+        this._applyDefaultStretch(oscOrder.length);
+
+        // Override the defaults with any user-saved sizes (from dragging).
         this.applyStretch();
+    }
+
+    // _applyDefaultStretch — give each oscillator pane ~20% of the total height
+    // and the main price pane the rest, via stretch factors (relative weights).
+    // With k oscillators: each = 20, main = 100 − 20k (clamped so many panes
+    // don't shrink the price pane to nothing).
+    _applyDefaultStretch(oscCount) {
+        if (oscCount < 1) return;
+        const OSC = 20;                                    // % of total per osc pane
+        const mainPct = Math.max(20, 100 - OSC * oscCount);
+        const panes = this.chart.panes();
+        if (panes[0]) { try { panes[0].setStretchFactor(mainPct); } catch (e) {} }
+        for (let i = 1; i <= oscCount; i++) {
+            if (panes[i]) { try { panes[i].setStretchFactor(OSC); } catch (e) {} }
+        }
     }
 
     // _oscOrder — distinct oscillator types in pane order (pane index = idx + 1).
@@ -627,6 +715,20 @@ class IndicatorManager {
         if (json === this._lastStretchJSON) return;
         this._lastStretchJSON = json;
         this._stretchSave(map);
+    }
+
+    // applyPriceFormat — push the instrument's price format onto any ATR series.
+    // ATR is in price units, so its axis/last-value must use the same precision
+    // as the candles; call this whenever the instrument precision changes (pane
+    // setup, `instruments` arrival, symbol switch) so ATR never falls back to the
+    // coarse default that renders forex ATR as "0.00".
+    applyPriceFormat(priceFormat) {
+        if (!priceFormat) return;
+        for (const inst of this._instances) {
+            if (inst.type === 'atr' && inst._series) {
+                try { inst._series.applyOptions({ priceFormat }); } catch (e) {}
+            }
+        }
     }
 
     _setFilteredData(series, points) {
