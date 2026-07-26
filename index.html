@@ -2910,61 +2910,107 @@ function suggestRangeTF(sym) {
 // запроса истории без смены подписки, а трогать подписку паны нельзя. Ответ
 // кэшируется на 30 с, чтобы не плодить соединения.
 
-const RANGE_K = 1.0;              // R = k × ATR
+const RANGE_K = 1.0;              // Авто: R = k × ATR(M5)
 const RANGE_ATR_PERIOD = 14;
-const RANGE_DRIFT = 1.5;          // дрейф ATR, при котором «пора пере-подобрать»
-const _m5AtrCache = {};           // symbol -> {atr, ts}
+const RANGE_DRIFT = 1.5;          // дрейф метрики, при котором «пора пере-подобрать»
+// KVKK (метод Mr Cvokka): R = 0.3 × средний размах (High−Low) свечи M1 «за
+// сессию». Крипта 24/7 — жёстких сессий нет, поэтому «сессия» ≈ скользящее окно
+// M1 длиной сессии (8 ч = 480 баров). Источник: Litr_v_odnogo/docs/kb_mrcvokka.
+const KVKK_K = 0.3;
+const KVKK_WINDOW = 480;
+const _metricCache = {};          // `${mode}:${sym}` -> {v, ts}
 
 /**
- * Разово получить ATR(14) с M5 инструмента (в единицах цены) через временный WS.
- * Кэш 30 с. cb(atrOrNull).
+ * Временный WebSocket: разово запросить историю (sym, tf). У хаба нет запроса
+ * истории без смены подписки, а трогать пану нельзя — поэтому отдельное
+ * короткоживущее соединение. cb(candlesArrayOrNull).
  * @param {string} sym Полный символ.
- * @param {function(number|null):void} cb Колбэк с ATR или null.
+ * @param {string} tf Временно́й ТФ ("M1"/"M5").
+ * @param {function(Array|null):void} cb Колбэк со свечами или null.
  * @returns {void}
  */
-function fetchM5Atr(sym, cb) {
-    const c = _m5AtrCache[sym];
-    if (c && Date.now() - c.ts < 30000) { cb(c.atr); return; }
-
-    let done = false;
-    const finish = v => {
-        if (done) return; done = true;
-        if (v != null) _m5AtrCache[sym] = { atr: v, ts: Date.now() };
-        try { ws.close(); } catch (e) {}
-        cb(v);
-    };
-    let ws;
+function _fetchTfHistory(sym, tf, cb) {
+    let done = false, ws;
+    const finish = v => { if (done) return; done = true; try { ws.close(); } catch (e) {} cb(v); };
     try { ws = new WebSocket(WS_URL); } catch (e) { cb(null); return; }
-    ws.onopen = () => ws.send(JSON.stringify({ type: "set_tf", symbol: sym, tf: "M5", requestId: 1 }));
+    ws.onopen = () => ws.send(JSON.stringify({ type: "set_tf", symbol: sym, tf, requestId: 1 }));
     ws.onmessage = e => {
         let m; try { m = JSON.parse(e.data); } catch (_) { return; }
-        if (m.type === "history") {
-            const data = m.data || [];
-            if (data.length < RANGE_ATR_PERIOD + 2) { finish(null); return; }
-            const arr = IndicatorMath.atr(data, RANGE_ATR_PERIOD);
-            for (let i = arr.length - 1; i >= 0; i--)
-                if (arr[i].value != null) { finish(arr[i].value); return; }
-            finish(null);
-        }
+        if (m.type === "history") finish(m.data || []);
     };
     ws.onerror = () => finish(null);
-    setTimeout(() => finish(null), 5000);   // страховка от зависшего запроса
+    setTimeout(() => finish(null), 5000);
+}
+
+/** Кэшированное значение метрики режима для инструмента (или null). */
+function cachedMetric(sym, mode) {
+    const c = _metricCache[`${mode}:${sym}`];
+    return (c && Date.now() - c.ts < 30000) ? c.v : null;
+}
+function _storeMetric(sym, mode, v) {
+    if (v != null) _metricCache[`${mode}:${sym}`] = { v, ts: Date.now() };
 }
 
 /**
- * R в поинтах из ATR: round(k × ATR / тик), минимум 1.
- * @param {number} atr ATR в единицах цены.
+ * Базовая метрика режима подбора (в единицах цены), кэш 30 с:
+ *   auto — ATR(14) с M5;
+ *   kvkk — средний размах High−Low свечи M1 за окно KVKK_WINDOW.
+ * @param {string} sym Полный символ.
+ * @param {string} mode 'auto' | 'kvkk'.
+ * @param {function(number|null):void} cb Колбэк с метрикой или null.
+ * @returns {void}
+ */
+function fetchSizingMetric(sym, mode, cb) {
+    const cached = cachedMetric(sym, mode);
+    if (cached != null) { cb(cached); return; }
+    const tf = mode === "kvkk" ? "M1" : "M5";
+    _fetchTfHistory(sym, tf, data => {
+        if (!data || !data.length) { cb(null); return; }
+        let v = null;
+        if (mode === "kvkk") {
+            const win = data.slice(-KVKK_WINDOW);
+            if (win.length) {
+                let sum = 0;
+                for (const c of win) sum += (c.high - c.low);
+                v = sum / win.length;
+            }
+        } else {
+            if (data.length >= RANGE_ATR_PERIOD + 2) {
+                const arr = IndicatorMath.atr(data, RANGE_ATR_PERIOD);
+                for (let i = arr.length - 1; i >= 0; i--)
+                    if (arr[i].value != null) { v = arr[i].value; break; }
+            }
+        }
+        _storeMetric(sym, mode, v);
+        cb(v);
+    });
+}
+
+/**
+ * R в поинтах из метрики: round(k × метрика / тик), минимум 1.
+ * k зависит от режима: auto → RANGE_K (×ATR), kvkk → KVKK_K (×средняя M1).
+ * @param {number} v Метрика в единицах цены.
+ * @param {string} mode Режим подбора.
  * @param {string} sym Полный символ.
  * @returns {number} Число поинтов.
  */
-function atrToRangePoints(atr, sym) {
+function metricToPoints(v, mode, sym) {
     const mm = instrumentPrecision[sym]?.minMove || pointSizeOf(sym);
-    return Math.max(1, Math.round(RANGE_K * atr / mm));
+    const k = mode === "kvkk" ? KVKK_K : RANGE_K;
+    return Math.max(1, Math.round(k * v / mm));
 }
 
 /**
- * Базлайн сайзинга инструмента: {mode, atr}. mode 'auto'|'manual';
- * atr — M5-ATR на момент авто-подбора (опора дрейфа). Ленивая инициализация.
+ * Множитель k для режима (для подписей в меню).
+ * @param {string} mode Режим.
+ * @returns {number}
+ */
+function modeK(mode) { return mode === "kvkk" ? KVKK_K : RANGE_K; }
+
+/**
+ * Базлайн сайзинга инструмента: {mode, atr}. mode 'auto'|'kvkk'|'manual';
+ * atr — значение метрики режима на момент подбора (опора дрейфа). Ленивая
+ * инициализация. Поле зовётся atr исторически, но хранит метрику любого режима.
  * @param {string} sym Полный символ.
  * @returns {{mode:string, atr:number|null}}
  */
@@ -3012,8 +3058,8 @@ function setRangeOn(paneId, on) {
         let tf = layout.rangeTf?.[currentSymbol];
         if (tf) { setTF(paneId, tf); refreshOpenRMenus(); }
         else {
-            // Нет запомненного R — авто-подбор по ATR (async), пока не переключаем.
-            autoPickR(paneId, /*apply=*/true);
+            // Нет запомненного R — подбор по текущему режиму (async).
+            pickR(paneId, rangeSizing(currentSymbol).mode, /*apply=*/true);
         }
     } else {
         const back = p.lastTimeTf || "M1";
@@ -3026,19 +3072,21 @@ function setRangeOn(paneId, on) {
 }
 
 /**
- * Авто-подбор R по M5-ATR. Считает целевой R, запоминает ATR как базлайн дрейфа.
+ * Подбор R по режиму (auto=ATR M5, kvkk=0.3×средняя M1). Считает целевой R,
+ * запоминает метрику как базлайн дрейфа.
  * @param {number} paneId Панель (для применения).
+ * @param {string} mode Режим 'auto' | 'kvkk'.
  * @param {boolean} apply Применять сразу (true) или только вернуть в колбэк.
  * @param {function(number|null):void} [cb] Колбэк с целевым R в поинтах.
  * @returns {void}
  */
-function autoPickR(paneId, apply, cb) {
-    fetchM5Atr(currentSymbol, atr => {
-        if (atr == null) { if (cb) cb(null); return; }
-        const points = atrToRangePoints(atr, currentSymbol);
+function pickR(paneId, mode, apply, cb) {
+    fetchSizingMetric(currentSymbol, mode, v => {
+        if (v == null) { if (cb) cb(null); return; }
+        const points = metricToPoints(v, mode, currentSymbol);
         const sz = rangeSizing(currentSymbol);
-        sz.mode = "auto";
-        sz.atr = atr;                       // базлайн дрейфа
+        sz.mode = mode;
+        sz.atr = v;                         // базлайн дрейфа (метрика режима)
         StorageLayer.autoSave(layout);
         if (apply) applyRangePoints(points, paneId);
         syncRButtons();
@@ -3064,11 +3112,11 @@ function syncRButtons() {
     });
 
     const sz = layout.rangeSizing?.[currentSymbol];
-    const canDrift = sz && sz.mode === "auto" && sz.atr > 0;
+    const canDrift = sz && (sz.mode === "auto" || sz.mode === "kvkk") && sz.atr > 0;
     if (!canDrift) { setRAlert(false); return; }
-    fetchM5Atr(currentSymbol, atr => {
-        if (atr == null) { setRAlert(false); return; }
-        const drift = atr / sz.atr;
+    fetchSizingMetric(currentSymbol, sz.mode, v => {
+        if (v == null) { setRAlert(false); return; }
+        const drift = v / sz.atr;
         const over  = drift > RANGE_DRIFT || drift < 1 / RANGE_DRIFT;
         [1, 2].forEach(id => setRAlertPane(id, over && layout[`pane${id}`]?.rangeOn === true));
         refreshOpenRMenus();
@@ -3097,28 +3145,36 @@ function rMenuHTML(paneId) {
     const pts  = currentRangePoints();
     const curR = pts ? formatRLabel(pts, currentSymbol) : "—";
 
-    // Строка дрейфа (только auto с базлайном).
+    // Строка дрейфа (auto/kvkk с базлайном). Метрику берём из кэша своего режима.
     let drift = "";
-    const cache = _m5AtrCache[currentSymbol];
-    if (sz.mode === "auto" && sz.atr > 0 && cache) {
-        const d = cache.atr / sz.atr;
-        if (d > RANGE_DRIFT || d < 1 / RANGE_DRIFT)
-            drift = `<div class="r-info r-drift">ATR ушёл в ${d.toFixed(2)}× — стоит пере-подобрать</div>`;
-        else
-            drift = `<div class="r-info">ATR-дрейф ${d.toFixed(2)}× — в норме</div>`;
+    if ((sz.mode === "auto" || sz.mode === "kvkk") && sz.atr > 0) {
+        const cur = cachedMetric(currentSymbol, sz.mode);
+        if (cur != null) {
+            const d = cur / sz.atr;
+            const label = sz.mode === "kvkk" ? "Средняя M1" : "ATR";
+            if (d > RANGE_DRIFT || d < 1 / RANGE_DRIFT)
+                drift = `<div class="r-info r-drift">${label} ушла в ${d.toFixed(2)}× — стоит пере-подобрать</div>`;
+            else
+                drift = `<div class="r-info">Дрейф ${d.toFixed(2)}× — в норме</div>`;
+        }
     }
 
     const manualTV = pts ? pointsToTV(pts, currentSymbol)
                          : (currentSymbol.startsWith("fxcm:") ? 10 : 100);
+
+    // Строка режима: радио + (для auto/kvkk) кнопка подбора + дрейф.
+    const modeRow = (mode, title) => `
+        <label class="r-row"><input type="radio" name="rmode${paneId}" ${sz.mode === mode ? "checked" : ""}
+            onchange="setRMode(${paneId}, '${mode}')">${title}</label>
+        ${sz.mode === mode ? `<button class="r-apply" onclick="rPickNow(${paneId})">Подобрать сейчас</button>${drift}` : ""}`;
 
     return `
         <label class="r-row"><input type="checkbox" ${on ? "checked" : ""}
             onchange="setRangeOn(${paneId}, this.checked)"><b>Рэндж-бары</b>
             <span style="margin-left:auto;color:var(--muted)">${on ? curR : ""}</span></label>
         <div class="r-sep"></div>
-        <label class="r-row"><input type="radio" name="rmode${paneId}" ${sz.mode === "auto" ? "checked" : ""}
-            onchange="setRMode(${paneId}, 'auto')">Авто (по ATR)</label>
-        ${sz.mode === "auto" ? `<button class="r-apply" onclick="rApplyAuto(${paneId})">Подобрать сейчас</button>${drift}` : ""}
+        ${modeRow("auto", "Авто (1×ATR M5)")}
+        ${modeRow("kvkk", "KVKK (0.3×ср. M1)")}
         <label class="r-row"><input type="radio" name="rmode${paneId}" ${sz.mode === "manual" ? "checked" : ""}
             onchange="setRMode(${paneId}, 'manual')">Ручной</label>
         ${sz.mode === "manual" ? `<div class="r-manual"><span>R</span>
@@ -3146,7 +3202,9 @@ function toggleRMenu(paneId, e) {
     menu.style.right = "auto";
     menu.classList.add("open");
     // Обновим дрейф в свежеоткрытом меню (fetch async, дорисует строку).
-    if (layout[`pane${paneId}`]?.rangeOn) fetchM5Atr(currentSymbol, () => refreshOpenRMenus());
+    const sz = rangeSizing(currentSymbol);
+    if (sz.mode === "auto" || sz.mode === "kvkk")
+        fetchSizingMetric(currentSymbol, sz.mode, () => refreshOpenRMenus());
 }
 
 /** Перерисовать открытые меню R (после смены состояния/прихода ATR). */
@@ -3157,7 +3215,7 @@ function refreshOpenRMenus() {
     });
 }
 
-/** Сменить режим размера (auto/manual). */
+/** Сменить режим размера (auto/kvkk/manual). */
 function setRMode(paneId, mode) {
     rangeSizing(currentSymbol).mode = mode;
     StorageLayer.autoSave(layout);
@@ -3165,15 +3223,17 @@ function setRMode(paneId, mode) {
     syncRButtons();
 }
 
-/** «Подобрать сейчас» — авто-подбор с превью и подтверждением. */
-function rApplyAuto(paneId) {
-    autoPickR(paneId, /*apply=*/false, points => {
-        if (!points) { alert("Не удалось получить ATR (M5) для подбора."); return; }
+/** «Подобрать сейчас» — подбор по текущему режиму с превью и подтверждением. */
+function rPickNow(paneId) {
+    const mode = rangeSizing(currentSymbol).mode;
+    pickR(paneId, mode, /*apply=*/false, points => {
+        if (!points) { alert("Не удалось получить историю для подбора."); return; }
         const cur = currentRangePoints();
+        const src = mode === "kvkk" ? `${KVKK_K}×ср.M1` : `${RANGE_K}×ATR M5`;
         const newR = formatRLabel(points, currentSymbol);
         const msg = cur
-            ? `Текущий ${formatRLabel(cur, currentSymbol)} → станет ${newR} (k=${RANGE_K}×ATR M5). Применить?`
-            : `Размер бара: ${newR} (k=${RANGE_K}×ATR M5). Применить?`;
+            ? `Текущий ${formatRLabel(cur, currentSymbol)} → станет ${newR} (${src}). Применить?`
+            : `Размер бара: ${newR} (${src}). Применить?`;
         if (confirm(msg)) {
             if (!layout[`pane${paneId}`]?.rangeOn) setRangeOn(paneId, true);
             applyRangePoints(points, paneId);
