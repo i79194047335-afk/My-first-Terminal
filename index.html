@@ -194,8 +194,8 @@
     .r-menu .r-drift { color:#f5a623; }
     .r-menu button.r-apply { margin:2px 12px 8px; padding:5px 10px; cursor:pointer; background:var(--accent);
         color:#fff; border:0; border-radius:4px; font-size:12px; width:calc(100% - 24px); }
-    /* Кнопка R подсвечивается, когда пора пере-подобрать (дрейф ATR) */
-    .tb-ic.r-alert { background:#5a3a12; border-color:#f5a623; color:#f5a623; }
+    /* Кнопка R: нейтральна обычно; оранжевый — только «пора пере-подобрать» */
+    #rBtn1.r-alert, #rBtn2.r-alert { background:#5a3a12; border-color:#f5a623; color:#f5a623; }
 
     .menu-item { cursor:pointer; padding:4px 0; }
 
@@ -998,9 +998,11 @@ function wireSocket(id, state, els) {
         // если был включён и есть запомненный R для инструмента; иначе — обычный
         // ТФ из селектора.
         const p = layout[`pane${id}`] || {};
-        const tf = (p.rangeOn && layout.rangeTf?.[currentSymbol])
-            ? layout.rangeTf[currentSymbol]
-            : (els ? els.tfSelect.value : (p.tf || "M1"));
+        // Панели независимы: восстанавливаем СОБСТВЕННЫЙ рэндж панели (p.tf), а
+        // общий rangeTf[sym] — лишь запасной дефолт инструмента.
+        const tf = (p.rangeOn && parseRangeTF(p.tf)) ? p.tf
+                 : (p.rangeOn && layout.rangeTf?.[currentSymbol]) ? layout.rangeTf[currentSymbol]
+                 : (els ? els.tfSelect.value : (p.tf || "M1"));
         setTF(id, tf);
         ws.send(JSON.stringify({ type: "get_instruments" }));
         if (id === 1) ws.send(JSON.stringify({ type: "get_signals" }));
@@ -2980,24 +2982,18 @@ function currentRangePoints() {
     return tf ? parseRangeTF(tf) : null;
 }
 
-/** Включена ли рэндж-панель хотя бы на одной панели (для подсветки/состояния). */
-function anyPaneRangeOn() {
-    return [1, 2].some(id => layout[`pane${id}`]?.rangeOn);
-}
-
 /**
  * Применить R (в поинтах) на все панели, где включён рэндж-режим.
  * @param {number} points R в поинтах.
  * @returns {void}
  */
-function applyRangePoints(points) {
+function applyRangePoints(points, paneId) {
     if (!(points > 0)) return;
     const tf = "R:" + points;
     layout.rangeTf = layout.rangeTf || {};
-    layout.rangeTf[currentSymbol] = tf;
-    [1, 2].forEach(id => {
-        if (layout[`pane${id}`]?.rangeOn) setTF(id, tf);
-    });
+    layout.rangeTf[currentSymbol] = tf;   // запомненный R инструмента (дефолт)
+    // Применяем ТОЛЬКО к своей панели — панели независимы.
+    if (paneId && layout[`pane${paneId}`]?.rangeOn) setTF(paneId, tf);
     StorageLayer.autoSave(layout);
 }
 
@@ -3044,7 +3040,7 @@ function autoPickR(paneId, apply, cb) {
         sz.mode = "auto";
         sz.atr = atr;                       // базлайн дрейфа
         StorageLayer.autoSave(layout);
-        if (apply) applyRangePoints(points);
+        if (apply) applyRangePoints(points, paneId);
         syncRButtons();
         refreshOpenRMenus();
         if (cb) cb(points);
@@ -3052,36 +3048,34 @@ function autoPickR(paneId, apply, cb) {
 }
 
 /**
- * Подсветка кнопок R: активна (рэндж вкл) + «r-alert» при дрейфе ATR > порога.
- * Дрейф считается по M5-ATR относительно базлайна авто-подбора (только режим
- * auto). Fetch кэшируется, поэтому вызывать можно часто.
+ * Подсветка кнопок R. Кнопка НЕЙТРАЛЬНА в обычном состоянии (не «активный
+ * инструмент») — оранжевый «r-alert» загорается ТОЛЬКО когда пора пере-подобрать:
+ * режим auto, есть базлайн, дрейф M5-ATR > порога, И эта панель реально в рэндже.
+ * Fetch кэшируется, поэтому вызывать можно часто.
  * @returns {void}
  */
 function syncRButtons() {
-    const on = anyPaneRangeOn();
-    ["rBtn1", "rBtn2"].forEach(idb => {
-        const b = document.getElementById(idb);
-        if (b) b.classList.toggle("on", on);
-    });
-    // Дрейф проверяем только когда рэндж включён и режим auto с базлайном.
     const sz = layout.rangeSizing?.[currentSymbol];
-    if (!on || !sz || sz.mode !== "auto" || !(sz.atr > 0)) {
-        setRAlert(false);
-        return;
-    }
+    const canDrift = sz && sz.mode === "auto" && sz.atr > 0;
+    if (!canDrift) { setRAlert(false); return; }
     fetchM5Atr(currentSymbol, atr => {
         if (atr == null) { setRAlert(false); return; }
         const drift = atr / sz.atr;
-        setRAlert(drift > RANGE_DRIFT || drift < 1 / RANGE_DRIFT);
+        const over  = drift > RANGE_DRIFT || drift < 1 / RANGE_DRIFT;
+        [1, 2].forEach(id => setRAlertPane(id, over && layout[`pane${id}`]?.rangeOn === true));
         refreshOpenRMenus();
     });
 }
 
+/** Зажечь/погасить «пора обновить» на кнопке одной панели. */
+function setRAlertPane(id, alert) {
+    const b = document.getElementById("rBtn" + id);
+    if (b) b.classList.toggle("r-alert", !!alert);
+}
+
+/** Погасить (или зажечь на обеих) «пора обновить». */
 function setRAlert(alert) {
-    ["rBtn1", "rBtn2"].forEach(idb => {
-        const b = document.getElementById(idb);
-        if (b) b.classList.toggle("r-alert", !!alert && b.classList.contains("on"));
-    });
+    [1, 2].forEach(id => setRAlertPane(id, !!alert));
 }
 
 /**
@@ -3174,7 +3168,7 @@ function rApplyAuto(paneId) {
             : `Размер бара: ${newR} (k=${RANGE_K}×ATR M5). Применить?`;
         if (confirm(msg)) {
             if (!layout[`pane${paneId}`]?.rangeOn) setRangeOn(paneId, true);
-            applyRangePoints(points);
+            applyRangePoints(points, paneId);
             setRAlert(false);
             refreshOpenRMenus();
         }
@@ -3189,7 +3183,7 @@ function rApplyManual(paneId, val) {
     if (!(points > 0) || points > 10000) return;
     rangeSizing(currentSymbol).mode = "manual";
     if (!layout[`pane${paneId}`]?.rangeOn) setRangeOn(paneId, true);
-    applyRangePoints(points);
+    applyRangePoints(points, paneId);
     refreshOpenRMenus();
 }
 
