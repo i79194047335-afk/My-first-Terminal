@@ -3055,6 +3055,14 @@ function autoPickR(paneId, apply, cb) {
  * @returns {void}
  */
 function syncRButtons() {
+    // Индикация режима: кнопка панели в рэндже — с акцентной подсветкой (.on),
+    // ПОПАНЕЛЬНО (не «любая панель»), чтобы было видно, у какого графика рэндж.
+    // Цвет .on (акцент) отличается от оранжевого .r-alert («пора обновить»).
+    [1, 2].forEach(id => {
+        const b = document.getElementById("rBtn" + id);
+        if (b) b.classList.toggle("on", layout[`pane${id}`]?.rangeOn === true);
+    });
+
     const sz = layout.rangeSizing?.[currentSymbol];
     const canDrift = sz && sz.mode === "auto" && sz.atr > 0;
     if (!canDrift) { setRAlert(false); return; }
