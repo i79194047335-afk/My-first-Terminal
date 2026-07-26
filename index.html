@@ -182,6 +182,20 @@
     .rh-menu .rh-thr { display:flex; align-items:center; gap:8px; padding:8px 12px; font-size:12px; color:var(--muted); }
     .rh-menu .rh-thr input { width:52px; padding:2px 4px; background:var(--btn); color:var(--text);
         border:1px solid var(--btn-border); border-radius:4px; font-size:12px; }
+    /* Меню кнопки R */
+    .r-menu { min-width:210px; padding:4px 0; }
+    .r-menu .r-row { display:flex; align-items:center; gap:8px; padding:7px 12px; font-size:13px; cursor:pointer; }
+    .r-menu .r-row:hover { background:var(--accent-soft); }
+    .r-menu .r-sep { border-top:1px solid var(--divider); margin:4px 0; }
+    .r-menu .r-manual { display:flex; align-items:center; gap:8px; padding:2px 12px 8px 30px; }
+    .r-menu .r-manual input { width:70px; padding:3px 5px; background:var(--btn); color:var(--text);
+        border:1px solid var(--btn-border); border-radius:4px; font-size:12px; }
+    .r-menu .r-info { padding:2px 12px 8px; font-size:11px; color:var(--muted); }
+    .r-menu .r-drift { color:#f5a623; }
+    .r-menu button.r-apply { margin:2px 12px 8px; padding:5px 10px; cursor:pointer; background:var(--accent);
+        color:#fff; border:0; border-radius:4px; font-size:12px; width:calc(100% - 24px); }
+    /* Кнопка R подсвечивается, когда пора пере-подобрать (дрейф ATR) */
+    .tb-ic.r-alert { background:#5a3a12; border-color:#f5a623; color:#f5a623; }
 
     .menu-item { cursor:pointer; padding:4px 0; }
 
@@ -604,6 +618,8 @@
                 <option value="fxcm:USD/JPY">USD/JPY</option>
             </select>
             <select id="tf1" class="tb"></select>
+            <button id="rBtn1" class="tb-ic" onclick="toggleRMenu(1, event)" data-tip="Рэндж-бары (размер R)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 4v16"/><path d="M9 8h9M9 12h6M9 16h9"/></svg></button>
+            <div id="rMenu1" class="tb-more-menu r-menu"></div>
             <div class="tb-div"></div>
             <div class="tb-seg">
                 <button id="hlineBtn1" class="tb-ic" onclick="setTool('hline')" data-tip="Гор. линия"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18"/></svg></button>
@@ -647,6 +663,8 @@
     <div class="price-pane" id="pane2">
         <div class="toolbar">
             <select id="tf2" class="tb"></select>
+            <button id="rBtn2" class="tb-ic" onclick="toggleRMenu(2, event)" data-tip="Рэндж-бары (размер R)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 4v16"/><path d="M9 8h9M9 12h6M9 16h9"/></svg></button>
+            <div id="rMenu2" class="tb-more-menu r-menu"></div>
             <div class="tb-div"></div>
             <div class="tb-seg">
                 <button id="hlineBtn2" class="tb-ic" onclick="setTool('hline')" data-tip="Гор. линия"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18"/></svg></button>
@@ -751,11 +769,6 @@ const TF_MAP = {
 };
 // Адрес хаба; ?ws=ws://127.0.0.1:8767 — для локальной отладки против тест-хаба.
 const WS_URL = new URLSearchParams(location.search).get("ws") || "ws://89.107.10.204:8765";
-// Рэндж-бары: пресеты в ПОИНТАХ (как TradingView), произвольное — через "R…".
-// Поинт = минимальный тик (5-й знак EUR/USD), поэтому пресеты крупнее пипсовых:
-// R10 = 10 поинтов = 1 пипс, R50 = 5 пипсов.
-const RANGE_PRESETS = [10, 20, 50];
-
 // ── Шкала R: наша (тики) ↔ TradingView ──────────────────────────────────────
 //
 // Внутри и хабу рэндж-бар всегда задаётся в ПОИНТАХ (тиках, минимальный тик
@@ -797,22 +810,6 @@ function formatRLabel(points, sym) {
     return "R" + s;
 }
 
-/**
- * Пересчитать текст ВСЕХ рэндж-опций селектора под текущий инструмент.
- * Значения опций (в поинтах) не трогаем — меняется только надпись: при смене
- * пары фактор другой, и "R100" для BTC должно стать, скажем, "R10" для форекса.
- * @param {HTMLSelectElement} select Селектор ТФ.
- * @returns {void}
- */
-function relabelRangeOptions(select) {
-    if (!select) return;
-    for (const o of select.options) {
-        if (o.value === "R:custom") continue;
-        const pts = parseRangeTF(o.value);
-        if (pts != null) o.text = formatRLabel(pts, currentSymbol);
-    }
-}
-
 // "R:10" → 10.0; null, если это не рэндж-ТФ (зеркало hub.parse_range_tf).
 function parseRangeTF(tf) {
     if (typeof tf !== "string" || !tf.startsWith("R:")) return null;
@@ -827,16 +824,6 @@ function pointSizeOf(symbol) {
     return Math.pow(10, -p);
 }
 
-// Кастомный рэндж ("R:7") должен существовать в селекторе, иначе value не встанет.
-function ensureTfOption(select, tf) {
-    const pts = parseRangeTF(tf);
-    if (pts == null) return;
-    if ([...select.options].some(o => o.value === tf)) return;
-    const opt = document.createElement("option");
-    opt.value = tf; opt.text = formatRLabel(pts, currentSymbol);
-    const custom = [...select.options].find(o => o.value === "R:custom");
-    select.insertBefore(opt, custom || null);
-}
 const DEFAULT_BAR_COUNT = 122;
 const TZ_OFFSET = 5;
 const DEFAULT_COLORS = {
@@ -1007,7 +994,13 @@ function wireSocket(id, state, els) {
     const ws = state.ws;
     ws.onopen = () => {
         state._reconnectDelay = 1000;   // успешный коннект — сброс backoff
-        const tf = els ? els.tfSelect.value : (layout[`pane${id}`]?.tf || "M1");
+        // Рэндж-режим управляется кнопкой R, не селектором. Восстанавливаем его,
+        // если был включён и есть запомненный R для инструмента; иначе — обычный
+        // ТФ из селектора.
+        const p = layout[`pane${id}`] || {};
+        const tf = (p.rangeOn && layout.rangeTf?.[currentSymbol])
+            ? layout.rangeTf[currentSymbol]
+            : (els ? els.tfSelect.value : (p.tf || "M1"));
         setTF(id, tf);
         ws.send(JSON.stringify({ type: "get_instruments" }));
         if (id === 1) ws.send(JSON.stringify({ type: "get_signals" }));
@@ -1305,12 +1298,9 @@ function handleMessage(id, state, msg) {
             }
         }
         Object.keys(panesState).forEach(id => applyPriceFormat(id));
-        // Точность инструмента только что уточнилась → фактор TV-шкалы мог
-        // поменяться. Переименовываем R-опции обоих селекторов.
-        Object.keys(panesState).forEach(id => {
-            const e = getPaneElements(id);
-            if (e?.tfSelect) relabelRangeOptions(e.tfSelect);
-        });
+        // Точность инструмента уточнилась → фактор TV-шкалы мог поменяться:
+        // если открыто меню R, перерисуем его (там показывается R в TV-шкале).
+        refreshOpenRMenus();
         // Селектор пар — из instruments, а не из захардкоженной HTML-разметки.
         populateSymbolSelect(symbols);
         // Только теперь известно, у кого есть объём: до instruments набор пуст,
@@ -1324,6 +1314,7 @@ function handleMessage(id, state, msg) {
         syncVolumeButtons();
         syncOrderbookButtons();
         syncRossHooksButtons();
+        syncRButtons();
         // Заглушку ленты тоже надо переписать: resetTape() на старте отработал
         // с ПУСТЫМ instrumentsWithVolume и написал «нет биржевого объёма» даже
         // для крипты. Обновляем, только если сделок ещё не было — иначе
@@ -1389,56 +1380,38 @@ function createPane(id) {
     if (id === 1) ws1 = state.ws;
     if (id === 2) ws2 = state.ws;
 
+    // Селектор ТФ — ТОЛЬКО временны́е ТФ. Рэндж-бары вынесены в отдельную
+    // кнопку R тулбара со своим меню (тумблер + Авто/Ручной размер).
     Object.keys(TF_MAP).forEach(tf => {
         const opt = document.createElement("option");
         opt.value = tf; opt.text = tf;
         els.tfSelect.appendChild(opt);
     });
-    RANGE_PRESETS.forEach(p => {
-        const opt = document.createElement("option");
-        opt.value = "R:" + p; opt.text = formatRLabel(p, currentSymbol);
-        els.tfSelect.appendChild(opt);
-    });
-    const customOpt = document.createElement("option");
-    customOpt.value = "R:custom"; customOpt.text = "R…";
-    els.tfSelect.appendChild(customOpt);
 
-    // Сохранённый кастомный рэндж (например "R:7") добавляем как опцию.
-    ensureTfOption(els.tfSelect, layout[`pane${id}`]?.tf);
-    els.tfSelect.value = layout[`pane${id}`]?.tf || "M1";
+    // Если сохранён рэндж-ТФ — селектор показывает последний ОБЫЧНЫЙ ТФ (рэндж
+    // им больше не управляется), а рэндж применит onopen по флагу rangeOn.
+    const savedTf = layout[`pane${id}`]?.tf || "M1";
+    // Миграция: у старых раскладок tf="R:..." без флага rangeOn — включаем режим,
+    // чтобы рэндж не пропал при обновлении.
+    if (parseRangeTF(savedTf) && layout[`pane${id}`] && layout[`pane${id}`].rangeOn === undefined)
+        layout[`pane${id}`].rangeOn = true;
+    els.tfSelect.value = parseRangeTF(savedTf) ? (layout[`pane${id}`]?.lastTimeTf || "M1") : savedTf;
 
     wireSocket(id, state, els);
 
     els.tfSelect.onchange = () => {
-        let v = els.tfSelect.value;
-        if (v === "R:custom") {
-            const prev   = layout[`pane${id}`]?.tf || "M1";
-            const prevPts = parseRangeTF(prev);
-            // Спрашиваем в TV-шкале: то же число, что в TradingView (BTC — 100,
-            // а не 1000). Дефолт — текущий R в TV, иначе типовой по классу.
-            const defTV = prevPts != null ? pointsToTV(prevPts, currentSymbol)
-                        : (currentSymbol.startsWith("fxcm:") ? 10 : 100);
-            const inp   = prompt("Размер рэндж-бара в R (как в TradingView):", defTV);
-            const tv    = inp === null ? null
-                        : parseFloat(String(inp).replace(",", "."));
-            if (!tv || tv <= 0) {
-                els.tfSelect.value = prev;   // отмена/мусор — откат селектора
-                return;
-            }
-            const points = tvToPoints(tv, currentSymbol);
-            if (!(points > 0) || points > 100000) {
-                els.tfSelect.value = prev;
-                return;
-            }
-            v = "R:" + points;
-            ensureTfOption(els.tfSelect, v);
-            els.tfSelect.value = v;
-        }
-        setTF(id, v);
+        // Выбор временно́го ТФ = выход из рэндж-режима.
+        layout[`pane${id}`] = layout[`pane${id}`] || {};
+        layout[`pane${id}`].rangeOn = false;
+        syncRButtons();
+        setTF(id, els.tfSelect.value);
     };
     setInterval(() => updateCountdown(id), 250);
     // Pick up user-dragged oscillator pane heights (LWC has no pane-resize event).
     setInterval(() => panesState[id]?.indicatorManager?.captureStretch(), 1500);
+    // Дрейф ATR для подсветки кнопки R — редко (M5-ATR медленный), одним
+    // таймером на обе панели.
+    if (id === 1) setInterval(syncRButtons, 60000);
 
     // ────────────────────────────────────────────────────────────
     function createChartInternal(paneId, tfSec) {
@@ -2229,18 +2202,23 @@ function setTF(paneId, tf) {
         st.chart.applyOptions({ timeScale:
             { secondsVisible: !st.tfSeconds || st.tfSeconds < 60 } });
     }
+    layout[`pane${paneId}`] = layout[`pane${paneId}`] || {};
     layout[`pane${paneId}`].tf = tf;
 
     // Рэндж-ТФ запоминается НА ИНСТРУМЕНТ. R задан в поинтах, а поинт у
     // инструментов различается в тысячи раз: R500 — это ~$50 на BTC (темп M5)
     // и 0.05 на LIT (цена $2.2, бар в жизни не закроется). Без этой памяти
     // при каждом переключении пары приходилось бы подбирать R заново.
-    // Обычные ТФ (M1/H1/…) осмысленны для всех, их держим на панели.
     if (parseRangeTF(tf)) {
         layout.rangeTf = layout.rangeTf || {};
         layout.rangeTf[currentSymbol] = tf;
+        layout[`pane${paneId}`].rangeOn = true;
+    } else {
+        // Обычный ТФ — запоминаем как «куда вернуться» при выключении рэнджа.
+        layout[`pane${paneId}`].lastTimeTf = tf;
     }
     StorageLayer.autoSave(layout);
+    syncRButtons();
     DrawingController.resetTool();
 
     if (st.ws.readyState === WebSocket.OPEN) {
@@ -2302,28 +2280,23 @@ function switchSymbol(symbol) {
         // форексе остались бы висеть столбцы от прошлого инструмента.
         ensureVolumeSeries(id);
 
-        // Фактор TV-шкалы зависит от инструмента — переименовываем R-опции
-        // (значения в поинтах не трогаем). Иначе "R100" от BTC осталось бы на
-        // форексе, где тот же R:1000 читается иначе.
-        const elsR = getPaneElements(id);
-        if (elsR?.tfSelect) relabelRangeOptions(elsR.tfSelect);
-
-        // Если панель стоит на рэндж-ТФ, берём R, ЗАПОМНЕННЫЙ ДЛЯ НОВОГО
-        // инструмента: R в поинтах несопоставим между парами (R500 = ~$50 на
-        // BTC и 0.05 на LIT), и тащить чужое значение бессмысленно. Нет
-        // запомненного — считаем разумное значение от текущей цены.
-        let tf = layout[`pane${id}`]?.tf || "M1";
-        if (parseRangeTF(tf)) {
-            const remembered = layout.rangeTf?.[currentSymbol];
-            tf = remembered || suggestRangeTF(currentSymbol) || tf;
-            layout[`pane${id}`] = layout[`pane${id}`] || {};
-            layout[`pane${id}`].tf = tf;
-            const els2 = getPaneElements(id);
-            if (els2?.tfSelect) {
-                ensureRangeOption(els2.tfSelect, tf);
-                els2.tfSelect.value = tf;
-            }
+        // Рэндж-режим принадлежит ПАНЕЛИ (rangeOn), а конкретный R — ИНСТРУМЕНТУ
+        // (R в поинтах несопоставим между парами). При смене пары:
+        //  • рэндж вкл → берём запомненный R нового инструмента, иначе прикидку;
+        //  • рэндж выкл → обычный ТФ (последний временно́й).
+        const paneCfg = layout[`pane${id}`] || (layout[`pane${id}`] = {});
+        let tf;
+        if (paneCfg.rangeOn) {
+            tf = layout.rangeTf?.[currentSymbol] || suggestRangeTF(currentSymbol);
+            if (!tf) { paneCfg.rangeOn = false; tf = paneCfg.lastTimeTf || "M1"; }
+        } else {
+            tf = paneCfg.lastTimeTf || paneCfg.tf || "M1";
+            if (parseRangeTF(tf)) tf = "M1";
         }
+        const els2 = getPaneElements(id);
+        if (els2?.tfSelect && !parseRangeTF(tf)) els2.tfSelect.value = tf;
+        syncRButtons();
+
         const rs = state.ws && state.ws.readyState;
 
         if (rs === WebSocket.OPEN) {
@@ -2921,20 +2894,303 @@ function suggestRangeTF(sym) {
     return points >= 1 ? "R:" + points : null;
 }
 
+// ============================================================================
+// Авто-R по ATR — подбор размера рэндж-бара
+// ============================================================================
+//
+// Размер бара сайзится от ATR по классике: R = k×ATR (k=1 → бар ≈ типичный
+// ход). Базис ATR — ВСЕГДА M5, единый для подбора и для дрейфа: (1) на рэндж-ТФ
+// ATR по самим барам бессмыслен (они одного размера), (2) M5 стабилен и не
+// зависит от того, какой ТФ открыт, (3) R и «пора обновить» считаются по одной
+// линейке. Порог дрейфа — ×1.5 в любую сторону.
+//
+// M5-историю берём разовым запросом через ВРЕМЕННЫЙ WebSocket: у хаба нет
+// запроса истории без смены подписки, а трогать подписку паны нельзя. Ответ
+// кэшируется на 30 с, чтобы не плодить соединения.
+
+const RANGE_K = 1.0;              // R = k × ATR
+const RANGE_ATR_PERIOD = 14;
+const RANGE_DRIFT = 1.5;          // дрейф ATR, при котором «пора пере-подобрать»
+const _m5AtrCache = {};           // symbol -> {atr, ts}
+
 /**
- * Добавить опцию рэндж-ТФ в селектор, если её там ещё нет.
- * Значения R подбираются под инструмент и не входят в фиксированный список.
- * @param {HTMLSelectElement} select Селектор таймфреймов.
- * @param {string} tf Значение вида "R:500".
+ * Разово получить ATR(14) с M5 инструмента (в единицах цены) через временный WS.
+ * Кэш 30 с. cb(atrOrNull).
+ * @param {string} sym Полный символ.
+ * @param {function(number|null):void} cb Колбэк с ATR или null.
  * @returns {void}
  */
-function ensureRangeOption(select, tf) {
-    if (!select || !tf) return;
-    if (Array.from(select.options).some(o => o.value === tf)) return;
-    const opt = document.createElement("option");
-    opt.value = tf;
-    opt.text  = formatRLabel(parseRangeTF(tf), currentSymbol);   // TV-шкала
-    select.appendChild(opt);
+function fetchM5Atr(sym, cb) {
+    const c = _m5AtrCache[sym];
+    if (c && Date.now() - c.ts < 30000) { cb(c.atr); return; }
+
+    let done = false;
+    const finish = v => {
+        if (done) return; done = true;
+        if (v != null) _m5AtrCache[sym] = { atr: v, ts: Date.now() };
+        try { ws.close(); } catch (e) {}
+        cb(v);
+    };
+    let ws;
+    try { ws = new WebSocket(WS_URL); } catch (e) { cb(null); return; }
+    ws.onopen = () => ws.send(JSON.stringify({ type: "set_tf", symbol: sym, tf: "M5", requestId: 1 }));
+    ws.onmessage = e => {
+        let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+        if (m.type === "history") {
+            const data = m.data || [];
+            if (data.length < RANGE_ATR_PERIOD + 2) { finish(null); return; }
+            const arr = IndicatorMath.atr(data, RANGE_ATR_PERIOD);
+            for (let i = arr.length - 1; i >= 0; i--)
+                if (arr[i].value != null) { finish(arr[i].value); return; }
+            finish(null);
+        }
+    };
+    ws.onerror = () => finish(null);
+    setTimeout(() => finish(null), 5000);   // страховка от зависшего запроса
+}
+
+/**
+ * R в поинтах из ATR: round(k × ATR / тик), минимум 1.
+ * @param {number} atr ATR в единицах цены.
+ * @param {string} sym Полный символ.
+ * @returns {number} Число поинтов.
+ */
+function atrToRangePoints(atr, sym) {
+    const mm = instrumentPrecision[sym]?.minMove || pointSizeOf(sym);
+    return Math.max(1, Math.round(RANGE_K * atr / mm));
+}
+
+/**
+ * Базлайн сайзинга инструмента: {mode, atr}. mode 'auto'|'manual';
+ * atr — M5-ATR на момент авто-подбора (опора дрейфа). Ленивая инициализация.
+ * @param {string} sym Полный символ.
+ * @returns {{mode:string, atr:number|null}}
+ */
+function rangeSizing(sym) {
+    if (!layout.rangeSizing) layout.rangeSizing = {};
+    if (!layout.rangeSizing[sym]) layout.rangeSizing[sym] = { mode: "auto", atr: null };
+    return layout.rangeSizing[sym];
+}
+
+// ── Кнопка R: тумблер режима + меню размера (Авто/Ручной) ────────────────────
+
+/** Текущий R инструмента в поинтах (из запомненного рэндж-ТФ) или null. */
+function currentRangePoints() {
+    const tf = layout.rangeTf?.[currentSymbol];
+    return tf ? parseRangeTF(tf) : null;
+}
+
+/** Включена ли рэндж-панель хотя бы на одной панели (для подсветки/состояния). */
+function anyPaneRangeOn() {
+    return [1, 2].some(id => layout[`pane${id}`]?.rangeOn);
+}
+
+/**
+ * Применить R (в поинтах) на все панели, где включён рэндж-режим.
+ * @param {number} points R в поинтах.
+ * @returns {void}
+ */
+function applyRangePoints(points) {
+    if (!(points > 0)) return;
+    const tf = "R:" + points;
+    layout.rangeTf = layout.rangeTf || {};
+    layout.rangeTf[currentSymbol] = tf;
+    [1, 2].forEach(id => {
+        if (layout[`pane${id}`]?.rangeOn) setTF(id, tf);
+    });
+    StorageLayer.autoSave(layout);
+}
+
+/**
+ * Включить/выключить рэндж-режим панели. Вкл → применяем R (запомненный или
+ * авто-подбор); выкл → возврат на последний временно́й ТФ.
+ * @param {number} paneId Панель.
+ * @param {boolean} on Включить ли рэндж.
+ * @returns {void}
+ */
+function setRangeOn(paneId, on) {
+    const p = layout[`pane${paneId}`] || (layout[`pane${paneId}`] = {});
+    p.rangeOn = !!on;
+    StorageLayer.autoSave(layout);
+    if (on) {
+        let tf = layout.rangeTf?.[currentSymbol];
+        if (tf) { setTF(paneId, tf); refreshOpenRMenus(); }
+        else {
+            // Нет запомненного R — авто-подбор по ATR (async), пока не переключаем.
+            autoPickR(paneId, /*apply=*/true);
+        }
+    } else {
+        const back = p.lastTimeTf || "M1";
+        const els = getPaneElements(paneId);
+        if (els?.tfSelect) els.tfSelect.value = back;
+        setTF(paneId, back);
+    }
+    syncRButtons();
+    refreshOpenRMenus();
+}
+
+/**
+ * Авто-подбор R по M5-ATR. Считает целевой R, запоминает ATR как базлайн дрейфа.
+ * @param {number} paneId Панель (для применения).
+ * @param {boolean} apply Применять сразу (true) или только вернуть в колбэк.
+ * @param {function(number|null):void} [cb] Колбэк с целевым R в поинтах.
+ * @returns {void}
+ */
+function autoPickR(paneId, apply, cb) {
+    fetchM5Atr(currentSymbol, atr => {
+        if (atr == null) { if (cb) cb(null); return; }
+        const points = atrToRangePoints(atr, currentSymbol);
+        const sz = rangeSizing(currentSymbol);
+        sz.mode = "auto";
+        sz.atr = atr;                       // базлайн дрейфа
+        StorageLayer.autoSave(layout);
+        if (apply) applyRangePoints(points);
+        syncRButtons();
+        refreshOpenRMenus();
+        if (cb) cb(points);
+    });
+}
+
+/**
+ * Подсветка кнопок R: активна (рэндж вкл) + «r-alert» при дрейфе ATR > порога.
+ * Дрейф считается по M5-ATR относительно базлайна авто-подбора (только режим
+ * auto). Fetch кэшируется, поэтому вызывать можно часто.
+ * @returns {void}
+ */
+function syncRButtons() {
+    const on = anyPaneRangeOn();
+    ["rBtn1", "rBtn2"].forEach(idb => {
+        const b = document.getElementById(idb);
+        if (b) b.classList.toggle("on", on);
+    });
+    // Дрейф проверяем только когда рэндж включён и режим auto с базлайном.
+    const sz = layout.rangeSizing?.[currentSymbol];
+    if (!on || !sz || sz.mode !== "auto" || !(sz.atr > 0)) {
+        setRAlert(false);
+        return;
+    }
+    fetchM5Atr(currentSymbol, atr => {
+        if (atr == null) { setRAlert(false); return; }
+        const drift = atr / sz.atr;
+        setRAlert(drift > RANGE_DRIFT || drift < 1 / RANGE_DRIFT);
+        refreshOpenRMenus();
+    });
+}
+
+function setRAlert(alert) {
+    ["rBtn1", "rBtn2"].forEach(idb => {
+        const b = document.getElementById(idb);
+        if (b) b.classList.toggle("r-alert", !!alert && b.classList.contains("on"));
+    });
+}
+
+/**
+ * HTML меню кнопки R из текущего состояния инструмента/панели.
+ * @param {number} paneId Панель.
+ * @returns {string}
+ */
+function rMenuHTML(paneId) {
+    const on   = layout[`pane${paneId}`]?.rangeOn === true;
+    const sz   = rangeSizing(currentSymbol);
+    const pts  = currentRangePoints();
+    const curR = pts ? formatRLabel(pts, currentSymbol) : "—";
+
+    // Строка дрейфа (только auto с базлайном).
+    let drift = "";
+    const cache = _m5AtrCache[currentSymbol];
+    if (sz.mode === "auto" && sz.atr > 0 && cache) {
+        const d = cache.atr / sz.atr;
+        if (d > RANGE_DRIFT || d < 1 / RANGE_DRIFT)
+            drift = `<div class="r-info r-drift">ATR ушёл в ${d.toFixed(2)}× — стоит пере-подобрать</div>`;
+        else
+            drift = `<div class="r-info">ATR-дрейф ${d.toFixed(2)}× — в норме</div>`;
+    }
+
+    const manualTV = pts ? pointsToTV(pts, currentSymbol)
+                         : (currentSymbol.startsWith("fxcm:") ? 10 : 100);
+
+    return `
+        <label class="r-row"><input type="checkbox" ${on ? "checked" : ""}
+            onchange="setRangeOn(${paneId}, this.checked)"><b>Рэндж-бары</b>
+            <span style="margin-left:auto;color:var(--muted)">${on ? curR : ""}</span></label>
+        <div class="r-sep"></div>
+        <label class="r-row"><input type="radio" name="rmode${paneId}" ${sz.mode === "auto" ? "checked" : ""}
+            onchange="setRMode(${paneId}, 'auto')">Авто (по ATR)</label>
+        ${sz.mode === "auto" ? `<button class="r-apply" onclick="rApplyAuto(${paneId})">Подобрать сейчас</button>${drift}` : ""}
+        <label class="r-row"><input type="radio" name="rmode${paneId}" ${sz.mode === "manual" ? "checked" : ""}
+            onchange="setRMode(${paneId}, 'manual')">Ручной</label>
+        ${sz.mode === "manual" ? `<div class="r-manual"><span>R</span>
+            <input type="number" id="rManual${paneId}" min="0.1" step="0.1" value="${manualTV}"
+                   onchange="rApplyManual(${paneId}, this.value)">
+            <span style="color:var(--muted)">как в TV</span></div>` : ""}`;
+}
+
+/** Открыть/закрыть меню R под кнопкой панели. */
+function toggleRMenu(paneId, e) {
+    if (e) e.stopPropagation();
+    const menu = document.getElementById("rMenu" + paneId);
+    const btn  = document.getElementById("rBtn" + paneId);
+    if (!menu || !btn) return;
+    const wasOpen = menu.classList.contains("open");
+    closeMoreMenus();
+    if (wasOpen) return;
+    menu.innerHTML = rMenuHTML(paneId);
+    const r = btn.getBoundingClientRect();
+    menu.style.position = "fixed";
+    menu.style.top = (r.bottom + 6) + "px";
+    let left = r.left;
+    if (left + 220 > window.innerWidth) left = window.innerWidth - 220;
+    menu.style.left = Math.max(6, left) + "px";
+    menu.style.right = "auto";
+    menu.classList.add("open");
+    // Обновим дрейф в свежеоткрытом меню (fetch async, дорисует строку).
+    if (layout[`pane${paneId}`]?.rangeOn) fetchM5Atr(currentSymbol, () => refreshOpenRMenus());
+}
+
+/** Перерисовать открытые меню R (после смены состояния/прихода ATR). */
+function refreshOpenRMenus() {
+    [1, 2].forEach(id => {
+        const m = document.getElementById("rMenu" + id);
+        if (m && m.classList.contains("open")) m.innerHTML = rMenuHTML(id);
+    });
+}
+
+/** Сменить режим размера (auto/manual). */
+function setRMode(paneId, mode) {
+    rangeSizing(currentSymbol).mode = mode;
+    StorageLayer.autoSave(layout);
+    refreshOpenRMenus();
+    syncRButtons();
+}
+
+/** «Подобрать сейчас» — авто-подбор с превью и подтверждением. */
+function rApplyAuto(paneId) {
+    autoPickR(paneId, /*apply=*/false, points => {
+        if (!points) { alert("Не удалось получить ATR (M5) для подбора."); return; }
+        const cur = currentRangePoints();
+        const newR = formatRLabel(points, currentSymbol);
+        const msg = cur
+            ? `Текущий ${formatRLabel(cur, currentSymbol)} → станет ${newR} (k=${RANGE_K}×ATR M5). Применить?`
+            : `Размер бара: ${newR} (k=${RANGE_K}×ATR M5). Применить?`;
+        if (confirm(msg)) {
+            if (!layout[`pane${paneId}`]?.rangeOn) setRangeOn(paneId, true);
+            applyRangePoints(points);
+            setRAlert(false);
+            refreshOpenRMenus();
+        }
+    });
+}
+
+/** Ручной ввод R (в TV-шкале) → поинты, применить. */
+function rApplyManual(paneId, val) {
+    const tv = parseFloat(String(val).replace(",", "."));
+    if (!tv || tv <= 0) return;
+    const points = tvToPoints(tv, currentSymbol);
+    if (!(points > 0) || points > 10000) return;
+    rangeSizing(currentSymbol).mode = "manual";
+    if (!layout[`pane${paneId}`]?.rangeOn) setRangeOn(paneId, true);
+    applyRangePoints(points);
+    refreshOpenRMenus();
 }
 
 // ── Лента крупных сделок ───────────────────────────────────────────────────
