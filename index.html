@@ -756,6 +756,63 @@ const WS_URL = new URLSearchParams(location.search).get("ws") || "ws://89.107.10
 // R10 = 10 поинтов = 1 пипс, R50 = 5 пипсов.
 const RANGE_PRESETS = [10, 20, 50];
 
+// ── Шкала R: наша (тики) ↔ TradingView ──────────────────────────────────────
+//
+// Внутри и хабу рэндж-бар всегда задаётся в ПОИНТАХ (тиках, минимальный тик
+// инструмента) — это контракт хаба, менять его нельзя. Но пользователь сверяет
+// график с TradingView, а TV меряет R по-разному:
+//   • ФОРЕКС — в пунктах = пипеттах = тик (совпадает с нами) → множитель 1;
+//   • КРИПТА — в ЦЕЛЫХ единицах цены (для BTC шаг 1.0, а тик 0.1) → множитель
+//     round(1/тик). У BTC = 10, поэтому наш R:1000 = TV 100R.
+// Перевод живёт ТОЛЬКО в UI: ярлык селектора и разбор ввода. Форекс получает
+// множитель 1 и математически не затрагивается.
+
+/**
+ * Сколько НАШИХ поинтов (тиков) в одном «R» шкалы TradingView для инструмента.
+ * @param {string} sym Полный символ ("lighter:BTC", "fxcm:EUR/USD").
+ * @returns {number} Множитель: 1 для форекса, round(1/тик) для крипты.
+ */
+function rTicksPerTV(sym) {
+    if (typeof sym === "string" && sym.startsWith("fxcm:")) return 1;
+    const mm = instrumentPrecision[sym]?.minMove;
+    if (!mm || !(mm > 0)) return 1;   // до прихода instruments — безопасный форекс-дефолт
+    return Math.max(1, Math.round(1 / mm));
+}
+
+/** Поинты (тики) → число R шкалы TradingView. */
+function pointsToTV(points, sym) { return points / rTicksPerTV(sym); }
+
+/** Число R шкалы TradingView → поинты (тики) для хаба. Дробное сохраняем. */
+function tvToPoints(tv, sym) { return +(tv * rTicksPerTV(sym)).toFixed(3); }
+
+/**
+ * Ярлык рэндж-опции в TV-шкале: "R:1000" при факторе 10 → "R100".
+ * @param {number} points Значение в поинтах (из parseRangeTF).
+ * @param {string} sym Полный символ.
+ * @returns {string}
+ */
+function formatRLabel(points, sym) {
+    const tv = pointsToTV(points, sym);
+    const s = Number.isInteger(tv) ? String(tv) : String(parseFloat(tv.toFixed(3)));
+    return "R" + s;
+}
+
+/**
+ * Пересчитать текст ВСЕХ рэндж-опций селектора под текущий инструмент.
+ * Значения опций (в поинтах) не трогаем — меняется только надпись: при смене
+ * пары фактор другой, и "R100" для BTC должно стать, скажем, "R10" для форекса.
+ * @param {HTMLSelectElement} select Селектор ТФ.
+ * @returns {void}
+ */
+function relabelRangeOptions(select) {
+    if (!select) return;
+    for (const o of select.options) {
+        if (o.value === "R:custom") continue;
+        const pts = parseRangeTF(o.value);
+        if (pts != null) o.text = formatRLabel(pts, currentSymbol);
+    }
+}
+
 // "R:10" → 10.0; null, если это не рэндж-ТФ (зеркало hub.parse_range_tf).
 function parseRangeTF(tf) {
     if (typeof tf !== "string" || !tf.startsWith("R:")) return null;
@@ -772,10 +829,11 @@ function pointSizeOf(symbol) {
 
 // Кастомный рэндж ("R:7") должен существовать в селекторе, иначе value не встанет.
 function ensureTfOption(select, tf) {
-    if (!parseRangeTF(tf)) return;
+    const pts = parseRangeTF(tf);
+    if (pts == null) return;
     if ([...select.options].some(o => o.value === tf)) return;
     const opt = document.createElement("option");
-    opt.value = tf; opt.text = tf.replace(":", "");
+    opt.value = tf; opt.text = formatRLabel(pts, currentSymbol);
     const custom = [...select.options].find(o => o.value === "R:custom");
     select.insertBefore(opt, custom || null);
 }
@@ -1247,6 +1305,12 @@ function handleMessage(id, state, msg) {
             }
         }
         Object.keys(panesState).forEach(id => applyPriceFormat(id));
+        // Точность инструмента только что уточнилась → фактор TV-шкалы мог
+        // поменяться. Переименовываем R-опции обоих селекторов.
+        Object.keys(panesState).forEach(id => {
+            const e = getPaneElements(id);
+            if (e?.tfSelect) relabelRangeOptions(e.tfSelect);
+        });
         // Селектор пар — из instruments, а не из захардкоженной HTML-разметки.
         populateSymbolSelect(symbols);
         // Только теперь известно, у кого есть объём: до instruments набор пуст,
@@ -1332,7 +1396,7 @@ function createPane(id) {
     });
     RANGE_PRESETS.forEach(p => {
         const opt = document.createElement("option");
-        opt.value = "R:" + p; opt.text = "R" + p;
+        opt.value = "R:" + p; opt.text = formatRLabel(p, currentSymbol);
         els.tfSelect.appendChild(opt);
     });
     const customOpt = document.createElement("option");
@@ -1348,16 +1412,25 @@ function createPane(id) {
     els.tfSelect.onchange = () => {
         let v = els.tfSelect.value;
         if (v === "R:custom") {
-            const prev  = layout[`pane${id}`]?.tf || "M1";
-            const inp   = prompt("Диапазон рэндж-бара, в пипсах:",
-                                 parseRangeTF(prev) || 10);
-            const pips  = inp === null ? null
+            const prev   = layout[`pane${id}`]?.tf || "M1";
+            const prevPts = parseRangeTF(prev);
+            // Спрашиваем в TV-шкале: то же число, что в TradingView (BTC — 100,
+            // а не 1000). Дефолт — текущий R в TV, иначе типовой по классу.
+            const defTV = prevPts != null ? pointsToTV(prevPts, currentSymbol)
+                        : (currentSymbol.startsWith("fxcm:") ? 10 : 100);
+            const inp   = prompt("Размер рэндж-бара в R (как в TradingView):", defTV);
+            const tv    = inp === null ? null
                         : parseFloat(String(inp).replace(",", "."));
-            if (!pips || pips <= 0 || pips > 10000) {
+            if (!tv || tv <= 0) {
                 els.tfSelect.value = prev;   // отмена/мусор — откат селектора
                 return;
             }
-            v = "R:" + pips;
+            const points = tvToPoints(tv, currentSymbol);
+            if (!(points > 0) || points > 100000) {
+                els.tfSelect.value = prev;
+                return;
+            }
+            v = "R:" + points;
             ensureTfOption(els.tfSelect, v);
             els.tfSelect.value = v;
         }
@@ -2229,6 +2302,12 @@ function switchSymbol(symbol) {
         // форексе остались бы висеть столбцы от прошлого инструмента.
         ensureVolumeSeries(id);
 
+        // Фактор TV-шкалы зависит от инструмента — переименовываем R-опции
+        // (значения в поинтах не трогаем). Иначе "R100" от BTC осталось бы на
+        // форексе, где тот же R:1000 читается иначе.
+        const elsR = getPaneElements(id);
+        if (elsR?.tfSelect) relabelRangeOptions(elsR.tfSelect);
+
         // Если панель стоит на рэндж-ТФ, берём R, ЗАПОМНЕННЫЙ ДЛЯ НОВОГО
         // инструмента: R в поинтах несопоставим между парами (R500 = ~$50 на
         // BTC и 0.05 на LIT), и тащить чужое значение бессмысленно. Нет
@@ -2854,7 +2933,7 @@ function ensureRangeOption(select, tf) {
     if (Array.from(select.options).some(o => o.value === tf)) return;
     const opt = document.createElement("option");
     opt.value = tf;
-    opt.text  = tf.replace(":", "");   // "R:500" → "R500"
+    opt.text  = formatRLabel(parseRangeTF(tf), currentSymbol);   // TV-шкала
     select.appendChild(opt);
 }
 
