@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terminal — Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<style>
+    /* ── Тема. Переменные повторяют index.html (та же система), плюс
+       несколько «дашбордных»: карточки, зелёный/красный, сетка. Тёмная —
+       по умолчанию: макет владельца тёмный, и терминал чаще открыт ночью. ── */
+    :root {
+        --bg:#ffffff; --panel:#f9f9f9; --card:#ffffff; --btn:#f3f3f3;
+        --btn-border:#bbbbbb; --divider:#d8d8d8; --text:#1c1c1e; --muted:#6b6f76;
+        --accent:#2962ff; --accent-soft:#e8effd;
+        --up:#0e9f6e; --down:#e0245e; --up-soft:#e6f6ef; --down-soft:#fdeaf0;
+        --chart-bg:#ffffff; --chart-text:#4a4f57; --chart-grid:#ececec;
+        --shadow:0 1px 3px rgba(0,0,0,.08);
+    }
+    :root[data-theme="dark"] {
+        --bg:#0d1117; --panel:#141a21; --card:#161d25; --btn:#232a31;
+        --btn-border:#2c343d; --divider:#232a33; --text:#e8eaed; --muted:#828a94;
+        --accent:#4d84ff; --accent-soft:#22314f;
+        --up:#2ecc8f; --down:#ff5c7c; --up-soft:#12291f; --down-soft:#2a1520;
+        --chart-bg:#161d25; --chart-text:#9aa0a8; --chart-grid:#1e252e;
+        --shadow:0 1px 3px rgba(0,0,0,.35);
+    }
+
+    * { box-sizing:border-box; }
+    body {
+        margin:0; background:var(--bg); color:var(--text);
+        font:13px/1.45 -apple-system, "Segoe UI", Arial, sans-serif;
+        -webkit-font-smoothing:antialiased;
+    }
+    a { color:inherit; text-decoration:none; }
+
+    /* ── Каркас: контент + правый сайдбар, как в макете ────────────── */
+    #app { display:grid; grid-template-columns:1fr 210px; min-height:100vh; }
+    #main { padding:14px; display:flex; flex-direction:column; gap:12px; min-width:0; }
+
+    #side {
+        background:var(--panel); border-left:1px solid var(--divider);
+        padding:16px 12px; display:flex; flex-direction:column; gap:2px;
+    }
+    #side .brand {
+        display:flex; align-items:center; gap:8px; font-size:15px;
+        font-weight:600; padding:4px 8px 18px;
+    }
+    #side .brand svg { flex:none; }
+    #side a.nav {
+        display:flex; align-items:center; gap:10px; padding:8px 10px;
+        border-radius:7px; color:var(--muted); cursor:pointer; font-size:12.5px;
+    }
+    #side a.nav:hover { background:var(--btn); color:var(--text); }
+    #side a.nav.on { background:var(--accent-soft); color:var(--text); font-weight:600; }
+    #side .spacer { flex:1; }
+
+    /* ── Карточка ───────────────────────────────────────────────────── */
+    .card {
+        background:var(--card); border:1px solid var(--divider);
+        border-radius:12px; padding:14px; box-shadow:var(--shadow); min-width:0;
+    }
+    .card > header {
+        display:flex; align-items:center; justify-content:space-between;
+        gap:10px; margin-bottom:10px;
+    }
+    .card h2 {
+        margin:0; font-size:13px; font-weight:600; letter-spacing:.1px;
+    }
+    .card .sub { color:var(--muted); font-size:11px; }
+
+    /* Сегментные переключатели (24H / 7D / 30D) */
+    .seg { display:inline-flex; background:var(--btn); border-radius:7px; padding:2px; }
+    .seg button {
+        border:0; background:transparent; color:var(--muted); cursor:pointer;
+        font-size:11px; padding:4px 9px; border-radius:5px; font-family:inherit;
+    }
+    .seg button.on { background:var(--card); color:var(--text); font-weight:600; }
+
+    .up { color:var(--up); } .down { color:var(--down); }
+    .mono { font-variant-numeric:tabular-nums; }
+
+    /* ── Верхний ряд: график + сводка рынка ─────────────────────────── */
+    #row-top { display:grid; grid-template-columns:1.55fr 1fr; gap:12px; }
+    @media (max-width:1100px) { #row-top { grid-template-columns:1fr; } }
+
+    #hero .big {
+        font-size:27px; font-weight:600; letter-spacing:-.4px; line-height:1.15;
+    }
+    #hero .big small { font-size:13px; color:var(--muted); font-weight:400; margin-left:5px; }
+    #heroChart { height:210px; position:relative; cursor:zoom-in; }
+    #heroChart .hint {
+        position:absolute; right:8px; top:8px; z-index:3; font-size:10.5px;
+        color:var(--muted); background:var(--panel); border:1px solid var(--divider);
+        border-radius:5px; padding:2px 7px; opacity:0; transition:opacity .15s;
+        pointer-events:none;
+    }
+    #heroChart:hover .hint { opacity:1; }
+
+    /* Плитки инструментов в «сводке» */
+    .tiles { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+    .tile {
+        border:1px solid var(--divider); border-radius:9px; padding:9px 10px;
+        cursor:pointer; background:var(--panel); min-width:0;
+    }
+    .tile:hover { border-color:var(--accent); }
+    .tile.on { border-color:var(--accent); background:var(--accent-soft); }
+    .tile .sym { font-size:11.5px; color:var(--muted); }
+    .tile .px { font-size:15px; font-weight:600; margin-top:1px; }
+    .tile .chg { font-size:11px; margin-top:1px; }
+
+    /* ── Таблица ────────────────────────────────────────────────────── */
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    thead th {
+        text-align:right; font-weight:500; color:var(--muted); font-size:11px;
+        padding:0 8px 8px; border-bottom:1px solid var(--divider); white-space:nowrap;
+    }
+    thead th:first-child { text-align:left; }
+    tbody td { padding:8px; border-bottom:1px solid var(--divider); text-align:right; white-space:nowrap; }
+    tbody td:first-child { text-align:left; }
+    tbody tr { cursor:pointer; }
+    tbody tr:hover td { background:var(--panel); }
+    tbody tr:last-child td { border-bottom:0; }
+    .coin { display:flex; align-items:center; gap:8px; min-width:0; }
+    .dot {
+        width:22px; height:22px; border-radius:50%; flex:none; font-size:9.5px;
+        font-weight:700; display:flex; align-items:center; justify-content:center;
+        color:#fff; letter-spacing:-.2px;
+    }
+    .scroll { overflow-x:auto; }
+
+    /* ── Нижний ряд ─────────────────────────────────────────────────── */
+    #row-bottom { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; align-items:start; }
+    @media (max-width:1100px) { #row-bottom { grid-template-columns:1fr; } }
+
+    .feed { max-height:225px; overflow-y:auto; margin:-4px -4px 0; padding:0 4px; }
+    .feed .row {
+        display:flex; align-items:baseline; justify-content:space-between;
+        gap:8px; padding:6px 4px; border-bottom:1px solid var(--divider); font-size:12px;
+    }
+    .feed .row:last-child { border-bottom:0; }
+    .feed .t { color:var(--muted); font-size:10.5px; }
+    .empty { color:var(--muted); font-size:11.5px; padding:14px 2px; text-align:center; }
+
+    /* Полоса bid/ask-давления и брифинг */
+    .bar { height:6px; border-radius:3px; background:var(--divider); overflow:hidden; display:flex; }
+    .bar i { display:block; height:100%; }
+    #briefText { font-size:12px; color:var(--text); max-height:170px; overflow-y:auto; white-space:pre-wrap; }
+
+    .kv { display:flex; justify-content:space-between; gap:10px; padding:5px 0; font-size:12px; }
+    .kv span:first-child { color:var(--muted); }
+
+    /* Плейсхолдер под будущую панель бота */
+    .stub {
+        border:1px dashed var(--btn-border); border-radius:9px; padding:12px;
+        color:var(--muted); font-size:11.5px; text-align:center; background:var(--panel);
+    }
+
+    /* ── Разворот графика на весь экран ─────────────────────────────── */
+    #overlay {
+        position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9000;
+        display:none; padding:26px;
+    }
+    #overlay.on { display:block; }
+    #overlayCard {
+        background:var(--card); border:1px solid var(--divider); border-radius:12px;
+        height:100%; display:flex; flex-direction:column; padding:14px;
+    }
+    #overlayHead { display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+    #overlayChart { flex:1; min-height:0; }
+    .btn {
+        background:var(--btn); border:1px solid var(--btn-border); color:var(--text);
+        border-radius:7px; padding:5px 11px; font-size:12px; cursor:pointer; font-family:inherit;
+    }
+    .btn:hover { border-color:var(--accent); }
+
+    #status {
+        display:inline-flex; align-items:center; gap:6px; font-size:11px; color:var(--muted);
+    }
+    #status .led { width:7px; height:7px; border-radius:50%; background:var(--muted); }
+    #status.live .led { background:var(--up); }
+    #status.dead .led { background:var(--down); }
+
+    ::-webkit-scrollbar { width:8px; height:8px; }
+    ::-webkit-scrollbar-thumb { background:var(--btn-border); border-radius:4px; }
+    ::-webkit-scrollbar-track { background:transparent; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div id="main">
+
+    <!-- ── Верх: крупный график + сводка рынка ────────────────────── -->
+    <div id="row-top">
+      <div class="card" id="hero">
+        <header>
+          <div>
+            <div class="sub" id="heroSym">—</div>
+            <div class="big mono" id="heroPx">—<small id="heroChg"></small></div>
+          </div>
+          <div class="seg" id="heroTf">
+            <button data-tf="M5">M5</button>
+            <button data-tf="M15">M15</button>
+            <button data-tf="H1" class="on">H1</button>
+            <button data-tf="H4">H4</button>
+            <button data-tf="D1">D1</button>
+          </div>
+        </header>
+        <div id="heroChart"><div class="hint">клик — развернуть</div></div>
+      </div>
+
+      <div class="card">
+        <header>
+          <h2>Инструменты</h2>
+          <span class="sub" id="status"><i class="led"></i><span id="statusText">подключение…</span></span>
+        </header>
+        <div class="tiles" id="tiles"></div>
+      </div>
+    </div>
+
+    <!-- ── Середина: таблица рынка ────────────────────────────────── -->
+    <div class="card">
+      <header>
+        <h2>Обзор рынка</h2>
+        <span class="sub" id="mktNote">данные хаба, обновление ~5 c</span>
+      </header>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Инструмент</th><th>Цена</th><th>24ч</th>
+              <th>Объём 24ч</th><th>Откр. интерес</th><th>Фандинг</th><th>Сделок 24ч</th>
+            </tr>
+          </thead>
+          <tbody id="mktBody">
+            <tr><td colspan="7" class="empty">ждём данные от хаба…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Низ: лента, стакан/статистика, брифинг ─────────────────── -->
+    <div id="row-bottom">
+      <div class="card">
+        <header>
+          <h2>Крупные сделки</h2>
+          <span class="sub">порог: 95-й перцентиль</span>
+        </header>
+        <div class="feed" id="tradeFeed">
+          <div class="empty">только крипта; ждём крупную сделку…</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <header>
+          <h2>Инструмент</h2>
+          <span class="sub" id="statSym">—</span>
+        </header>
+        <div id="statBody">
+          <div class="empty">выберите инструмент</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <header>
+          <h2>Брифинг</h2>
+          <span class="sub" id="briefTime">—</span>
+        </header>
+        <div id="briefText"><div class="empty">брифинг не получен</div></div>
+      </div>
+    </div>
+
+    <!-- Каркас под будущую панель бота (данных о счёте у терминала нет) -->
+    <div class="card">
+      <header><h2>Торговый бот</h2><span class="sub">не подключён</span></header>
+      <div class="stub">
+        Панель бота появится здесь: статус, открытые позиции, P/L.<br>
+        Сейчас терминал не знает о счёте и сделках — показывать нечего.
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Правый сайдбар ───────────────────────────────────────────── -->
+  <div id="side">
+    <div class="brand">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+        <rect x="1" y="1" width="18" height="18" rx="5" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M5 13l3.2-4 2.6 2.4L15 6.5" stroke="currentColor" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      TERMINAL
+    </div>
+    <a class="nav on">Дашборд</a>
+    <a class="nav" href="index.html">График (полный)</a>
+    <a class="nav" id="navTheme">Сменить тему</a>
+    <div class="spacer"></div>
+    <a class="nav" id="navHealth">Состояние хаба</a>
+  </div>
+</div>
+
+<!-- ── Разворот графика ─────────────────────────────────────────────── -->
+<div id="overlay">
+  <div id="overlayCard">
+    <div id="overlayHead">
+      <strong id="ovSym">—</strong>
+      <span class="mono" id="ovPx"></span>
+      <div class="seg" id="ovTf">
+        <button data-tf="M1">M1</button>
+        <button data-tf="M5">M5</button>
+        <button data-tf="M15">M15</button>
+        <button data-tf="H1" class="on">H1</button>
+        <button data-tf="H4">H4</button>
+        <button data-tf="D1">D1</button>
+      </div>
+      <span class="spacer" style="flex:1"></span>
+      <a class="btn" id="ovOpenFull">Открыть в терминале</a>
+      <button class="btn" id="ovClose">Закрыть ✕</button>
+    </div>
+    <div id="overlayChart"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+"use strict";
+/* ═══════════════════════════════════════════════════════════════════════
+   Дашборд. ОТДЕЛЬНАЯ страница: index.html и hub.py не затрагиваются.
+
+   Протокол хаба используется как есть (см. hub.py):
+     · set_tf {symbol, tf, requestId} → history + update   — свечи;
+     · instruments  — список пар, precision, has_volume;
+     · ticker       — цена/24ч/объём/OI/фандинг по всем инструментам;
+     · large_trade  — лента крупных сделок;
+     · briefing     — текст брифинга.
+
+   ВАЖНО про соединения: хаб держит ОДИН символ на сокет
+   (hub.py:_on_set_tf перезаписывает запись клиента), поэтому график здесь
+   живёт на СВОЁМ сокете, отдельно от общего. Мультиплексировать один
+   сокет нельзя — второй set_tf молча отпишет от первого символа.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const WS_URL = new URLSearchParams(location.search).get("ws")
+             || "ws://89.107.10.204:8765";
+
+/* Типы, которые хаб шлёт ВСЕМ и без requestId. Тот же список, что в
+   index.html: забыть тип здесь — значит потерять сообщение молча. */
+const BROADCAST_TYPES = new Set(["instruments", "ticker", "large_trade",
+                                 "briefing", "alert", "heartbeat",
+                                 "orderbook", "signals_history"]);
+
+const state = {
+    symbol:    localStorage.getItem("dash.symbol") || "lighter:BTC",
+    tf:        "H1",
+    precision: {},          // "prov:SYM" → {precision, minMove}
+    ticker:    {},          // provider → { symbol → сводка }
+    order:     [],          // порядок инструментов из instruments
+    hasVolume: new Set(),
+    trades:    [],          // последние крупные сделки
+};
+
+/* ── Утилиты форматирования ─────────────────────────────────────────── */
+
+/**
+ * Компактная запись больших чисел: 685266221 → "685.3M".
+ * @param {number} v Значение.
+ * @returns {string} Строка с суффиксом K/M/B или "—".
+ */
+function fmtCompact(v) {
+    if (v == null || !isFinite(v)) return "—";
+    const a = Math.abs(v);
+    if (a >= 1e9) return (v / 1e9).toFixed(2) + "B";
+    if (a >= 1e6) return (v / 1e6).toFixed(2) + "M";
+    if (a >= 1e3) return (v / 1e3).toFixed(1) + "K";
+    return v.toFixed(2);
+}
+
+/**
+ * Цена с точностью инструмента (precision приходит в instruments).
+ * @param {number} v   Цена.
+ * @param {string} sym Полный символ "provider:SYMBOL".
+ * @returns {string} Отформатированная цена.
+ */
+function fmtPrice(v, sym) {
+    if (v == null || !isFinite(v)) return "—";
+    const d = (state.precision[sym] || {}).precision;
+    return v.toFixed(d == null ? (Math.abs(v) < 10 ? 4 : 2) : d);
+}
+
+/**
+ * Процент со знаком: 1.2 → "+1.20%".
+ * @param {number} v Значение в процентах.
+ * @returns {string} Строка с процентом.
+ */
+function fmtPct(v) {
+    if (v == null || !isFinite(v)) return "—";
+    return (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+}
+
+/**
+ * Голое имя инструмента без префикса провайдера.
+ * @param {string} sym Полный символ.
+ * @returns {string} Имя без провайдера.
+ */
+function bare(sym) { return sym.includes(":") ? sym.split(":")[1] : sym; }
+
+/**
+ * Стабильный цвет кружка инструмента (хэш имени в оттенок).
+ * @param {string} sym Символ.
+ * @returns {string} CSS-цвет.
+ */
+function symColor(sym) {
+    let h = 0;
+    for (let i = 0; i < sym.length; i++) h = (h * 31 + sym.charCodeAt(i)) % 360;
+    return "hsl(" + h + ",58%,48%)";
+}
+
+/**
+ * Сводка ticker по полному символу или null.
+ * @param {string} sym Полный символ "provider:SYMBOL".
+ * @returns {object|null} Поля сводки.
+ */
+function tickerOf(sym) {
+    if (!sym.includes(":")) return null;
+    const [p, b] = sym.split(":");
+    return (state.ticker[p] || {})[b] || null;
+}
+
+/* ── Общий сокет: instruments / ticker / large_trade / briefing ─────── */
+
+let commonWs = null;
+
+/**
+ * Открыть общий сокет и держать его живым (переподключение с паузой).
+ * @returns {void}
+ */
+function connectCommon() {
+    setStatus("wait", "подключение…");
+    let ws;
+    try { ws = new WebSocket(WS_URL); }
+    catch (e) { setStatus("dead", "нет связи"); setTimeout(connectCommon, 3000); return; }
+    commonWs = ws;
+
+    ws.onopen = () => {
+        setStatus("live", "онлайн");
+        ws.send(JSON.stringify({ type: "get_instruments" }));
+    };
+    ws.onclose = () => { setStatus("dead", "переподключение…"); setTimeout(connectCommon, 3000); };
+    ws.onerror = () => setStatus("dead", "ошибка связи");
+
+    ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        // На этом сокете нас интересуют только широковещательные типы:
+        // свечи ходят по своему сокету (см. комментарий вверху файла).
+        if (!BROADCAST_TYPES.has(msg.type)) return;
+
+        if (msg.type === "instruments")  onInstruments(msg.data);
+        else if (msg.type === "ticker")  onTicker(msg.provider, msg.data);
+        else if (msg.type === "large_trade") onLargeTrade(msg);
+        else if (msg.type === "briefing")    onBriefing(msg.data);
+    };
+}
+
+/**
+ * Индикатор состояния связи в шапке.
+ * @param {string} cls  Класс: live | dead | wait.
+ * @param {string} text Подпись.
+ * @returns {void}
+ */
+function setStatus(cls, text) {
+    const el = document.getElementById("status");
+    el.className = cls;
+    document.getElementById("statusText").textContent = text;
+}
+
+/**
+ * Запомнить список инструментов: precision, наличие объёма, порядок.
+ * @param {object} data Карта provider → массив инструментов.
+ * @returns {void}
+ */
+function onInstruments(data) {
+    state.order = [];
+    for (const provider in data) {
+        for (const inst of data[provider]) {
+            const full = provider + ":" + inst.symbol;
+            const d = (inst.price_decimals == null) ? 5 : inst.price_decimals;
+            state.precision[full] = { precision: d, minMove: Math.pow(10, -d) };
+            if (inst.has_volume) state.hasVolume.add(full);
+            state.order.push(full);
+        }
+    }
+    renderTiles();
+    renderMarket();
+    // Символ из localStorage мог исчезнуть из белого списка — падать нельзя.
+    if (!state.order.includes(state.symbol) && state.order.length)
+        selectSymbol(state.order[0]);
+}
+
+/**
+ * Обновить сводку по провайдеру и перерисовать зависимые блоки.
+ * @param {string} provider Провайдер (lighter / fxcm).
+ * @param {object} data     Карта symbol → поля сводки.
+ * @returns {void}
+ */
+function onTicker(provider, data) {
+    state.ticker[provider] = data;
+    renderTiles();
+    renderMarket();
+    renderStat();
+    renderHeroHead();
+}
+
+/* ── Плитки инструментов ───────────────────────────────────────────── */
+
+/**
+ * Отрисовать плитки: приоритет — инструменты со сводкой (крипта).
+ * @returns {void}
+ */
+function renderTiles() {
+    const host = document.getElementById("tiles");
+    const list = state.order.filter(s => tickerOf(s)).slice(0, 8);
+    if (!list.length) {
+        host.innerHTML = '<div class="empty">ждём список инструментов…</div>';
+        return;
+    }
+    host.innerHTML = list.map(sym => {
+        const t = tickerOf(sym) || {};
+        const chg = t.change_pct;
+        const cls = chg > 0 ? "up" : chg < 0 ? "down" : "";
+        return '<div class="tile' + (sym === state.symbol ? " on" : "") + '" data-sym="' + sym + '">'
+             +   '<div class="sym">' + bare(sym) + '</div>'
+             +   '<div class="px mono">' + fmtPrice(t.mark ?? t.last, sym) + '</div>'
+             +   '<div class="chg mono ' + cls + '">' + fmtPct(chg) + '</div>'
+             + '</div>';
+    }).join("");
+    host.querySelectorAll(".tile").forEach(el => {
+        el.onclick = () => selectSymbol(el.dataset.sym);
+    });
+}
+
+/* ── Таблица рынка ─────────────────────────────────────────────────── */
+
+/**
+ * Отрисовать таблицу «Обзор рынка» из сводки ticker.
+ * @returns {void}
+ */
+function renderMarket() {
+    const body = document.getElementById("mktBody");
+    const rows = state.order.filter(s => tickerOf(s));
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="empty">'
+                       + 'сводка приходит только по крипте (Lighter)</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(sym => {
+        const t = tickerOf(sym), b = bare(sym);
+        const cls = t.change_pct > 0 ? "up" : t.change_pct < 0 ? "down" : "";
+        const fund = (t.funding == null) ? "—" : (t.funding * 100).toFixed(4) + "%";
+        return '<tr data-sym="' + sym + '">'
+             + '<td><div class="coin"><div class="dot" style="background:' + symColor(b) + '">'
+             +   b.slice(0, 3) + '</div><span>' + b + '</span></div></td>'
+             + '<td class="mono">' + fmtPrice(t.mark ?? t.last, sym) + '</td>'
+             + '<td class="mono ' + cls + '">' + fmtPct(t.change_pct) + '</td>'
+             + '<td class="mono">' + fmtCompact(t.vol_quote_24h) + '</td>'
+             + '<td class="mono">' + fmtCompact(t.oi_quote) + '</td>'
+             + '<td class="mono">' + fund + '</td>'
+             + '<td class="mono">' + (t.trades_24h == null ? "—"
+                                      : t.trades_24h.toLocaleString("ru")) + '</td>'
+             + '</tr>';
+    }).join("");
+    body.querySelectorAll("tr[data-sym]").forEach(tr => {
+        tr.onclick = () => selectSymbol(tr.dataset.sym);
+    });
+}
+
+/* ── Карточка инструмента (нижний ряд) ─────────────────────────────── */
+
+/**
+ * Отрисовать детали выбранного инструмента.
+ * @returns {void}
+ */
+function renderStat() {
+    document.getElementById("statSym").textContent = bare(state.symbol);
+    const host = document.getElementById("statBody");
+    const t = tickerOf(state.symbol);
+    if (!t) {
+        host.innerHTML = '<div class="empty">у этого инструмента нет биржевой сводки'
+                       + '<br>(FXCM отдаёт только цену)</div>';
+        return;
+    }
+    // Положение цены в дневном диапазоне: наглядно, где мы внутри high/low.
+    const span = (t.high - t.low) || 0;
+    const pos  = span > 0 ? Math.max(0, Math.min(1, (t.mark - t.low) / span)) : 0.5;
+    const kv = (k, v, cls) =>
+        '<div class="kv"><span>' + k + '</span><span class="mono ' + (cls || "") + '">' + v + '</span></div>';
+
+    host.innerHTML =
+          kv("Mark",  fmtPrice(t.mark, state.symbol))
+        + kv("Index", fmtPrice(t.index, state.symbol))
+        + kv("24ч", fmtPct(t.change_pct), t.change_pct > 0 ? "up" : t.change_pct < 0 ? "down" : "")
+        + kv("Объём 24ч", fmtCompact(t.vol_quote_24h))
+        + kv("Откр. интерес", fmtCompact(t.oi_quote))
+        + kv("Фандинг", t.funding == null ? "—" : (t.funding * 100).toFixed(4) + "%")
+        + '<div style="margin-top:8px">'
+        +   '<div class="bar"><i style="width:' + (pos * 100).toFixed(1)
+        +     '%;background:var(--accent)"></i></div>'
+        +   '<div class="kv" style="padding-top:4px">'
+        +     '<span class="mono">' + fmtPrice(t.low, state.symbol) + '</span>'
+        +     '<span class="mono">' + fmtPrice(t.high, state.symbol) + '</span>'
+        +   '</div>'
+        + '</div>';
+}
+
+/* ── Лента крупных сделок ──────────────────────────────────────────── */
+
+/**
+ * Добавить крупную сделку в ленту (держим последние 40).
+ * @param {object} msg Сообщение large_trade из хаба.
+ * @returns {void}
+ */
+function onLargeTrade(msg) {
+    state.trades.unshift(msg);
+    if (state.trades.length > 40) state.trades.pop();
+    renderTrades();
+}
+
+/**
+ * Отрисовать ленту крупных сделок.
+ * @returns {void}
+ */
+function renderTrades() {
+    const host = document.getElementById("tradeFeed");
+    if (!state.trades.length) {
+        host.innerHTML = '<div class="empty">только крипта; ждём крупную сделку…</div>';
+        return;
+    }
+    host.innerHTML = state.trades.map(t => {
+        // side у Lighter — сторона агрессора; у FXCM его нет вовсе.
+        const buy = (t.side === "buy" || t.side === "B" || t.side === 1);
+        const time = new Date(t.ts * 1000).toLocaleTimeString("ru", { hour12: false });
+        return '<div class="row">'
+             +   '<span><span class="' + (buy ? "up" : "down") + '">' + (buy ? "▲" : "▼") + '</span> '
+             +     bare(t.symbol) + ' <span class="t">' + time + '</span></span>'
+             +   '<span class="mono">' + fmtCompact(t.quote) + ' $</span>'
+             + '</div>';
+    }).join("");
+}
+
+/* ── Брифинг ───────────────────────────────────────────────────────── */
+
+let briefData = null;
+
+/**
+ * Запомнить брифинг и отрисовать его.
+ * @param {object|string} data Данные брифинга (структура briefing.json).
+ * @returns {void}
+ */
+function onBriefing(data) {
+    if (!data) return;
+    briefData = data;
+    renderBrief();
+}
+
+/**
+ * Отрисовать брифинг по реальной структуре briefing.json:
+ * pairs → {direction, technical_summary, deepseek_view}, crypto,
+ * global_context, meta, track_record. Показываем блок по ВЫБРАННОМУ
+ * инструменту: у форекса это pairs[symbol], у крипты — общий crypto.
+ * @returns {void}
+ */
+function renderBrief() {
+    const host = document.getElementById("briefText");
+    const d = briefData;
+    if (!d) return;
+    if (typeof d === "string") { host.textContent = d; return; }
+
+    const meta = d.meta || {};
+    document.getElementById("briefTime").textContent =
+        (meta.session_label_ru ? meta.session_label_ru + " • " : "")
+        + (meta.generated_at || "");
+
+    const esc = (s) => String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const dirCls = (v) => v === "UP" ? "up" : v === "DOWN" ? "down" : "";
+    const out = [];
+
+    // FXCM-символ во фронте — "fxcm:EUR/USD", в брифинге ключ голый.
+    const b = bare(state.symbol);
+    const pair = (d.pairs || {})[b];
+    const isCrypto = !pair && d.crypto;
+    const block = pair || d.crypto;
+
+    if (block) {
+        const dir = block.direction || block.consensus_direction;
+        out.push('<div style="font-weight:600;margin-bottom:4px">' + esc(isCrypto ? "Крипторынок" : b)
+               + (dir ? ' <span class="' + dirCls(dir) + '">' + esc(dir) + '</span>' : "")
+               + (block.direction_confidence != null
+                  ? ' <span class="sub">увер. ' + esc(block.direction_confidence) + '/5</span>' : "")
+               + '</div>');
+        const body = block.deepseek_view || block.summary || block.technical_summary;
+        if (body) out.push('<div style="margin-bottom:8px">' + esc(body) + '</div>');
+    }
+
+    const g = d.global_context || {};
+    if (g.recommendation)
+        out.push('<div class="sub" style="margin-bottom:2px">Общий фон'
+               + (g.risk_appetite ? " • " + esc(g.risk_appetite) : "") + '</div>'
+               + '<div style="margin-bottom:8px">' + esc(g.recommendation) + '</div>');
+
+    const tr = d.track_record || {};
+    const rec = (name, o) => (o && o.total)
+        ? name + " " + o.hit + "/" + o.total : null;
+    const recs = [rec("DeepSeek", tr.deepseek), rec("Консенсус", tr.consensus)]
+        .filter(Boolean).join(" · ");
+    if (recs) out.push('<div class="sub">Трек-рекорд: ' + esc(recs) + '</div>');
+
+    host.innerHTML = out.length ? out.join("")
+                                : '<div class="empty">брифинг пуст</div>';
+}
+
+/* ── Графики: свой сокет на график ─────────────────────────────────── */
+
+/**
+ * Создать LWC-график в контейнере с темой дашборда.
+ * @param {HTMLElement} el Контейнер.
+ * @returns {object} {chart, series}.
+ */
+function makeChart(el) {
+    const css = getComputedStyle(document.documentElement);
+    const chart = LightweightCharts.createChart(el, {
+        layout: {
+            background: { color: css.getPropertyValue("--chart-bg").trim() },
+            textColor:  css.getPropertyValue("--chart-text").trim(),
+            attributionLogo: false,
+        },
+        grid: {
+            vertLines: { color: css.getPropertyValue("--chart-grid").trim() },
+            horzLines: { color: css.getPropertyValue("--chart-grid").trim() },
+        },
+        rightPriceScale: { borderVisible: false },
+        timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        autoSize: true,
+    });
+    const up = css.getPropertyValue("--up").trim();
+    const dn = css.getPropertyValue("--down").trim();
+    const series = chart.addSeries(LightweightCharts.CandlestickSeries, {
+        upColor: up, downColor: dn, borderUpColor: up, borderDownColor: dn,
+        wickUpColor: up, wickDownColor: dn,
+    });
+    return { chart, series };
+}
+
+/**
+ * Живое подключение одного графика: свой сокет, свой символ и ТФ.
+ * Хаб хранит один символ на сокет, поэтому смена символа — это просто
+ * новый set_tf с новым requestId по тому же сокету.
+ */
+class ChartFeed {
+    /**
+     * @param {object} series LWC-серия, куда писать свечи.
+     * @param {Function} onPrice Колбэк последней цены (число).
+     */
+    constructor(series, onPrice) {
+        this.series = series;
+        this.onPrice = onPrice || function () {};
+        this.reqId = 0;
+        this.symbol = null;
+        this.tf = null;
+        this.ws = null;
+        this.dead = false;
+        this._connect();
+    }
+
+    /** Открыть сокет и подписаться на текущий символ. @returns {void} */
+    _connect() {
+        if (this.dead) return;
+        let ws;
+        try { ws = new WebSocket(WS_URL); } catch (e) { setTimeout(() => this._connect(), 3000); return; }
+        this.ws = ws;
+        ws.onopen = () => { if (this.symbol) this._send(); };
+        ws.onclose = () => { if (!this.dead) setTimeout(() => this._connect(), 3000); };
+        ws.onmessage = (ev) => {
+            let msg;
+            try { msg = JSON.parse(ev.data); } catch (e) { return; }
+            // Ответы на устаревшие запросы (старый символ/ТФ) — мимо.
+            if (msg.requestId !== this.reqId) return;
+            if (msg.type === "history") this._onHistory(msg.data);
+            else if (msg.type === "update") this._onUpdate(msg.candle);
+        };
+    }
+
+    /** Отправить set_tf с текущим символом/ТФ. @returns {void} */
+    _send() {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        this.reqId++;
+        this.ws.send(JSON.stringify({
+            type: "set_tf", symbol: this.symbol, tf: this.tf, requestId: this.reqId,
+        }));
+    }
+
+    /**
+     * Переключить символ и/или таймфрейм.
+     * @param {string} symbol Полный символ.
+     * @param {string} tf     Таймфрейм.
+     * @returns {void}
+     */
+    setSymbol(symbol, tf) {
+        this.symbol = symbol;
+        this.tf = tf;
+        this.series.setData([]);
+        this._send();
+    }
+
+    /**
+     * Залить историю свечей.
+     * @param {Array} data Массив свечей хаба.
+     * @returns {void}
+     */
+    _onHistory(data) {
+        const bars = (data || []).map(c => ({
+            time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+        }));
+        this.series.setData(bars);
+        if (bars.length) this.onPrice(bars[bars.length - 1].close);
+    }
+
+    /**
+     * Обновить последнюю свечу.
+     * @param {object} c Свеча.
+     * @returns {void}
+     */
+    _onUpdate(c) {
+        if (!c) return;
+        this.series.update({
+            time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+        });
+        this.onPrice(c.close);
+    }
+
+    /** Закрыть сокет навсегда (для оверлея). @returns {void} */
+    close() {
+        this.dead = true;
+        if (this.ws) { try { this.ws.close(); } catch (e) {} }
+    }
+}
+
+/* ── Крупный график на дашборде ────────────────────────────────────── */
+
+let hero = null, heroFeed = null, heroPrice = null;
+
+/**
+ * Поднять главный график и подписать его на текущий символ.
+ * @returns {void}
+ */
+function initHero() {
+    hero = makeChart(document.getElementById("heroChart"));
+    heroFeed = new ChartFeed(hero.series, (px) => { heroPrice = px; renderHeroHead(); });
+    heroFeed.setSymbol(state.symbol, state.tf);
+
+    document.querySelectorAll("#heroTf button").forEach(b => {
+        b.onclick = (e) => {
+            e.stopPropagation();   // клик по ТФ не должен разворачивать график
+            document.querySelectorAll("#heroTf button").forEach(x => x.classList.remove("on"));
+            b.classList.add("on");
+            state.tf = b.dataset.tf;
+            heroFeed.setSymbol(state.symbol, state.tf);
+        };
+    });
+    document.getElementById("heroChart").onclick = openOverlay;
+}
+
+/**
+ * Шапка главного графика: имя, цена, 24ч-изменение.
+ * @returns {void}
+ */
+function renderHeroHead() {
+    document.getElementById("heroSym").textContent = bare(state.symbol);
+    const t = tickerOf(state.symbol);
+    const px = heroPrice ?? (t ? (t.mark ?? t.last) : null);
+    document.getElementById("heroPx").firstChild.nodeValue = fmtPrice(px, state.symbol);
+    const chg = document.getElementById("heroChg");
+    if (t && t.change_pct != null) {
+        chg.textContent = fmtPct(t.change_pct);
+        chg.className = t.change_pct > 0 ? "up" : t.change_pct < 0 ? "down" : "";
+    } else {
+        chg.textContent = "";
+    }
+}
+
+/**
+ * Выбрать инструмент во всех блоках сразу.
+ * @param {string} sym Полный символ "provider:SYMBOL".
+ * @returns {void}
+ */
+function selectSymbol(sym) {
+    state.symbol = sym;
+    heroPrice = null;
+    localStorage.setItem("dash.symbol", sym);
+    if (heroFeed) heroFeed.setSymbol(sym, state.tf);
+    if (ovFeed)   ovFeed.setSymbol(sym, ovTfValue);
+    renderTiles();
+    renderStat();
+    renderHeroHead();
+    renderBrief();   // блок брифинга свой у каждой пары
+    document.getElementById("ovSym").textContent = bare(sym);
+}
+
+/* ── Разворот графика для анализа ──────────────────────────────────── */
+
+let ov = null, ovFeed = null, ovTfValue = "H1";
+
+/**
+ * Открыть полноэкранный график. Сокет и график создаются лениво — пока
+ * оверлей закрыт, лишнего соединения к хабу нет.
+ * @returns {void}
+ */
+function openOverlay() {
+    const box = document.getElementById("overlay");
+    box.classList.add("on");
+    document.getElementById("ovSym").textContent = bare(state.symbol);
+    ovTfValue = state.tf;
+    document.querySelectorAll("#ovTf button").forEach(b =>
+        b.classList.toggle("on", b.dataset.tf === ovTfValue));
+    document.getElementById("ovOpenFull").href =
+        "index.html?symbol=" + encodeURIComponent(state.symbol);
+
+    if (!ov) {
+        ov = makeChart(document.getElementById("overlayChart"));
+        ovFeed = new ChartFeed(ov.series, (px) => {
+            document.getElementById("ovPx").textContent = fmtPrice(px, state.symbol);
+        });
+    }
+    ovFeed.setSymbol(state.symbol, ovTfValue);
+    // autoSize меряет контейнер при создании — в этот момент он ещё скрыт.
+    requestAnimationFrame(() => ov.chart.timeScale().fitContent());
+}
+
+/**
+ * Закрыть полноэкранный график и отписать его сокет от хаба.
+ * @returns {void}
+ */
+function closeOverlay() {
+    document.getElementById("overlay").classList.remove("on");
+    if (ovFeed) { ovFeed.close(); ovFeed = null; }
+    if (ov) { ov.chart.remove(); ov = null; }
+}
+
+/* ── Тема ──────────────────────────────────────────────────────────── */
+
+/**
+ * Переключить тему и пересоздать графики (LWC красится при создании).
+ * @returns {void}
+ */
+function toggleTheme() {
+    const root = document.documentElement;
+    const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    localStorage.setItem("dash.theme", next);
+
+    const css = getComputedStyle(root);
+    const opts = {
+        layout: { background: { color: css.getPropertyValue("--chart-bg").trim() },
+                  textColor: css.getPropertyValue("--chart-text").trim() },
+        grid: { vertLines: { color: css.getPropertyValue("--chart-grid").trim() },
+                horzLines: { color: css.getPropertyValue("--chart-grid").trim() } },
+    };
+    if (hero) hero.chart.applyOptions(opts);
+    if (ov)   ov.chart.applyOptions(opts);
+}
+
+/* ── Старт ─────────────────────────────────────────────────────────── */
+
+document.addEventListener("DOMContentLoaded", () => {
+    const saved = localStorage.getItem("dash.theme");
+    if (saved) document.documentElement.setAttribute("data-theme", saved);
+
+    initHero();
+    connectCommon();
+    renderHeroHead();
+    renderStat();
+
+    document.getElementById("ovClose").onclick = closeOverlay;
+    document.getElementById("overlay").onclick = (e) => {
+        if (e.target.id === "overlay") closeOverlay();   // клик по фону
+    };
+    document.querySelectorAll("#ovTf button").forEach(b => {
+        b.onclick = () => {
+            document.querySelectorAll("#ovTf button").forEach(x => x.classList.remove("on"));
+            b.classList.add("on");
+            ovTfValue = b.dataset.tf;
+            if (ovFeed) ovFeed.setSymbol(state.symbol, ovTfValue);
+        };
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeOverlay();
+    });
+    document.getElementById("navTheme").onclick = toggleTheme;
+    document.getElementById("navHealth").onclick = () => {
+        // Health-эндпоинт хаба (Фаза 4) живёт на 8787 того же хоста.
+        const host = WS_URL.replace(/^ws:\/\//, "").split(":")[0];
+        window.open("http://" + host + ":8787/health", "_blank");
+    };
+});
+</script>
+</body>
+</html>
