@@ -1393,6 +1393,8 @@ function handleMessage(id, state, msg) {
                     existing.blocked   = ev.blocked || null;
                     existing.shapeKind = ev.shape || null;
                     existing.coverage  = ev.coverage ?? null;
+                    existing.origin    = ev.origin || null;
+                    existing.audible   = !!ev.audible;
                     return;
                 }
                 drawings[paneId].push({
@@ -1400,6 +1402,7 @@ function handleMessage(id, state, msg) {
                     direction: ev.direction, sigma: ev.sigma,
                     blocked: ev.blocked || null,
                     shapeKind: ev.shape || null, coverage: ev.coverage ?? null,
+                    origin: ev.origin || null, audible: !!ev.audible,
                 });
                 StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
             });
@@ -3899,7 +3902,7 @@ function renderShockPanel() {
         '</div>';
 
     // Что именно показывает движок — иначе пустой список неотличим от поломки.
-    const thresholds = 'USD/JPY 8σ · AUD/USD 5σ · USD/CAD 4.5σ · ведущая EUR/USD';
+    const thresholds = 'USD/JPY 6σ · AUD/USD 4.5σ · USD/CAD 4.5σ';
 
     let body;
     if (!shockLog.length) {
@@ -3909,9 +3912,11 @@ function renderShockPanel() {
               '<span style="color:#666;font-size:11px;">' +
                 'Движок работает и ждёт всплеск: диапазон свечи M1 против своих ' +
                 'последних 30.<br>Пороги: ' + thresholds + '.<br>' +
-                '<span style="color:#ffb74d">⚡ рывок</span> — ≥70% размаха за 10 с · ' +
-                '<span style="color:#8a8a8a">〜 размазан</span> — движение равномерное.<br>' +
-                'Ожидаемая частота — 2–3 сигнала в сутки на четыре пары.' +
+                '<span style="color:#ffb74d">⚡ рывок</span> — ≥70% размаха за 10 с, ' +
+                'звучит · <span style="color:#8a8a8a">〜 размазан</span> — молча в список.<br>' +
+                '<b>SOLO</b> — двинулась только эта пара · <b>IN STREAM</b> — ' +
+                'общее движение доллара (EUR/USD шёл вместе).<br>' +
+                'Ожидаемо ~11 событий в сутки, из них со звуком ~4–5.' +
               '</span>' +
             '</div>';
     } else {
@@ -3936,6 +3941,18 @@ function renderShockPanel() {
                     ? '<div style="font-size:10px;color:#8a8a8a;">〜 движение размазано — ' +
                       'лучшие 10 с дали ' + cov + '</div>'
                     : '');
+            // SOLO выделен цветом: он означает, что двинулась именно эта пара,
+            // а не весь доллар — самое содержательное различие в списке.
+            const badge = s.origin === "solo"
+                ? '<span style="background:#1b5e20;color:#a5d6a7;padding:0 4px;' +
+                  'border-radius:3px;font-size:9px;font-weight:bold;">SOLO</span> '
+                : (s.origin === "in_stream"
+                    ? '<span style="background:#37474f;color:#b0bec5;padding:0 4px;' +
+                      'border-radius:3px;font-size:9px;">IN STREAM</span> '
+                    : '');
+            // Молча прошедшие события помечаем, чтобы не искать, почему не было звука.
+            const silent = (!s.audible && !s.blocked)
+                ? '<span style="color:#555;font-size:9px;"> (без звука)</span>' : '';
             return (
                 '<div onclick="gotoShock(' + idx + ')" ' +
                      'style="padding:6px 8px;border-radius:4px;cursor:pointer;' +
@@ -3948,7 +3965,10 @@ function renderShockPanel() {
                     '<b>' + s.symbol + '</b> ' +
                     '<span style="color:#aaa">' + s.sigma.toFixed(1) + 'σ</span> ' +
                     '<span style="color:#666;font-size:11px;">' + when + ' UTC</span>' +
-                  '</div>' + shapeNote + note +
+                    silent +
+                  '</div>' +
+                  '<div style="margin-top:3px;">' + badge + '</div>' +
+                  shapeNote + note +
                 '</div>');
         }).join("");
         body = '<div style="max-height:320px;overflow-y:auto;">' + rows + '</div>' +
@@ -4059,6 +4079,16 @@ function showShockPopup(ev) {
             ? '〜 размазан' + (ev.coverage ? ' ' + Math.round(ev.coverage * 100) + '%' : '')
             : '');
 
+    // Происхождение: SOLO — двинулась только эта пара, IN STREAM — её несло
+    // общим движением доллара (EUR/USD шёл вместе с ней).
+    const originBadge = ev.origin === "solo"
+        ? '<span style="background:#1b5e20;color:#a5d6a7;padding:1px 5px;' +
+          'border-radius:3px;font-size:10px;font-weight:bold;">SOLO</span>'
+        : (ev.origin === "in_stream"
+            ? '<span style="background:#37474f;color:#b0bec5;padding:1px 5px;' +
+              'border-radius:3px;font-size:10px;">IN STREAM</span>'
+            : '');
+
     popup.style.borderLeftColor = color;
     popup.innerHTML =
         '<div style="display:flex;align-items:center;gap:10px;">' +
@@ -4070,9 +4100,10 @@ function showShockPopup(ev) {
                             (ev.shape === "burst" ? "#ffb74d" : "#8a8a8a") + '">' +
                             shapeLabel + '</span>' : '') +
             '</div>' +
-            '<div style="font-size:11px;color:#aaa;margin-top:2px;">' +
+            '<div style="margin-top:4px;">' + originBadge + '</div>' +
+            '<div style="font-size:11px;color:#aaa;margin-top:3px;">' +
               time + ' UTC · порог ' + ev.threshold + 'σ · EUR/USD ' +
-              ev.leader_sigma.toFixed(1) + 'σ' +
+              (ev.leader_sigma == null ? 'н/д' : ev.leader_sigma.toFixed(1) + 'σ') +
             '</div>' +
             '<div style="font-size:10px;color:#777;margin-top:3px;">' +
               'нажмите, чтобы перейти к инструменту' +
@@ -4208,6 +4239,8 @@ function onShockEvent(ev) {
             // часть тиков (замер — 7 переклассификаций из 67 за две недели).
             existing.shapeKind = ev.shape || null;
             existing.coverage  = ev.coverage ?? null;
+            existing.origin    = ev.origin || null;
+            existing.audible   = !!ev.audible;
         } else {
             drawings[paneId].push({
                 paneId,
@@ -4219,14 +4252,18 @@ function onShockEvent(ev) {
                 blocked: ev.blocked || null,
                 shapeKind: ev.shape || null,
                 coverage: ev.coverage ?? null,
+                origin: ev.origin || null,
+                audible: !!ev.audible,
             });
         }
         StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
     });
     refreshShockMarkers();
 
-    // В окне тишины — только маркер: ни звука, ни попапа.
-    if (ev.blocked) return;
+    // Звучат только РЫВКИ вне окон тишины — решение принимает хаб (audible).
+    // Размазанные события и подавленные окном остаются в панели и на графике,
+    // но молча: без блокировки по ведущей их стало слишком много для звука.
+    if (!ev.audible) return;
     playAlertSound();
     showShockPopup(ev);
 }

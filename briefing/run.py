@@ -105,17 +105,24 @@ def main():
                         for d in an_diag)
     print("[brief] аналитика: %s (всего %d статей)" % (an_line, len(analysis)))
 
-    # Bloomberg API — новости с полными аннотациями (необязательный, resilient).
-    # Без ключа или при сбое молча возвращает пустые списки.
+    # Bloomberg API (необязательный, resilient).
     bl_news, bl_news_diag = sources_bloomberg.fetch_bloomberg_news()
     if bl_news:
         print("[brief] bloomberg новости: %d заголовков" % len(bl_news))
     elif bl_news_diag and bl_news_diag[0].get("error"):
         print("[brief] bloomberg новости: пропуск (%s)" % bl_news_diag[0]["error"])
 
-    # Мерж новостей: Bloomberg-аннотации в начало (качественнее RSS-заголовков).
+    bl_analysis, bl_an_diag = sources_bloomberg.fetch_bloomberg_analysis()
+    if bl_analysis:
+        print("[brief] bloomberg аналитика: %d статей" % len(bl_analysis))
+    elif bl_an_diag and bl_an_diag[0].get("error"):
+        print("[brief] bloomberg аналитика: пропуск (%s)" % bl_an_diag[0]["error"])
+
+    # Мерж новостей и аналитики.
     if bl_news:
         news = bl_news + news
+    if bl_analysis:
+        analysis.extend(bl_analysis)
 
     # 2. Самооценка прошлых прогнозов (до генерации — модель учтёт).
     assessments = {sym: memory.format_assessment_for_prompt(sym, now_ts)

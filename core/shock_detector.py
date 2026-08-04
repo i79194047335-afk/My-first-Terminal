@@ -2,23 +2,30 @@
 Range-shock detector for the four FXCM pairs.
 
 A shock is an M1 candle whose range (high-low) is a large outlier against the
-same pair's own trailing 30 candles, fired only while the leader pair EUR/USD
-stays calm. The leader test is what separates a pair-specific move from a broad
-dollar impulse: when EUR/USD spikes too, every pair spikes and the event says
-nothing about the follower.
+same pair's own trailing 30 candles.
 
-Thresholds are per-pair because the pairs' range distributions differ. Measured
-over 2026-07-21..2026-08-03 (hypothesis/calibrate_sigmas.py), the 99.9th
-percentile of the range z-score was:
+The leader pair EUR/USD CLASSIFIES the event rather than blocking it. When the
+leader stayed calm the move belongs to this pair alone — "solo". When the leader
+moved too, the pair was carried by a broad dollar impulse — "in_stream". Both
+are reported; the distinction is what the reader needs, not a reason for
+silence. (Until 2026-08-04 a noisy leader suppressed the shock outright, which
+hid events like USD/JPY 11:56 on that day: 6.3 sigma, 91% of it inside 10
+seconds, dropped purely because EUR/USD read 2.18 sigma.)
 
-    USD/JPY  8.0      AUD/USD  4.8      USD/CAD  4.7   (EUR/USD is the leader)
+Thresholds are per-pair because the pairs' range distributions differ. Sigma
+measures rarity within a pair, not move size: 6 sigma on USD/JPY and 4.5 on
+USD/CAD are comparable statements about each instrument.
 
-USD/JPY is pinned at 8.0 by the owner. The others take their own p99.9, so all
-pairs fire at a comparable rate (~0.5-0.8/day) instead of USD/CAD never firing —
-its observed maximum over those two weeks was 6.6, below USD/JPY's threshold.
+Current values (owner's choice on 2026-08-04, from the grid in
+hypothesis/tune_sigma_solo.py measured over 2026-07-21..2026-08-03):
 
-Sigma measures rarity within a pair, not move size: 8 sigma on USD/JPY and 4.5
-on USD/CAD are both "a once-in-two-weeks candle for this instrument".
+    USD/JPY  6.0  ->  4.3 events/day, 2.7 of them bursts
+    AUD/USD  4.5  ->  3.9 events/day, 1.5 of them bursts
+    USD/CAD  4.5  ->  3.0 events/day, 0.4 of them bursts
+
+These are deliberately lower than the p99.9 values used before (8.0/5.0/4.5):
+with the leader no longer blocking, the thresholds carry the whole load, and
+6.0 on USD/JPY is what it takes to report the 11:56 candle above.
 
 Signals fire on the FORMING candle, not the closed one: waiting for the close
 costs up to a minute, and the point is to see the move while it happens. A
@@ -34,9 +41,10 @@ across a boundary and mislabelled 4 of the 6 sharpest events (e.g. 2026-07-21
 01:29 read 48% fixed vs 83% sliding), so the sliding definition is the honest
 one.
 
-Both kinds still signal — the owner wants to hear both — but they carry
-different `shape`: "burst" when concentration >= BURST_MIN_COVERAGE, "spread"
-otherwise. The front end marks them differently.
+Both kinds are reported, but only a "burst" makes a sound: with the leader gate
+removed the raw event rate roughly tripled, and burst is the filter that keeps
+the audible stream near five a day instead of fourteen. "spread" events go to
+the panel silently.
 
 The consequence, accepted by the owner: a candle that spikes and then retraces
 leaves a long wick rather than a wide body. That is still range, and the signal
@@ -53,12 +61,14 @@ import statistics
 
 # Per-pair range z-score thresholds. See module docstring for provenance.
 SHOCK_SIGMA = {
-    "USD/JPY": 8.0,
-    "AUD/USD": 5.0,
+    "USD/JPY": 6.0,
+    "AUD/USD": 4.5,
     "USD/CAD": 4.5,
 }
 
-# The leader must stay below this z-score for a follower's shock to count.
+# Below this z-score the leader counts as calm, and the shock is labelled
+# "solo". At or above it the shock is "in_stream". This no longer suppresses
+# anything — it only sets the label.
 LEADER_SYMBOL = "EUR/USD"
 LEADER_CALM_SIGMA = 2.0
 
@@ -395,15 +405,21 @@ class ShockDetector(object):
         if sigma is None or sigma < threshold:
             return None
 
-        # The leader must be present and calm; without its data we cannot tell
-        # a pair-specific move from a dollar-wide one, so stay silent.
+        # The leader labels the event, it no longer blocks it. Calm leader ->
+        # this pair moved alone; noisy leader -> it rode a dollar-wide move.
+        # Without leader data the origin is unknown, which is stated rather
+        # than guessed.
         leader_sigma = self.leader_z(candle_time)
-        if leader_sigma is None or leader_sigma >= self.leader_calm:
-            return None
+        if leader_sigma is None:
+            origin = "unknown"
+        elif leader_sigma < self.leader_calm:
+            origin = "solo"
+        else:
+            origin = "in_stream"
 
-        # Shape does NOT gate the signal — both kinds are reported, the front
-        # end distinguishes them. A wide-but-even minute is still unusual, it
-        # is simply a different event from a single jump.
+        # Shape does NOT gate the signal either — both kinds are reported, the
+        # front end distinguishes them. A wide-but-even minute is still
+        # unusual, it is simply a different event from a single jump.
         shape = self.shape_of(symbol, candle_time, _range_of(candle))
 
         return {
@@ -411,7 +427,8 @@ class ShockDetector(object):
             "time": candle_time,
             "sigma": round(sigma, 2),
             "threshold": threshold,
-            "leader_sigma": round(leader_sigma, 2),
+            "leader_sigma": None if leader_sigma is None else round(leader_sigma, 2),
+            "origin": origin,
             "direction": direction(candle),
             "range": _range_of(candle),
             "price": candle.get("c"),

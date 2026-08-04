@@ -156,9 +156,9 @@ def test_live_fires_once_and_early():
     return ok
 
 
-def test_live_needs_calm_leader():
-    """A forming shock is ignored when the leader is moving too."""
-    print("\nlive leader gate")
+def test_leader_labels_not_blocks():
+    """The leader sets origin (solo / in_stream) and no longer suppresses."""
+    print("\nleader labelling")
     det = ShockDetector()
     base = 1_780_300_000 // 60 * 60   # выровнено по минуте
     for i in range(30):
@@ -171,8 +171,7 @@ def test_live_needs_calm_leader():
     t = base + 30 * 60
     big = {"time": t, "o": 150.0, "h": 150.30, "l": 150.0, "c": 150.29}
 
-    # Sanity: with a calm leader this very candle DOES fire — otherwise the
-    # suppression below would prove nothing.
+    # Calm leader -> the move belongs to this pair alone.
     calm = ShockDetector()
     for i in range(30):
         t0 = base + i * 60
@@ -181,13 +180,31 @@ def test_live_needs_calm_leader():
         calm.push("EUR/USD", {"time": t0, "o": 1.15, "h": 1.1501 + (i % 3) * 0.00001,
                               "l": 1.15, "c": 1.15005})
     calm.push_live("EUR/USD", {"time": t, "o": 1.15, "h": 1.15012, "l": 1.15, "c": 1.15005})
-    ok = check("control: calm leader lets it fire",
-               calm.evaluate_live("USD/JPY", big) is not None)
+    ev_solo = calm.evaluate_live("USD/JPY", big)
+    ok = check("calm leader -> fires", ev_solo is not None)
+    ok &= check("calm leader -> origin solo",
+                bool(ev_solo and ev_solo.get("origin") == "solo"),
+                "origin={}".format(ev_solo.get("origin") if ev_solo else None))
 
-    # Leader spikes on the same minute -> broad dollar move, not pair-specific.
+    # Noisy leader: the shock is still reported, but labelled as carried along.
+    # Before 2026-08-04 this returned None and hid real events.
     det.push_live("EUR/USD", {"time": t, "o": 1.15, "h": 1.16, "l": 1.15, "c": 1.159})
-    ok &= check("noisy leader suppresses live signal",
-                det.evaluate_live("USD/JPY", big) is None)
+    ev_stream = det.evaluate_live("USD/JPY", big)
+    ok &= check("noisy leader -> still fires", ev_stream is not None)
+    ok &= check("noisy leader -> origin in_stream",
+                bool(ev_stream and ev_stream.get("origin") == "in_stream"),
+                "origin={}".format(ev_stream.get("origin") if ev_stream else None))
+
+    # No leader data at all: the origin is unknown rather than assumed.
+    lone = ShockDetector()
+    for i in range(30):
+        t0 = base + i * 60
+        lone.push("USD/JPY", {"time": t0, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
+                              "l": 150.0, "c": 150.005})
+    ev_unknown = lone.evaluate_live("USD/JPY", big)
+    ok &= check("missing leader -> origin unknown, still fires",
+                bool(ev_unknown and ev_unknown.get("origin") == "unknown"),
+                "origin={}".format(ev_unknown.get("origin") if ev_unknown else None))
     return ok
 
 
@@ -313,9 +330,12 @@ def test_archive_replay():
                 "missing: {}".format(sorted(missing)) if missing else "all 4 present")
 
     # Every fired event must clear its own pair's threshold and a calm leader.
-    bad = [h for h in fired if h["sigma"] < h["threshold"] or h["leader_sigma"] >= 2.0]
-    ok &= check("all events respect thresholds and calm leader", not bad,
+    bad = [h for h in fired if h["sigma"] < h["threshold"]]
+    ok &= check("all events clear their own threshold", not bad,
                 "{} violations".format(len(bad)) if bad else "")
+    unlabelled = [h for h in fired if h.get("origin") not in ("solo", "in_stream", "unknown")]
+    ok &= check("every event carries an origin label", not unlabelled,
+                "{} missing".format(len(unlabelled)) if unlabelled else "")
 
     # Calibration predicted a comparable per-pair rate; USD/CAD must not be mute.
     ok &= check("USD/CAD is not silent at its own threshold",
@@ -331,7 +351,7 @@ def main():
         test_gap_rejection(),
         test_leader_never_signals(),
         test_live_fires_once_and_early(),
-        test_live_needs_calm_leader(),
+        test_leader_labels_not_blocks(),
         test_burst_shape(),
         test_archive_replay(),
     ]

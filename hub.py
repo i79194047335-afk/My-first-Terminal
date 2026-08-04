@@ -1690,6 +1690,10 @@ class Hub:
         event["coverage"]    = shape["coverage"]
         event["burst_start"] = shape["burst_start"]
         event["refined"]     = True
+        # Звук уже прозвучал живьём и обратно не отыграется, но журнал должен
+        # отражать итог минуты: иначе в панели останется «рывок» там, где по
+        # факту вышло размазанное движение.
+        event["audible"]     = (not event.get("blocked")) and shape["shape"] == "burst"
         self._broadcast_shock(event)
 
     def _shock_emit(self, provider, symbol, event):
@@ -1712,6 +1716,11 @@ class Hub:
         event["blocked"]  = blocked
         event["id"]       = self._shock_id
         self._shock_id   += 1
+        # Звук — только на РЫВОК вне окна тишины. Сняв блокировку по ведущей,
+        # мы утроили поток событий (14.4/день против 2.3), и форма осталась
+        # единственным, что удерживает звуковой поток около пяти в сутки.
+        # Размазанные события идут в панель молча.
+        event["audible"]  = (not blocked) and event.get("shape") == "burst"
 
         # Журнал на сутки — чтобы фронт восстановил маркеры после F5.
         # Имя переменной НЕ log: это затенило бы модульный логгер, и следующий
@@ -1732,14 +1741,17 @@ class Hub:
         cov   = event.get("coverage")
         shape = "%s%s" % (event.get("shape", "unknown"),
                           "" if cov is None else " %d%%" % round(cov * 100))
+        lead  = event.get("leader_sigma")
+        lead_s = "n/a" if lead is None else "%.1f" % lead
+        origin = event.get("origin", "unknown").upper()
         if blocked:
-            log.info("всплеск подавлен (%s) %s sigma=%.1f leader=%.1f форма=%s окно=%s(%s)",
-                     phase, symbol, event["sigma"], event["leader_sigma"], shape,
+            log.info("всплеск подавлен (%s) %s sigma=%.1f leader=%s %s форма=%s окно=%s(%s)",
+                     phase, symbol, event["sigma"], lead_s, origin, shape,
                      blocked["kind"], blocked["label"])
         else:
-            log.info("ВСПЛЕСК (%s) %s sigma=%.1f leader=%.1f форма=%s dir=%+d",
-                     phase, symbol, event["sigma"], event["leader_sigma"], shape,
-                     event["direction"])
+            log.info("ВСПЛЕСК (%s) %s sigma=%.1f leader=%s %s форма=%s звук=%s dir=%+d",
+                     phase, symbol, event["sigma"], lead_s, origin, shape,
+                     "да" if event.get("audible") else "нет", event["direction"])
 
         self._broadcast_shock(event)
 
