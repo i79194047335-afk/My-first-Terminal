@@ -252,6 +252,17 @@
     #signalPanel.down { border-top: 3px solid #ef5350; }
     #signalPanel.skip { border-top: 3px solid #555; }
 
+    /* Панель всплесков. В отличие от #signalPanel кликабельна целиком:
+       по строке журнала переходим к свече сигнала. */
+    #shockPanel {
+        position: absolute; left: 8px; top: 8px;
+        width: 300px; max-width: calc(60% - 16px);
+        background: rgba(15,15,15,0.94); color: #d1d4dc;
+        padding: 10px 12px; font-size: 12px; z-index: 2001;
+        box-sizing: border-box; border-radius: 5px; border: 1px solid #333;
+        display: none; box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    }
+
     /* Briefing panel — overlays right chart, scrollable */
     #briefPanel {
         position: absolute; left: 0; top: 0; width: 100%; height: 100%;
@@ -678,13 +689,17 @@
             <div id="rhMenu2" class="tb-more-menu rh-menu"></div>
             <div class="tb-spacer"></div>
             <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
-            <button id="signalLogBtn" class="tb-txt" onclick="toggleSignalPanel()" data-tip="Сигналы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
+            <button id="signalLogBtn" class="tb-txt" onclick="toggleShockPanel()" data-tip="Сигналы — всплески"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
             <button id="tapeBtn" class="tb-ic" onclick="toggleTape()" data-tip="Лента крупных сделок"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
             <button id="infoBtn" class="tb-ic" onclick="toggleInfo()" data-tip="Карточка инструмента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
         </div>
         <div class="chart-wrapper" id="wrapper2">
             <div id="signalPanel"></div>
+            <!-- Панель всплесков (кнопка «Сигналы»). Показывает состояние
+                 движка даже когда сигналов нет — иначе тишину не отличить
+                 от поломки. -->
+            <div id="shockPanel"></div>
             <div id="briefPanel" style="display:none;"><div id="briefContent"></div></div>
             <!-- Карточка инструмента: mark/index, суточные объём и изменение,
                  открытый интерес, фандинг. Только у биржевых инструментов —
@@ -1361,10 +1376,12 @@ function handleMessage(id, state, msg) {
     // Журнал всплесков за сутки — ответ на get_shocks после переподключения.
     if (msg.type === "shocks") {
         (msg.events || []).forEach(ev => {
+            recordShock(ev);
             shockWindowState.set(ev.symbol, ev.blocked || null);
             [1, 2].forEach(paneId => {
                 const st = panesState[paneId];
-                if (!st?.series || st.symbol !== ev.symbol) return;
+                if (!st?.series) return;
+                if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return;
                 drawings[paneId] = drawings[paneId] || [];
                 const existing = drawings[paneId].find(
                     d => d.type === "shock" && d.time === ev.time);
@@ -1385,6 +1402,7 @@ function handleMessage(id, state, msg) {
             });
         });
         refreshShockMarkers();
+        renderShockPanel();
         renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
         return;
     }
@@ -3842,6 +3860,167 @@ function showAlertPopup(text) {
 // Активные окна тишины по инструментам: symbol -> {kind, label}.
 const shockWindowState = new Map();
 
+// Журнал всплесков для панели: живые события + ответ на get_shocks.
+// Живёт только в памяти вкладки; источник истины — хаб (окно суток).
+const shockLog = [];
+let shockPanelOpen = false;
+
+/**
+ * Добавить событие в журнал панели, не плодя дублей.
+ *
+ * Сигнал приходит по ЖИВОЙ свече и может обновиться на закрытии (σ уточняется),
+ * поэтому запись той же минуты обновляется на месте.
+ * @param {Object} ev Событие всплеска.
+ */
+function recordShock(ev) {
+    const i = shockLog.findIndex(s => s.time === ev.time && s.symbol === ev.symbol);
+    if (i >= 0) shockLog[i] = ev;
+    else shockLog.push(ev);
+    shockLog.sort((a, b) => b.time - a.time);   // свежие сверху
+    if (shockLog.length > 200) shockLog.length = 200;
+}
+
+/**
+ * Перерисовать панель всплесков, если она открыта.
+ */
+function renderShockPanel() {
+    const panel = document.getElementById("shockPanel");
+    if (!panel || !shockPanelOpen) return;
+
+    const head =
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
+          '<b style="font-size:13px;">Сигналы — всплески</b>' +
+          '<span style="flex:1"></span>' +
+          '<span onclick="toggleShockPanel()" style="cursor:pointer;color:#888;' +
+                'font-weight:bold;padding:0 4px;">✕</span>' +
+        '</div>';
+
+    // Что именно показывает движок — иначе пустой список неотличим от поломки.
+    const thresholds = 'USD/JPY 8σ · AUD/USD 5σ · USD/CAD 4.5σ · ведущая EUR/USD';
+
+    let body;
+    if (!shockLog.length) {
+        body =
+            '<div style="color:#888;font-size:12px;line-height:1.6;">' +
+              'Сигналов нет.<br>' +
+              '<span style="color:#666;font-size:11px;">' +
+                'Движок работает и ждёт всплеск: диапазон свечи M1 против своих ' +
+                'последних 30.<br>Пороги: ' + thresholds + '.<br>' +
+                'Ожидаемая частота — 2–3 сигнала в сутки на четыре пары.' +
+              '</span>' +
+            '</div>';
+    } else {
+        const rows = shockLog.map((s, idx) => {
+            const up    = s.direction > 0;
+            const color = s.blocked ? "#787b86" : (up ? "#26a69a" : "#ef5350");
+            const arrow = up ? "▲" : "▼";
+            const d     = new Date(s.time * 1000);
+            const when  = d.toISOString().slice(5, 16).replace("T", " ");
+            const note  = s.blocked
+                ? '<div style="font-size:10px;color:#7a6a3a;">подавлен: ' +
+                  (s.blocked.kind === "news" ? "новости" : "сессия") + ' — ' +
+                  s.blocked.label + '</div>'
+                : '';
+            return (
+                '<div onclick="gotoShock(' + idx + ')" ' +
+                     'style="padding:6px 8px;border-radius:4px;cursor:pointer;' +
+                            'border-left:3px solid ' + color + ';background:#00000022;' +
+                            'margin-bottom:4px;" ' +
+                     'onmouseover="this.style.background=\'#ffffff14\'" ' +
+                     'onmouseout="this.style.background=\'#00000022\'">' +
+                  '<div style="font-size:12px;">' +
+                    '<span style="color:' + color + '">' + arrow + '</span> ' +
+                    '<b>' + s.symbol + '</b> ' +
+                    '<span style="color:#aaa">' + s.sigma.toFixed(1) + 'σ</span> ' +
+                    '<span style="color:#666;font-size:11px;">' + when + ' UTC</span>' +
+                  '</div>' + note +
+                '</div>');
+        }).join("");
+        body = '<div style="max-height:320px;overflow-y:auto;">' + rows + '</div>' +
+               '<div style="font-size:10px;color:#666;margin-top:6px;">' +
+                 'клик — перейти к свече · ' + thresholds +
+               '</div>';
+    }
+
+    panel.innerHTML = head + body;
+    panel.style.display = "block";
+}
+
+/**
+ * Открыть/закрыть панель всплесков (кнопка «Сигналы»).
+ */
+function toggleShockPanel() {
+    const panel = document.getElementById("shockPanel");
+    const btn   = document.getElementById("signalLogBtn");
+    shockPanelOpen = !shockPanelOpen;
+
+    if (shockPanelOpen) {
+        // Журнал хаба может быть полнее локального: другая вкладка, F5.
+        const ws = panesState[1]?.ws;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try { ws.send(JSON.stringify({ type: "get_shocks" })); } catch (e) {}
+        }
+        if (btn) btn.classList.add("on");
+        renderShockPanel();
+    } else {
+        if (btn) btn.classList.remove("on");
+        if (panel) panel.style.display = "none";
+    }
+}
+
+/**
+ * Перейти к свече сигнала: инструмент, затем центрирование графика.
+ *
+ * @param {number} idx Индекс в shockLog.
+ */
+function gotoShock(idx) {
+    const s = shockLog[idx];
+    if (!s) return;
+
+    // Сравниваем БЕЗ префикса провайдера: хаб шлёт символ в wire-формате
+    // клиента, и "fxcm:AUD/USD" против "AUD/USD" — тот же инструмент. Без
+    // нормализации был бы лишний полный switchSymbol с перезагрузкой истории
+    // вместо простого центрирования.
+    if (displaySymbol(s.symbol) !== displaySymbol(currentSymbol)) {
+        switchSymbol(s.symbol);
+        // История нового инструмента приходит асинхронно — центрируем, когда
+        // бары действительно на графике, иначе setVisibleRange отработает
+        // по пустой серии и ничего не сдвинет.
+        centerOnShockWhenReady(s.time, 12);
+    } else {
+        centerOnTime(s.time);
+    }
+}
+
+/**
+ * Центрировать первую панель на времени свечи.
+ *
+ * @param {number} time Unix-время свечи.
+ * @returns {boolean} true, если центрирование удалось.
+ */
+function centerOnTime(time) {
+    const st = panesState[1];
+    if (!st?.chart || !st.data?.length) return false;
+    // Показать окрестность свечи, а не одну её: контекст важнее точности.
+    const span = (st.tfSeconds || 60) * 60;
+    try {
+        st.chart.timeScale().setVisibleRange({ from: time - span, to: time + span });
+        return true;
+    } catch (e) { return false; }
+}
+
+/**
+ * Дождаться загрузки истории и центрировать график на свече.
+ *
+ * @param {number} time Unix-время свечи.
+ * @param {number} tries Сколько попыток осталось (по ~250 мс).
+ */
+function centerOnShockWhenReady(time, tries) {
+    if (tries <= 0) return;
+    if (centerOnTime(time)) return;
+    setTimeout(() => centerOnShockWhenReady(time, tries - 1), 250);
+}
+
 /**
  * Показать кликабельное уведомление о всплеске.
  *
@@ -3880,7 +4059,10 @@ function showShockPopup(ev) {
 
     // Клик по телу — переход на инструмент сигнала; по крестику — только закрыть.
     popup.onclick = () => {
-        if (ev.symbol && ev.symbol !== currentSymbol) switchSymbol(ev.symbol);
+        // Тот же нормализованный сравниватель, что и в gotoShock: префикс
+        // провайдера не делает инструмент другим.
+        if (ev.symbol && displaySymbol(ev.symbol) !== displaySymbol(currentSymbol))
+            switchSymbol(ev.symbol);
         popup.style.display = "none";
     };
     const close = document.getElementById("closeShock");
@@ -3966,6 +4148,8 @@ function refreshShockMarkers() {
 function onShockEvent(ev) {
     if (!ev || typeof ev.time !== "number") return;
 
+    recordShock(ev);
+    renderShockPanel();
     shockWindowState.set(ev.symbol, ev.blocked || null);
     if (ev.symbol === currentSymbol) renderShockWindowBadge(ev.blocked || null);
 
@@ -3973,7 +4157,11 @@ function onShockEvent(ev) {
     // графике время свечи чужое, маркер повис бы в случайной точке.
     [1, 2].forEach(paneId => {
         const st = panesState[paneId];
-        if (!st?.series || st.symbol !== ev.symbol) return;
+        // Обе панели всегда показывают currentSymbol — отдельного st.symbol в
+        // проекте нет. Сравнение идёт БЕЗ префикса провайдера: хаб шлёт символ
+        // в wire-формате клиента ("fxcm:AUD/USD" против "AUD/USD").
+        if (!st?.series) return;
+        if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return;
         drawings[paneId] = drawings[paneId] || [];
         // Сигнал приходит по ЖИВОЙ свече; направление и σ у неё ещё меняются,
         // пока минута не закрылась. Поэтому маркер той же минуты обновляем на
