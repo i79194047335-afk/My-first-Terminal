@@ -1006,6 +1006,9 @@ function wireSocket(id, state, els) {
         setTF(id, tf);
         ws.send(JSON.stringify({ type: "get_instruments" }));
         if (id === 1) ws.send(JSON.stringify({ type: "get_signals" }));
+        // Журнал всплесков за сутки: восстанавливает маркеры после рестарта
+        // хаба, когда localStorage пуст (другой браузер/чистый профиль).
+        if (id === 1) ws.send(JSON.stringify({ type: "get_shocks" }));
     };
     ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
     ws.onclose   = () => scheduleReconnect(id, state);
@@ -1138,6 +1141,10 @@ function isDrawingActive() {
 const BROADCAST_TYPES = new Set([
     "alert", "alert_created", "analysis", "signal", "briefing",
     "signals_history", "instruments", "large_trade", "orderbook", "ticker",
+    // shock/shocks идут ВСЕМ и без requestId: всплеск приходит по паре, которую
+    // клиент может не смотреть. Без записи здесь фильтр устаревших ответов
+    // отбросил бы их молча (undefined !== state.requestId).
+    "shock", "shocks",
 ]);
 
 function handleMessage(id, state, msg) {
@@ -1182,6 +1189,8 @@ function handleMessage(id, state, msg) {
             state.series.setData(state.data);
             setVolumeData(id, state.data);
             refreshSignalMarkers();
+            refreshShockMarkers();
+            renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
             state.lastCandle = msg.data.at(-1);
 
             // Load or recompute indicators after first history
@@ -1340,6 +1349,37 @@ function handleMessage(id, state, msg) {
                 }
             });
         });
+    }
+
+    // Всплеск приходит по ЛЮБОЙ паре, не только по текущей: уведомление даёт
+    // перейти на инструмент сигнала, поэтому фильтра по currentSymbol здесь нет.
+    if (msg.type === "shock") {
+        onShockEvent(msg);
+        return;
+    }
+
+    // Журнал всплесков за сутки — ответ на get_shocks после переподключения.
+    if (msg.type === "shocks") {
+        (msg.events || []).forEach(ev => {
+            shockWindowState.set(ev.symbol, ev.blocked || null);
+            [1, 2].forEach(paneId => {
+                const st = panesState[paneId];
+                if (!st?.series || st.symbol !== ev.symbol) return;
+                drawings[paneId] = drawings[paneId] || [];
+                const already = drawings[paneId].some(
+                    d => d.type === "shock" && d.time === ev.time);
+                if (already) return;
+                drawings[paneId].push({
+                    paneId, type: "shock", time: ev.time, price: ev.price,
+                    direction: ev.direction, sigma: ev.sigma,
+                    blocked: ev.blocked || null,
+                });
+                StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+            });
+        });
+        refreshShockMarkers();
+        renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
+        return;
     }
 
     if (msg.type === "alert_created") {
@@ -3776,6 +3816,181 @@ function showAlertPopup(text) {
 }
 
 // ============================================================================
+// ВСПЛЕСКИ (shock) — сигнальщик по четырём форекс-парам
+// ============================================================================
+//
+// Хаб считает всплеск по ЗАКРЫТОЙ M1: диапазон свечи против её же последних 30
+// (z-score), пороги у каждой пары свои (USD/JPY 8σ, AUD/USD 5σ, USD/CAD 4.5σ —
+// это их p99.9 за две недели). EUR/USD — ведущая: сама сигналов не даёт, но
+// обязана быть спокойной, иначе всплеск — общий долларовый импульс, а не
+// событие пары.
+//
+// Всплеск в окне тишины (сессия ±30 мин, новости ±15 мин) НЕ звучит и не
+// всплывает, но маркер ставится серым — владелец просил видеть индикацию всё
+// время ограничения.
+//
+// ВАЖНО: маркер отмечает необычную свечу, направление он НЕ предсказывает —
+// бэктест разворота эджа не дал (42.9% против базовых 52.0%).
+
+// Активные окна тишины по инструментам: symbol -> {kind, label}.
+const shockWindowState = new Map();
+
+/**
+ * Показать кликабельное уведомление о всплеске.
+ *
+ * По клику переключает терминал на инструмент, с которого пришёл сигнал.
+ * @param {Object} ev Событие всплеска от хаба.
+ */
+function showShockPopup(ev) {
+    const popup = document.getElementById("shockPopup");
+    if (!popup) return;
+
+    const up    = ev.direction > 0;
+    const color = up ? "#26a69a" : "#ef5350";
+    const arrow = up ? "▲" : "▼";
+    const time  = new Date(ev.time * 1000).toISOString().slice(11, 16);
+
+    popup.style.borderLeftColor = color;
+    popup.innerHTML =
+        '<div style="display:flex;align-items:center;gap:10px;">' +
+          '<div style="flex:1;">' +
+            '<div style="font-weight:bold;font-size:13px;">' +
+              '<span style="color:' + color + '">' + arrow + '</span> ' +
+              ev.symbol + ' — всплеск ' + ev.sigma.toFixed(1) + 'σ' +
+            '</div>' +
+            '<div style="font-size:11px;color:#aaa;margin-top:2px;">' +
+              time + ' UTC · порог ' + ev.threshold + 'σ · EUR/USD ' +
+              ev.leader_sigma.toFixed(1) + 'σ' +
+            '</div>' +
+            '<div style="font-size:10px;color:#777;margin-top:3px;">' +
+              'нажмите, чтобы перейти к инструменту' +
+            '</div>' +
+          '</div>' +
+          '<span id="closeShock" style="cursor:pointer;font-weight:bold;' +
+                'color:#888;padding:0 4px;">✕</span>' +
+        '</div>';
+    popup.style.display = "block";
+
+    // Клик по телу — переход на инструмент сигнала; по крестику — только закрыть.
+    popup.onclick = () => {
+        if (ev.symbol && ev.symbol !== currentSymbol) switchSymbol(ev.symbol);
+        popup.style.display = "none";
+    };
+    const close = document.getElementById("closeShock");
+    if (close) close.onclick = (e) => {
+        e.stopPropagation();
+        popup.style.display = "none";
+    };
+
+    clearTimeout(popup._hideTimer);
+    popup._hideTimer = setTimeout(() => { popup.style.display = "none"; }, 20000);
+}
+
+/**
+ * Обновить бейдж окна тишины для текущего инструмента.
+ *
+ * Показывает, что сигналы сейчас подавлены и по какой причине.
+ * @param {Object|null} blocked Окно из хаба ({kind,label}) или null.
+ */
+function renderShockWindowBadge(blocked) {
+    const badge = document.getElementById("shockWindowBadge");
+    if (!badge) return;
+    if (!blocked) { badge.style.display = "none"; return; }
+
+    const isNews = blocked.kind === "news";
+    badge.textContent = (isNews ? "📰 новости: " : "🕐 сессия: ") + blocked.label +
+                        " — сигналы подавлены";
+    badge.style.background = isNews ? "#7a4b00" : "#3a3a3a";
+    badge.style.display = "block";
+}
+
+/**
+ * Собрать маркеры всплесков для панели из сохранённых рисунков.
+ *
+ * @param {number} paneId Панель.
+ * @returns {Array} Маркеры для createSeriesMarkers, отсортированные по времени.
+ */
+function getShockMarkersForPane(paneId) {
+    return (drawings[paneId] || [])
+        .filter(d => d.type === "shock")
+        .map(d => {
+            const up = d.direction > 0;
+            return {
+                time:     d.time,
+                position: up ? "belowBar" : "aboveBar",
+                // Подавленный всплеск — серым: видно, что событие было, но
+                // сигналом оно не считалось.
+                color:    d.blocked ? "#787b86" : (up ? "#26a69a" : "#ef5350"),
+                shape:    up ? "arrowUp" : "arrowDown",
+                size:     1,
+                text:     (d.sigma ? d.sigma.toFixed(1) + "σ" : ""),
+                id:       "shock-" + d.time,
+            };
+        })
+        .sort((a, b) => a.time - b.time);
+}
+
+/**
+ * Перерисовать маркеры всплесков на обеих панелях.
+ *
+ * Маркеры сигналов и всплесков живут в РАЗНЫХ плагинах: один слой на серию
+ * перезаписывался бы целиком, и вторая группа маркеров пропадала бы.
+ */
+function refreshShockMarkers() {
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st?.series) return;
+        const markers = getShockMarkersForPane(paneId);
+        try {
+            if (!st.shockMarkers) {
+                st.shockMarkers = LightweightCharts.createSeriesMarkers(st.series, markers);
+            } else {
+                st.shockMarkers.setMarkers(markers);
+            }
+        } catch (e) { console.error("shock markers failed:", e); }
+    });
+}
+
+/**
+ * Принять всплеск от хаба: маркер, звук, уведомление.
+ *
+ * @param {Object} ev Сообщение хаба типа "shock".
+ */
+function onShockEvent(ev) {
+    if (!ev || typeof ev.time !== "number") return;
+
+    shockWindowState.set(ev.symbol, ev.blocked || null);
+    if (ev.symbol === currentSymbol) renderShockWindowBadge(ev.blocked || null);
+
+    // Маркер ставим ТОЛЬКО на панель, где открыт этот инструмент: на чужом
+    // графике время свечи чужое, маркер повис бы в случайной точке.
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st?.series || st.symbol !== ev.symbol) return;
+        const already = (drawings[paneId] || []).some(
+            d => d.type === "shock" && d.time === ev.time);
+        if (already) return;
+        drawings[paneId] = drawings[paneId] || [];
+        drawings[paneId].push({
+            paneId,
+            type: "shock",
+            time: ev.time,
+            price: ev.price,
+            direction: ev.direction,
+            sigma: ev.sigma,
+            blocked: ev.blocked || null,
+        });
+        StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+    });
+    refreshShockMarkers();
+
+    // В окне тишины — только маркер: ни звука, ни попапа.
+    if (ev.blocked) return;
+    playAlertSound();
+    showShockPopup(ev);
+}
+
+// ============================================================================
 // INDICATORS PANEL
 // ============================================================================
 
@@ -4695,6 +4910,21 @@ initialize();
     style="position:fixed;bottom:20px;right:20px;background:#ff4444;color:white;
            padding:12px 18px;border-radius:6px;font-size:13px;display:none;
            z-index:999999;box-shadow:0 4px 12px rgba(0,0,0,0.4);">
+</div>
+
+<!-- Всплеск: некрупное уведомление, клик по телу — переход на инструмент. -->
+<div id="shockPopup"
+    style="position:fixed;bottom:20px;right:20px;background:#1e222d;color:#d1d4dc;
+           padding:10px 14px;border-radius:6px;font-size:13px;display:none;
+           z-index:999999;box-shadow:0 4px 14px rgba(0,0,0,0.5);cursor:pointer;
+           border-left:3px solid #26a69a;max-width:280px;">
+</div>
+
+<!-- Индикация окна тишины: висит всё время ограничения. -->
+<div id="shockWindowBadge"
+    style="position:fixed;bottom:20px;left:20px;background:#3a3a3a;color:#ddd;
+           padding:6px 12px;border-radius:4px;font-size:11px;display:none;
+           z-index:999998;box-shadow:0 2px 8px rgba(0,0,0,0.4);">
 </div>
 
 </body>

@@ -36,7 +36,9 @@ from core.db import init_db, load_history, load_instruments, \
 from core.large_trades import LargeTradeFilter
 from core.logfmt import setup as _log_setup
 from core.market_hours import forex_open as market_open
+from core.news_windows import NewsWindows
 from core.range_bars import RangeBarBuilder, backfill_tail
+from core.shock_detector import ShockDetector
 from core.volume_profile import VolumeProfile
 
 log = _log_setup("hub")
@@ -125,6 +127,19 @@ class Hub:
         self._briefing        = None
         self._briefing_mtime  = 0
         self._briefing_lock   = threading.Lock()
+
+        # Детектор всплесков (M1): ведущая пара EUR/USD, ведомые — остальные три
+        # форекс-пары. Пороги в сигмах у каждой пары свои (core/shock_detector),
+        # окна тишины — сессионные ±30 мин и новостные ±15 мин
+        # (core/news_windows, календарь обновляет крон sync_calendar.py).
+        # ВАЖНО: сигнал помечает НЕОБЫЧНУЮ свечу, а не предсказывает движение —
+        # бэктест разворота эджа не нашёл (42.9% против базовых 52.0%).
+        self._shock_detector = ShockDetector()
+        self._news_windows   = NewsWindows()
+        # Последние сигналы для восстановления маркеров при переподключении:
+        # symbol -> [событие, ...], окно суток.
+        self._shock_log      = {}
+        self._shock_id       = 1
 
         # Рэндж-бары: билдеры создаются ЛЕНИВО по set_tf "R:<поинты>" и живут
         # только в памяти — источник истины у них один, тиковый архив, и после
@@ -558,6 +573,10 @@ class Hub:
             if len(bars) > keep:
                 del bars[:len(bars) - keep]
             self._enqueue_closed(provider, symbol, tf, candle)
+            # Детектор всплесков работает по ЗАКРЫТОЙ M1: у живой свечи диапазон
+            # ещё растёт, и сигма плыла бы внутри минуты.
+            if tf == "M1":
+                self._shock_check(provider, symbol, candle)
 
         self._profile_ingest(provider, symbol, price, msg.get("size"),
                              msg.get("side"), msg["ts"])
@@ -1273,6 +1292,9 @@ class Hub:
 
                 elif mtype == "orderbook":
                     await self._on_orderbook_toggle(ws, data)
+
+                elif mtype == "get_shocks":
+                    self._on_get_shocks(ws, data)
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -1559,6 +1581,108 @@ class Hub:
                 # половины из них, причём молча: алерт уже помечен triggered
                 # и повторно не сработает.
                 self._broadcast_alert(symbol, level, alert["id"])
+
+    def _shock_check(self, provider, symbol, candle):
+        """Проверить закрытую M1 на всплеск и разослать сигнал.
+
+        Детектор общий на все четыре форекс-пары: EUR/USD — ведущая (сама
+        сигналов не даёт, только должна быть спокойна), остальные — ведомые.
+        Сигнал ГАСИТСЯ в окнах тишины, но факт всплеска всё равно уходит на
+        фронт с пометкой — владелец просил видеть индикацию на всё время
+        ограничения, а не глухую тишину.
+
+        Args:
+            provider: Провайдер (сигналы только для fxcm).
+            symbol:   Чистый символ, напр. "USD/JPY".
+            candle:   Закрытая свеча M1 (dict time/o/h/l/c).
+
+        Returns:
+            None.
+        """
+        # Крипта сюда не идёт: пороги калиброваны на форексе, у Lighter другая
+        # природа диапазона (24/7, свой объём).
+        if provider != "fxcm":
+            return
+
+        self._shock_detector.push(symbol, candle)
+        event = self._shock_detector.evaluate(symbol, candle)
+        if event is None:
+            return
+
+        blocked = self._news_windows.blocked(event["time"], symbol)
+        event["provider"] = provider
+        event["blocked"]  = blocked
+        event["id"]       = self._shock_id
+        self._shock_id   += 1
+
+        # Журнал на сутки — чтобы фронт восстановил маркеры после F5.
+        log = self._shock_log.setdefault(symbol, [])
+        log.append(event)
+        cutoff = event["time"] - 86400
+        self._shock_log[symbol] = [e for e in log if e["time"] >= cutoff]
+
+        if blocked:
+            log.info("всплеск подавлен %s sigma=%.1f leader=%.1f окно=%s(%s)",
+                     symbol, event["sigma"], event["leader_sigma"],
+                     blocked["kind"], blocked["label"])
+        else:
+            log.info("ВСПЛЕСК %s sigma=%.1f leader=%.1f dir=%+d",
+                     symbol, event["sigma"], event["leader_sigma"],
+                     event["direction"])
+
+        self._broadcast_shock(event)
+
+    def _broadcast_shock(self, event):
+        """Разослать всплеск всем клиентам, каждому — под его именем символа.
+
+        Как и у алертов, symbol подставляется в «wire»-формате клиента: фронт
+        сверяет имя с текущим инструментом, и чужой формат отбросил бы сигнал
+        молча. Сигнал глобален — приходит и тем, кто смотрит другую пару
+        (по клику фронт переключится на инструмент сигнала).
+
+        Args:
+            event: Событие всплеска из ShockDetector с полями blocked/id.
+
+        Returns:
+            None.
+        """
+        symbol    = event["symbol"]
+        canonical = self.display_symbol(symbol)
+        for ws, info in list(self._clients.items()):
+            wire = (info or {}).get("wire")
+            if not wire or self.resolve_symbol(wire)[1] != symbol:
+                wire = canonical
+            payload = dict(event)
+            payload["type"]   = "shock"
+            payload["symbol"] = wire
+            self._send(ws, json.dumps(payload))
+
+    def _on_get_shocks(self, ws, data):
+        """Отдать журнал всплесков за сутки — восстановление маркеров после F5.
+
+        Args:
+            ws:   Сокет клиента.
+            data: Сообщение get_shocks (symbol — опционально).
+
+        Returns:
+            None.
+        """
+        wire   = data.get("symbol")
+        events = []
+        if wire:
+            _prov, symbol = self.resolve_symbol(wire)
+            for ev in self._shock_log.get(symbol, []):
+                item = dict(ev)
+                item["symbol"] = wire
+                events.append(item)
+        else:
+            for symbol, log in self._shock_log.items():
+                for ev in log:
+                    item = dict(ev)
+                    item["symbol"] = self.display_symbol(symbol)
+                    events.append(item)
+        events.sort(key=lambda e: e["time"])
+        self._send(ws, json.dumps({"type": "shocks", "events": events}))
 
     def _broadcast_alert(self, symbol, level, alert_id):
         """Разослать срабатывание алерта, каждому клиенту — под его именем.
