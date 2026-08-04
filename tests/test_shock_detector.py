@@ -74,8 +74,10 @@ def test_gap_rejection():
     # 30 contiguous quiet candles, then a shock candle 10 minutes later.
     for i in range(30):
         t = base + i * 60
-        det.push("USD/JPY", {"time": t, "o": 150.0, "h": 150.01, "l": 150.0, "c": 150.005})
-        det.push("EUR/USD", {"time": t, "o": 1.15, "h": 1.1501, "l": 1.15, "c": 1.15005})
+        det.push("USD/JPY", {"time": t, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
+                             "l": 150.0, "c": 150.005})
+        det.push("EUR/USD", {"time": t, "o": 1.15, "h": 1.1501 + (i % 3) * 0.00001,
+                             "l": 1.15, "c": 1.15005})
     gap_time = base + 40 * 60
     shock = {"time": gap_time, "o": 150.0, "h": 150.5, "l": 150.0, "c": 150.4}
     det.push("USD/JPY", shock)
@@ -95,6 +97,98 @@ def test_leader_never_signals():
     big = {"time": t, "o": 1.15, "h": 1.16, "l": 1.15, "c": 1.159}
     det.push("EUR/USD", big)
     return check("EUR/USD produces no shock", det.evaluate("EUR/USD", big) is None)
+
+
+def test_live_fires_once_and_early():
+    """A forming candle signals on the tick that crosses, and only once."""
+    print("\nlive candle")
+    det = ShockDetector()
+    base = 1_780_200_000
+    # Ranges must vary: identical ranges give stdev 0, which range_zscore
+    # correctly refuses to score. Real quiet minutes are never identical.
+    for i in range(30):
+        t = base + i * 60
+        quiet = {"time": t, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
+                 "l": 150.0, "c": 150.005}
+        det.push("USD/JPY", quiet)
+        det.push("EUR/USD", {"time": t, "o": 1.15, "h": 1.1501 + (i % 3) * 0.00001,
+                             "l": 1.15, "c": 1.15005})
+
+    t = base + 30 * 60
+    det.push_live("EUR/USD", {"time": t, "o": 1.15, "h": 1.1501, "l": 1.15, "c": 1.15005})
+
+    ok = True
+    # Still small: no signal yet.
+    small = {"time": t, "o": 150.0, "h": 150.012, "l": 150.0, "c": 150.011}
+    ok &= check("small forming candle stays silent",
+                det.evaluate_live("USD/JPY", small) is None)
+
+    # Range explodes mid-minute — this is the moment the signal must fire.
+    big = {"time": t, "o": 150.0, "h": 150.30, "l": 150.0, "c": 150.29}
+    first = det.evaluate_live("USD/JPY", big)
+    ok &= check("crossing tick fires", first is not None,
+                "sigma={}".format(first["sigma"] if first else None))
+    ok &= check("event marked live", bool(first and first.get("live")))
+
+    # Range keeps growing: must NOT fire again for the same minute.
+    bigger = {"time": t, "o": 150.0, "h": 150.60, "l": 150.0, "c": 150.55}
+    ok &= check("same minute does not fire twice",
+                det.evaluate_live("USD/JPY", bigger) is None)
+
+    # Nor should the close-time top-up re-fire it.
+    det.push("USD/JPY", bigger)
+    ok &= check("close does not duplicate a live signal",
+                det.evaluate("USD/JPY", bigger) is None)
+
+    # A retrace leaving only a wick is still a shock (owner's call): the range
+    # of the finished candle is what counts, not the body.
+    det2 = ShockDetector()
+    for i in range(30):
+        t2 = base + i * 60
+        det2.push("USD/JPY", {"time": t2, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
+                              "l": 150.0, "c": 150.005})
+        det2.push("EUR/USD", {"time": t2, "o": 1.15, "h": 1.1501 + (i % 3) * 0.00001,
+                              "l": 1.15, "c": 1.15005})
+    t2 = base + 30 * 60
+    det2.push_live("EUR/USD", {"time": t2, "o": 1.15, "h": 1.1501, "l": 1.15, "c": 1.15005})
+    wick = {"time": t2, "o": 150.0, "h": 150.30, "l": 150.0, "c": 150.002}
+    ok &= check("wick-only candle still counts", det2.evaluate_live("USD/JPY", wick) is not None)
+    return ok
+
+
+def test_live_needs_calm_leader():
+    """A forming shock is ignored when the leader is moving too."""
+    print("\nlive leader gate")
+    det = ShockDetector()
+    base = 1_780_300_000
+    for i in range(30):
+        t = base + i * 60
+        det.push("USD/JPY", {"time": t, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
+                             "l": 150.0, "c": 150.005})
+        det.push("EUR/USD", {"time": t, "o": 1.15, "h": 1.1501 + (i % 3) * 0.00001,
+                             "l": 1.15, "c": 1.15005})
+
+    t = base + 30 * 60
+    big = {"time": t, "o": 150.0, "h": 150.30, "l": 150.0, "c": 150.29}
+
+    # Sanity: with a calm leader this very candle DOES fire — otherwise the
+    # suppression below would prove nothing.
+    calm = ShockDetector()
+    for i in range(30):
+        t0 = base + i * 60
+        calm.push("USD/JPY", {"time": t0, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
+                              "l": 150.0, "c": 150.005})
+        calm.push("EUR/USD", {"time": t0, "o": 1.15, "h": 1.1501 + (i % 3) * 0.00001,
+                              "l": 1.15, "c": 1.15005})
+    calm.push_live("EUR/USD", {"time": t, "o": 1.15, "h": 1.15012, "l": 1.15, "c": 1.15005})
+    ok = check("control: calm leader lets it fire",
+               calm.evaluate_live("USD/JPY", big) is not None)
+
+    # Leader spikes on the same minute -> broad dollar move, not pair-specific.
+    det.push_live("EUR/USD", {"time": t, "o": 1.15, "h": 1.16, "l": 1.15, "c": 1.159})
+    ok &= check("noisy leader suppresses live signal",
+                det.evaluate_live("USD/JPY", big) is None)
+    return ok
 
 
 def test_archive_replay():
@@ -164,6 +258,8 @@ def main():
         test_zscore_basics(),
         test_gap_rejection(),
         test_leader_never_signals(),
+        test_live_fires_once_and_early(),
+        test_live_needs_calm_leader(),
         test_archive_replay(),
     ]
     print("\n{}".format("ALL PASS" if all(results) else "FAILURES PRESENT"))

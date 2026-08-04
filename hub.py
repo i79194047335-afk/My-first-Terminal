@@ -573,10 +573,11 @@ class Hub:
             if len(bars) > keep:
                 del bars[:len(bars) - keep]
             self._enqueue_closed(provider, symbol, tf, candle)
-            # Детектор всплесков работает по ЗАКРЫТОЙ M1: у живой свечи диапазон
-            # ещё растёт, и сигма плыла бы внутри минуты.
+            # Закрытая M1 — во-первых, история для скользящей статистики;
+            # во-вторых, добор всплеска, который перешагнул порог на самых
+            # последних тиках и потому не успел сработать живым.
             if tf == "M1":
-                self._shock_check(provider, symbol, candle)
+                self._shock_close(provider, symbol, candle)
 
         self._profile_ingest(provider, symbol, price, msg.get("size"),
                              msg.get("side"), msg["ts"])
@@ -584,6 +585,10 @@ class Hub:
                                 msg.get("side"), msg["ts"])
         self._range_ingest(provider, symbol, price, msg["ts"],
                            msg.get("size"), msg.get("side"))
+        # Всплеск ищем по ФОРМИРУЮЩЕЙСЯ M1 — ждать закрытия значит опоздать на
+        # минуту. Диапазон живой свечи только растёт, поэтому сигнал даёт первый
+        # тик, перешагнувший порог, а дальше эта минута молчит.
+        self._shock_live(provider, symbol, builder)
         self._broadcast_update(provider, symbol)
 
     def _handle_instruments(self, msg):
@@ -1582,33 +1587,77 @@ class Hub:
                 # и повторно не сработает.
                 self._broadcast_alert(symbol, level, alert["id"])
 
-    def _shock_check(self, provider, symbol, candle):
-        """Проверить закрытую M1 на всплеск и разослать сигнал.
+    def _shock_live(self, provider, symbol, builder):
+        """Проверить ФОРМИРУЮЩУЮСЯ M1 на всплеск (основной путь сигнала).
 
-        Детектор общий на все четыре форекс-пары: EUR/USD — ведущая (сама
-        сигналов не даёт, только должна быть спокойна), остальные — ведомые.
-        Сигнал ГАСИТСЯ в окнах тишины, но факт всплеска всё равно уходит на
-        фронт с пометкой — владелец просил видеть индикацию на всё время
-        ограничения, а не глухую тишину.
+        Зовётся на каждом тике. Живая свеча в историю НЕ попадает — её растущий
+        диапазон испортил бы ту самую статистику, против которой считается.
+        Если свеча потом откатится, останется длинный хвост вместо тела: это
+        тоже диапазон, и сигнал остаётся в силе (решение владельца).
 
         Args:
             provider: Провайдер (сигналы только для fxcm).
             symbol:   Чистый символ, напр. "USD/JPY".
-            candle:   Закрытая свеча M1 (dict time/o/h/l/c).
+            builder:  CandleBuilder пары — источник живой свечи.
 
         Returns:
             None.
         """
-        # Крипта сюда не идёт: пороги калиброваны на форексе, у Lighter другая
-        # природа диапазона (24/7, свой объём).
+        if provider != "fxcm":
+            return
+
+        candle = builder.current("M1")
+        if not candle:
+            return
+
+        # Ведущую пару запоминаем живой, но сигналов она не даёт: её роль —
+        # показать, что движение НЕ общедолларовое.
+        if symbol == self._shock_detector.leader_symbol:
+            self._shock_detector.push_live(symbol, candle)
+            return
+
+        event = self._shock_detector.evaluate_live(symbol, candle)
+        if event is not None:
+            self._shock_emit(provider, symbol, event)
+
+    def _shock_close(self, provider, symbol, candle):
+        """Добавить закрытую M1 в историю и добрать поздний всплеск.
+
+        Свеча, перешагнувшая порог на последних тиках, живым путём сработать не
+        успевает — здесь она добирается. Повтор исключён: детектор помнит,
+        какая минута уже сигналила.
+
+        Args:
+            provider: Провайдер (сигналы только для fxcm).
+            symbol:   Чистый символ.
+            candle:   Закрытая свеча M1.
+
+        Returns:
+            None.
+        """
         if provider != "fxcm":
             return
 
         self._shock_detector.push(symbol, candle)
         event = self._shock_detector.evaluate(symbol, candle)
-        if event is None:
-            return
+        if event is not None:
+            self._shock_emit(provider, symbol, event)
 
+    def _shock_emit(self, provider, symbol, event):
+        """Записать всплеск в журнал, залогировать и разослать.
+
+        Сигнал ГАСИТСЯ в окнах тишины, но факт всплеска всё равно уходит на
+        фронт с пометкой — владелец просил видеть индикацию на всё время
+        ограничения, а не глухую тишину.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Чистый символ.
+            event:    Событие от ShockDetector.
+
+        Returns:
+            None.
+        """
         blocked = self._news_windows.blocked(event["time"], symbol)
         event["provider"] = provider
         event["blocked"]  = blocked
@@ -1616,18 +1665,28 @@ class Hub:
         self._shock_id   += 1
 
         # Журнал на сутки — чтобы фронт восстановил маркеры после F5.
-        log = self._shock_log.setdefault(symbol, [])
-        log.append(event)
+        # Имя переменной НЕ log: это затенило бы модульный логгер, и следующий
+        # же log.info() упал бы с AttributeError прямо в обработке тика.
+        journal = self._shock_log.setdefault(symbol, [])
+        # Минута могла сигналить живой и добраться на закрытии — храним одну
+        # запись на свечу, с последними цифрами.
+        for i, prev in enumerate(journal):
+            if prev["time"] == event["time"]:
+                journal[i] = event
+                break
+        else:
+            journal.append(event)
         cutoff = event["time"] - 86400
-        self._shock_log[symbol] = [e for e in log if e["time"] >= cutoff]
+        self._shock_log[symbol] = [e for e in journal if e["time"] >= cutoff]
 
+        phase = "живой" if event.get("live") else "добор"
         if blocked:
-            log.info("всплеск подавлен %s sigma=%.1f leader=%.1f окно=%s(%s)",
-                     symbol, event["sigma"], event["leader_sigma"],
+            log.info("всплеск подавлен (%s) %s sigma=%.1f leader=%.1f окно=%s(%s)",
+                     phase, symbol, event["sigma"], event["leader_sigma"],
                      blocked["kind"], blocked["label"])
         else:
-            log.info("ВСПЛЕСК %s sigma=%.1f leader=%.1f dir=%+d",
-                     symbol, event["sigma"], event["leader_sigma"],
+            log.info("ВСПЛЕСК (%s) %s sigma=%.1f leader=%.1f dir=%+d",
+                     phase, symbol, event["sigma"], event["leader_sigma"],
                      event["direction"])
 
         self._broadcast_shock(event)

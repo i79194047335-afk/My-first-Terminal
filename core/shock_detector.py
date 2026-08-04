@@ -20,6 +20,16 @@ its observed maximum over those two weeks was 6.6, below USD/JPY's threshold.
 Sigma measures rarity within a pair, not move size: 8 sigma on USD/JPY and 4.5
 on USD/CAD are both "a once-in-two-weeks candle for this instrument".
 
+Signals fire on the FORMING candle, not the closed one: waiting for the close
+costs up to a minute, and the point is to see the move while it happens. A
+forming candle's range only grows, so the first tick that pushes it past the
+threshold is the signal, and that minute then stays silent — otherwise a single
+burst would emit a signal on every subsequent tick.
+
+The consequence, accepted by the owner: a candle that spikes and then retraces
+leaves a long wick rather than a wide body. That is still range, and the signal
+still stands.
+
 IMPORTANT: back-tests found no edge in what happens *after* a shock — the
 next-minute reversal rate was 42.9% against a 52.0% baseline, i.e. noise
 (hypothesis/uj_shock_reversal.py). This detector marks unusual candles; it does
@@ -120,8 +130,15 @@ class ShockDetector(object):
         self.lookback = lookback
         self.leader_symbol = leader_symbol
         self.leader_calm = leader_calm
-        # symbol -> list of recent finished candles, oldest first.
+        # symbol -> list of recent FINISHED candles, oldest first. The forming
+        # candle is deliberately kept out: its range is still growing and would
+        # contaminate the very statistics it is being scored against.
         self._history = {}
+        # symbol -> candle time already signalled, so one burst fires once.
+        self._fired_at = {}
+        # Live leader candle, needed to judge calm before the minute closes:
+        # symbol -> candle.
+        self._live = {}
 
     def push(self, symbol, candle):
         """Append a finished candle to a symbol's rolling history.
@@ -173,8 +190,24 @@ class ShockDetector(object):
             return None
         return window
 
+    def push_live(self, symbol, candle):
+        """Record the currently forming candle for a symbol.
+
+        Kept separate from push(): the forming candle must be visible for
+        scoring but must never enter the rolling history.
+
+        Args:
+            symbol: Pair in provider form.
+            candle: The forming candle (mapping with time/o/h/l/c).
+        """
+        self._live[symbol] = candle
+
     def leader_z(self, candle_time):
         """Score the leader pair's range for a given minute.
+
+        Prefers the leader's live candle for that minute, falling back to the
+        finished one — while a follower is still forming, the leader normally
+        has not closed either.
 
         Args:
             candle_time: Minute-bucket start time, unix seconds.
@@ -183,10 +216,14 @@ class ShockDetector(object):
             The leader's range z-score, or None when it cannot be computed.
         """
         leader_candle = None
-        for c in self._history.get(self.leader_symbol, []):
-            if c.get("time") == candle_time:
-                leader_candle = c
-                break
+        live = self._live.get(self.leader_symbol)
+        if live is not None and live.get("time") == candle_time:
+            leader_candle = live
+        else:
+            for c in self._history.get(self.leader_symbol, []):
+                if c.get("time") == candle_time:
+                    leader_candle = c
+                    break
         if leader_candle is None:
             return None
         window = self._contiguous_lookback(self.leader_symbol, candle_time)
@@ -194,28 +231,54 @@ class ShockDetector(object):
             return None
         return range_zscore(leader_candle, window)
 
-    def evaluate(self, symbol, candle):
-        """Test one finished candle for a shock.
-
-        The candle must already have been pushed via push(); this only reads
-        history. The leader pair itself is never a shock candidate.
+    def evaluate_live(self, symbol, candle):
+        """Test the forming candle for a shock, at most once per minute.
 
         Args:
             symbol: Pair in provider form.
-            candle: The finished candle to test.
+            candle: The forming candle (mapping with time/o/h/l/c).
 
         Returns:
-            Dict describing the shock (symbol, time, sigma, threshold,
-            leader_sigma, direction, range) or None when it is not a shock.
+            Event dict as evaluate() returns, plus "live": True, or None when
+            the candle is not (yet) a shock or this minute already fired.
         """
         if symbol == self.leader_symbol:
             return None
-        threshold = self.thresholds.get(symbol)
-        if threshold is None:
-            return None
-
         candle_time = candle.get("time")
         if candle_time is None:
+            return None
+
+        self.push_live(symbol, candle)
+
+        # One signal per candle: range only grows, so without this every
+        # subsequent tick of the same burst would fire again.
+        if self._fired_at.get(symbol) == candle_time:
+            return None
+
+        event = self._score(symbol, candle, candle_time)
+        if event is None:
+            return None
+
+        self._fired_at[symbol] = candle_time
+        event["live"] = True
+        return event
+
+    def _score(self, symbol, candle, candle_time):
+        """Score a candle against its own history and the leader's calm.
+
+        Shared by evaluate() and evaluate_live() so both paths apply identical
+        thresholds and guards.
+
+        Args:
+            symbol: Pair in provider form.
+            candle: Candle being scored (forming or finished).
+            candle_time: The candle's minute-bucket start time.
+
+        Returns:
+            Event dict, or None when this is not a shock.
+        """
+        threshold = self.thresholds.get(symbol)
+        if threshold is None:
             return None
 
         window = self._contiguous_lookback(symbol, candle_time)
@@ -244,3 +307,34 @@ class ShockDetector(object):
             "high": candle.get("h"),
             "low": candle.get("l"),
         }
+
+    def evaluate(self, symbol, candle):
+        """Test one finished candle for a shock.
+
+        Kept for back-tests and for the close-time top-up: a candle whose range
+        only crosses the threshold on its very last ticks would otherwise be
+        missed by the live path.
+
+        Args:
+            symbol: Pair in provider form.
+            candle: The finished candle to test.
+
+        Returns:
+            Dict describing the shock, or None when it is not a shock or the
+            minute already fired live.
+        """
+        if symbol == self.leader_symbol:
+            return None
+        candle_time = candle.get("time")
+        if candle_time is None:
+            return None
+        if self._fired_at.get(symbol) == candle_time:
+            return None
+
+        event = self._score(symbol, candle, candle_time)
+        if event is None:
+            return None
+
+        self._fired_at[symbol] = candle_time
+        event["live"] = False
+        return event

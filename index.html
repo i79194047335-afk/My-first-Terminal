@@ -1366,9 +1366,16 @@ function handleMessage(id, state, msg) {
                 const st = panesState[paneId];
                 if (!st?.series || st.symbol !== ev.symbol) return;
                 drawings[paneId] = drawings[paneId] || [];
-                const already = drawings[paneId].some(
+                const existing = drawings[paneId].find(
                     d => d.type === "shock" && d.time === ev.time);
-                if (already) return;
+                if (existing) {
+                    // Журнал хаба точнее локальной копии: свеча уже закрылась.
+                    existing.price     = ev.price;
+                    existing.direction = ev.direction;
+                    existing.sigma     = ev.sigma;
+                    existing.blocked   = ev.blocked || null;
+                    return;
+                }
                 drawings[paneId].push({
                     paneId, type: "shock", time: ev.time, price: ev.price,
                     direction: ev.direction, sigma: ev.sigma,
@@ -3967,19 +3974,28 @@ function onShockEvent(ev) {
     [1, 2].forEach(paneId => {
         const st = panesState[paneId];
         if (!st?.series || st.symbol !== ev.symbol) return;
-        const already = (drawings[paneId] || []).some(
-            d => d.type === "shock" && d.time === ev.time);
-        if (already) return;
         drawings[paneId] = drawings[paneId] || [];
-        drawings[paneId].push({
-            paneId,
-            type: "shock",
-            time: ev.time,
-            price: ev.price,
-            direction: ev.direction,
-            sigma: ev.sigma,
-            blocked: ev.blocked || null,
-        });
+        // Сигнал приходит по ЖИВОЙ свече; направление и σ у неё ещё меняются,
+        // пока минута не закрылась. Поэтому маркер той же минуты обновляем на
+        // месте, а не плодим второй.
+        const existing = drawings[paneId].find(
+            d => d.type === "shock" && d.time === ev.time);
+        if (existing) {
+            existing.price     = ev.price;
+            existing.direction = ev.direction;
+            existing.sigma     = ev.sigma;
+            existing.blocked   = ev.blocked || null;
+        } else {
+            drawings[paneId].push({
+                paneId,
+                type: "shock",
+                time: ev.time,
+                price: ev.price,
+                direction: ev.direction,
+                sigma: ev.sigma,
+                blocked: ev.blocked || null,
+            });
+        }
         StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
     });
     refreshShockMarkers();
