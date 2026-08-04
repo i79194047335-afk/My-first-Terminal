@@ -588,7 +588,7 @@ class Hub:
         # Всплеск ищем по ФОРМИРУЮЩЕЙСЯ M1 — ждать закрытия значит опоздать на
         # минуту. Диапазон живой свечи только растёт, поэтому сигнал даёт первый
         # тик, перешагнувший порог, а дальше эта минута молчит.
-        self._shock_live(provider, symbol, builder)
+        self._shock_live(provider, symbol, builder, msg["ts"], price)
         self._broadcast_update(provider, symbol)
 
     def _handle_instruments(self, msg):
@@ -1587,7 +1587,7 @@ class Hub:
                 # и повторно не сработает.
                 self._broadcast_alert(symbol, level, alert["id"])
 
-    def _shock_live(self, provider, symbol, builder):
+    def _shock_live(self, provider, symbol, builder, tick_ts, price):
         """Проверить ФОРМИРУЮЩУЮСЯ M1 на всплеск (основной путь сигнала).
 
         Зовётся на каждом тике. Живая свеча в историю НЕ попадает — её растущий
@@ -1599,6 +1599,8 @@ class Hub:
             provider: Провайдер (сигналы только для fxcm).
             symbol:   Чистый символ, напр. "USD/JPY".
             builder:  CandleBuilder пары — источник живой свечи.
+            tick_ts:  Время тика (unix-секунды) — для формы всплеска.
+            price:    Цена тика.
 
         Returns:
             None.
@@ -1609,6 +1611,11 @@ class Hub:
         candle = builder.current("M1")
         if not candle:
             return
+
+        # Тик нужен детектору отдельно от свечи: форма всплеска (один рывок
+        # против размазанного движения) считается по тикам внутри минуты, из
+        # OHLC её не восстановить.
+        self._shock_detector.push_tick(symbol, tick_ts, price)
 
         # Ведущую пару запоминаем живой, но сигналов она не даёт: её роль —
         # показать, что движение НЕ общедолларовое.
@@ -1638,10 +1645,52 @@ class Hub:
         if provider != "fxcm":
             return
 
+        # Форма считается ДО push: буфер тиков этой минуты ещё цел.
+        # Живой сигнал видит только часть тиков, и «100% за 10 секунд» в
+        # середине минуты может к закрытию оказаться размазанным движением
+        # (замер: 7 случаев из 67 за две недели, все burst→spread). Уточняем,
+        # чтобы в журнале и на маркере осталась правда о минуте.
+        self._shock_refine_shape(symbol, candle)
+
         self._shock_detector.push(symbol, candle)
         event = self._shock_detector.evaluate(symbol, candle)
         if event is not None:
             self._shock_emit(provider, symbol, event)
+
+    def _shock_refine_shape(self, symbol, candle):
+        """Пересчитать форму закрытой минуты и разослать уточнение.
+
+        Args:
+            symbol: Чистый символ.
+            candle: Закрытая свеча M1.
+
+        Returns:
+            None.
+        """
+        journal = self._shock_log.get(symbol)
+        if not journal:
+            return
+
+        event = None
+        for item in journal:
+            if item["time"] == candle.get("time"):
+                event = item
+                break
+        if event is None:
+            return
+
+        rng = (candle.get("h") or 0) - (candle.get("l") or 0)
+        shape = self._shock_detector.shape_of(symbol, candle["time"], rng)
+        if shape["shape"] == "unknown" or shape["shape"] == event.get("shape"):
+            return
+
+        log.info("форма уточнена %s %s→%s (%d%%)", symbol, event.get("shape"),
+                 shape["shape"], round((shape["coverage"] or 0) * 100))
+        event["shape"]       = shape["shape"]
+        event["coverage"]    = shape["coverage"]
+        event["burst_start"] = shape["burst_start"]
+        event["refined"]     = True
+        self._broadcast_shock(event)
 
     def _shock_emit(self, provider, symbol, event):
         """Записать всплеск в журнал, залогировать и разослать.
@@ -1680,13 +1729,16 @@ class Hub:
         self._shock_log[symbol] = [e for e in journal if e["time"] >= cutoff]
 
         phase = "живой" if event.get("live") else "добор"
+        cov   = event.get("coverage")
+        shape = "%s%s" % (event.get("shape", "unknown"),
+                          "" if cov is None else " %d%%" % round(cov * 100))
         if blocked:
-            log.info("всплеск подавлен (%s) %s sigma=%.1f leader=%.1f окно=%s(%s)",
-                     phase, symbol, event["sigma"], event["leader_sigma"],
+            log.info("всплеск подавлен (%s) %s sigma=%.1f leader=%.1f форма=%s окно=%s(%s)",
+                     phase, symbol, event["sigma"], event["leader_sigma"], shape,
                      blocked["kind"], blocked["label"])
         else:
-            log.info("ВСПЛЕСК (%s) %s sigma=%.1f leader=%.1f dir=%+d",
-                     phase, symbol, event["sigma"], event["leader_sigma"],
+            log.info("ВСПЛЕСК (%s) %s sigma=%.1f leader=%.1f форма=%s dir=%+d",
+                     phase, symbol, event["sigma"], event["leader_sigma"], shape,
                      event["direction"])
 
         self._broadcast_shock(event)

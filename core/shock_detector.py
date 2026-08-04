@@ -26,6 +26,18 @@ forming candle's range only grows, so the first tick that pushes it past the
 threshold is the signal, and that minute then stays silent — otherwise a single
 burst would emit a signal on every subsequent tick.
 
+Shape: a wide minute built from evenly spread movement is a different animal
+from one made by a single jump. Every shock is therefore classified by how much
+of its range happened inside one BURST_SECONDS window — a SLIDING window, not
+fixed slots. Measured over 2026-07-21..08-03, fixed 10s slots split real bursts
+across a boundary and mislabelled 4 of the 6 sharpest events (e.g. 2026-07-21
+01:29 read 48% fixed vs 83% sliding), so the sliding definition is the honest
+one.
+
+Both kinds still signal — the owner wants to hear both — but they carry
+different `shape`: "burst" when concentration >= BURST_MIN_COVERAGE, "spread"
+otherwise. The front end marks them differently.
+
 The consequence, accepted by the owner: a candle that spikes and then retraces
 leaves a long wick rather than a wide body. That is still range, and the signal
 still stands.
@@ -52,6 +64,15 @@ LEADER_CALM_SIGMA = 2.0
 
 # Trailing candles used for the rolling range mean/stdev.
 LOOKBACK = 30
+
+# Burst shape. A shock is "burst" when at least BURST_MIN_COVERAGE of the
+# minute's range happened inside one BURST_SECONDS sliding window.
+#
+# 0.70 is the owner's setting. For reference, over 2026-07-21..08-03 the
+# audible shocks split like this (hypothesis/burst_concentration.py):
+#     >= 60%: 14    >= 70%: 9    >= 80%: 6    >= 90%: 2
+BURST_SECONDS = 10
+BURST_MIN_COVERAGE = 0.70
 
 
 def _range_of(candle):
@@ -91,6 +112,47 @@ def range_zscore(candle, history):
     if stdev <= 0:
         return None
     return (_range_of(candle) - mean) / stdev
+
+
+def burst_coverage(ticks, minute_range, window_seconds=BURST_SECONDS):
+    """Largest share of a minute's range covered by one sliding time window.
+
+    Walks a window over the tick series and takes the widest high-low found
+    inside any span of `window_seconds`. Sliding rather than fixed slots: a
+    burst that straddles a slot boundary would otherwise read as two halves.
+
+    Args:
+        ticks: List of (offset_seconds_within_minute, price), time-sorted.
+        minute_range: High-low of the whole minute.
+        window_seconds: Burst window length.
+
+    Returns:
+        Tuple (coverage, start_offset): coverage in 0..1 and the offset the
+        best window starts at; (0.0, None) when it cannot be measured.
+    """
+    if minute_range <= 0 or len(ticks) < 2:
+        return 0.0, None
+
+    best = 0.0
+    best_start = None
+    # Two pointers: `j` runs ahead while it stays inside the window. Prices are
+    # rescanned per window, which is fine at forex tick rates (~150/min).
+    for i in range(len(ticks)):
+        start = ticks[i][0]
+        hi = lo = ticks[i][1]
+        for j in range(i + 1, len(ticks)):
+            if ticks[j][0] - start > window_seconds:
+                break
+            price = ticks[j][1]
+            if price > hi:
+                hi = price
+            elif price < lo:
+                lo = price
+        cover = (hi - lo) / minute_range
+        if cover > best:
+            best = cover
+            best_start = start
+    return best, best_start
 
 
 def direction(candle):
@@ -139,6 +201,10 @@ class ShockDetector(object):
         # Live leader candle, needed to judge calm before the minute closes:
         # symbol -> candle.
         self._live = {}
+        # Ticks of the minute currently forming, per symbol, for burst shape:
+        # symbol -> {"time": bucket, "ticks": [(offset, price), ...]}.
+        # Only the current minute is kept — the buffer resets on rollover.
+        self._tick_buf = {}
 
     def push(self, symbol, candle):
         """Append a finished candle to a symbol's rolling history.
@@ -201,6 +267,46 @@ class ShockDetector(object):
             candle: The forming candle (mapping with time/o/h/l/c).
         """
         self._live[symbol] = candle
+
+    def push_tick(self, symbol, ts, price):
+        """Record a tick for burst-shape measurement of the current minute.
+
+        Args:
+            symbol: Pair in provider form.
+            ts: Tick timestamp, unix seconds (fractional allowed).
+            price: Tick price.
+        """
+        bucket = int(ts // 60) * 60
+        buf = self._tick_buf.get(symbol)
+        if buf is None or buf["time"] != bucket:
+            # New minute: the previous minute's ticks are of no further use.
+            buf = {"time": bucket, "ticks": []}
+            self._tick_buf[symbol] = buf
+        buf["ticks"].append((ts - bucket, price))
+
+    def shape_of(self, symbol, candle_time, minute_range):
+        """Classify how concentrated the minute's movement was.
+
+        Args:
+            symbol: Pair in provider form.
+            candle_time: Minute-bucket start time.
+            minute_range: High-low of the minute.
+
+        Returns:
+            Dict {shape, coverage, burst_start} — shape is "burst", "spread",
+            or "unknown" when no ticks were recorded for that minute (e.g. a
+            back-test driven by candles alone).
+        """
+        buf = self._tick_buf.get(symbol)
+        if buf is None or buf["time"] != candle_time or len(buf["ticks"]) < 2:
+            return {"shape": "unknown", "coverage": None, "burst_start": None}
+
+        coverage, start = burst_coverage(buf["ticks"], minute_range)
+        return {
+            "shape": "burst" if coverage >= BURST_MIN_COVERAGE else "spread",
+            "coverage": round(coverage, 3),
+            "burst_start": start,
+        }
 
     def leader_z(self, candle_time):
         """Score the leader pair's range for a given minute.
@@ -295,6 +401,11 @@ class ShockDetector(object):
         if leader_sigma is None or leader_sigma >= self.leader_calm:
             return None
 
+        # Shape does NOT gate the signal — both kinds are reported, the front
+        # end distinguishes them. A wide-but-even minute is still unusual, it
+        # is simply a different event from a single jump.
+        shape = self.shape_of(symbol, candle_time, _range_of(candle))
+
         return {
             "symbol": symbol,
             "time": candle_time,
@@ -306,6 +417,9 @@ class ShockDetector(object):
             "price": candle.get("c"),
             "high": candle.get("h"),
             "low": candle.get("l"),
+            "shape": shape["shape"],
+            "coverage": shape["coverage"],
+            "burst_start": shape["burst_start"],
         }
 
     def evaluate(self, symbol, candle):

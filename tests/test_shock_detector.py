@@ -70,7 +70,7 @@ def test_gap_rejection():
     """A lookback broken by a market gap must not produce a signal."""
     print("\ngap handling")
     det = ShockDetector()
-    base = 1_780_000_000
+    base = 1_780_000_000 // 60 * 60   # выровнено по минуте
     # 30 contiguous quiet candles, then a shock candle 10 minutes later.
     for i in range(30):
         t = base + i * 60
@@ -89,7 +89,7 @@ def test_leader_never_signals():
     """EUR/USD is the reference and must never emit a shock itself."""
     print("\nleader exclusion")
     det = ShockDetector()
-    base = 1_780_100_000
+    base = 1_780_100_000 // 60 * 60   # выровнено по минуте
     for i in range(30):
         t = base + i * 60
         det.push("EUR/USD", {"time": t, "o": 1.15, "h": 1.1501, "l": 1.15, "c": 1.15005})
@@ -103,7 +103,7 @@ def test_live_fires_once_and_early():
     """A forming candle signals on the tick that crosses, and only once."""
     print("\nlive candle")
     det = ShockDetector()
-    base = 1_780_200_000
+    base = 1_780_200_000 // 60 * 60   # выровнено по минуте
     # Ranges must vary: identical ranges give stdev 0, which range_zscore
     # correctly refuses to score. Real quiet minutes are never identical.
     for i in range(30):
@@ -160,7 +160,7 @@ def test_live_needs_calm_leader():
     """A forming shock is ignored when the leader is moving too."""
     print("\nlive leader gate")
     det = ShockDetector()
-    base = 1_780_300_000
+    base = 1_780_300_000 // 60 * 60   # выровнено по минуте
     for i in range(30):
         t = base + i * 60
         det.push("USD/JPY", {"time": t, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
@@ -188,6 +188,78 @@ def test_live_needs_calm_leader():
     det.push_live("EUR/USD", {"time": t, "o": 1.15, "h": 1.16, "l": 1.15, "c": 1.159})
     ok &= check("noisy leader suppresses live signal",
                 det.evaluate_live("USD/JPY", big) is None)
+    return ok
+
+
+def test_burst_shape():
+    """Concentration separates a single jump from evenly spread movement."""
+    print("\nburst shape")
+    from core.shock_detector import BURST_MIN_COVERAGE, burst_coverage
+
+    ok = True
+
+    # All the movement inside a 4-second span, the rest of the minute flat.
+    jump = [(float(i), 150.0) for i in range(0, 20)]
+    jump += [(20.0, 150.0), (22.0, 150.30), (24.0, 150.30)]
+    jump += [(float(i), 150.30) for i in range(25, 60)]
+    cov, start = burst_coverage(jump, 0.30)
+    ok &= check("single jump reads as concentrated", cov >= BURST_MIN_COVERAGE,
+                "coverage={:.0f}%".format(cov * 100))
+
+    # Same total range, but walked evenly across the whole minute.
+    even = [(float(i), 150.0 + 0.30 * (i / 59.0)) for i in range(60)]
+    cov2, _ = burst_coverage(even, 0.30)
+    ok &= check("even walk reads as spread", cov2 < BURST_MIN_COVERAGE,
+                "coverage={:.0f}%".format(cov2 * 100))
+
+    # A burst straddling a 10s boundary must still be caught: this is exactly
+    # what fixed slots got wrong on 4 of 6 real events.
+    straddle = [(float(i), 150.0) for i in range(0, 8)]
+    straddle += [(8.0, 150.0), (12.0, 150.30)]
+    straddle += [(float(i), 150.30) for i in range(13, 60)]
+    cov3, start3 = burst_coverage(straddle, 0.30)
+    ok &= check("burst across a slot boundary still counts",
+                cov3 >= BURST_MIN_COVERAGE,
+                "coverage={:.0f}% starting at {}s".format(cov3 * 100, start3))
+
+    # Degenerate inputs must not raise.
+    ok &= check("empty ticks handled", burst_coverage([], 0.30) == (0.0, None))
+    ok &= check("zero range handled", burst_coverage(jump, 0.0) == (0.0, None))
+
+    # End to end through the detector. The base must be minute-aligned: candle
+    # times always are in production, and push_tick derives its bucket from the
+    # tick timestamp, so an unaligned base would mismatch the two.
+    det = ShockDetector()
+    base = 1_780_400_000 // 60 * 60
+    for i in range(30):
+        t = base + i * 60
+        det.push("USD/JPY", {"time": t, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
+                             "l": 150.0, "c": 150.005})
+        det.push("EUR/USD", {"time": t, "o": 1.15, "h": 1.1501 + (i % 3) * 0.00001,
+                             "l": 1.15, "c": 1.15005})
+    t = base + 30 * 60
+    det.push_live("EUR/USD", {"time": t, "o": 1.15, "h": 1.15012, "l": 1.15, "c": 1.15005})
+    for off, price in jump:
+        det.push_tick("USD/JPY", t + off, price)
+    big = {"time": t, "o": 150.0, "h": 150.30, "l": 150.0, "c": 150.30}
+    ev = det.evaluate_live("USD/JPY", big)
+    ok &= check("event carries burst shape", bool(ev and ev.get("shape") == "burst"),
+                "shape={}".format(ev.get("shape") if ev else None))
+
+    # Without ticks the shape is unknown, not a false "burst".
+    det2 = ShockDetector()
+    for i in range(30):
+        t2 = base + i * 60
+        det2.push("USD/JPY", {"time": t2, "o": 150.0, "h": 150.010 + (i % 3) * 0.001,
+                              "l": 150.0, "c": 150.005})
+        det2.push("EUR/USD", {"time": t2, "o": 1.15, "h": 1.1501 + (i % 3) * 0.00001,
+                              "l": 1.15, "c": 1.15005})
+    t2 = base + 30 * 60
+    det2.push_live("EUR/USD", {"time": t2, "o": 1.15, "h": 1.15012, "l": 1.15, "c": 1.15005})
+    ev2 = det2.evaluate_live("USD/JPY", {"time": t2, "o": 150.0, "h": 150.30,
+                                         "l": 150.0, "c": 150.30})
+    ok &= check("no ticks -> shape unknown, still signals",
+                bool(ev2 and ev2.get("shape") == "unknown"))
     return ok
 
 
@@ -260,6 +332,7 @@ def main():
         test_leader_never_signals(),
         test_live_fires_once_and_early(),
         test_live_needs_calm_leader(),
+        test_burst_shape(),
         test_archive_replay(),
     ]
     print("\n{}".format("ALL PASS" if all(results) else "FAILURES PRESENT"))

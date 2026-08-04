@@ -80,7 +80,10 @@ function saveDrawings(paneId, layout, panesState, drawings) {
             price: d.price,
             direction: d.direction,
             sigma: d.sigma,
-            blocked: d.blocked || null
+            blocked: d.blocked || null,
+            // Форма всплеска: "burst" — рывок за ≤10 с, "spread" — размазан.
+            shapeKind: d.shapeKind || null,
+            coverage: d.coverage ?? null
         });
     }
 
@@ -204,7 +207,9 @@ if (st.drawingEngine) {
                 price: d.price,
                 direction: d.direction,
                 sigma: d.sigma,
-                blocked: d.blocked || null
+                blocked: d.blocked || null,
+                shapeKind: d.shapeKind || null,
+                coverage: d.coverage ?? null
             });
             return;
         }

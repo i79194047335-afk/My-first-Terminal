@@ -1391,12 +1391,15 @@ function handleMessage(id, state, msg) {
                     existing.direction = ev.direction;
                     existing.sigma     = ev.sigma;
                     existing.blocked   = ev.blocked || null;
+                    existing.shapeKind = ev.shape || null;
+                    existing.coverage  = ev.coverage ?? null;
                     return;
                 }
                 drawings[paneId].push({
                     paneId, type: "shock", time: ev.time, price: ev.price,
                     direction: ev.direction, sigma: ev.sigma,
                     blocked: ev.blocked || null,
+                    shapeKind: ev.shape || null, coverage: ev.coverage ?? null,
                 });
                 StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
             });
@@ -3906,6 +3909,8 @@ function renderShockPanel() {
               '<span style="color:#666;font-size:11px;">' +
                 'Движок работает и ждёт всплеск: диапазон свечи M1 против своих ' +
                 'последних 30.<br>Пороги: ' + thresholds + '.<br>' +
+                '<span style="color:#ffb74d">⚡ рывок</span> — ≥70% размаха за 10 с · ' +
+                '<span style="color:#8a8a8a">〜 размазан</span> — движение равномерное.<br>' +
                 'Ожидаемая частота — 2–3 сигнала в сутки на четыре пары.' +
               '</span>' +
             '</div>';
@@ -3921,6 +3926,16 @@ function renderShockPanel() {
                   (s.blocked.kind === "news" ? "новости" : "сессия") + ' — ' +
                   s.blocked.label + '</div>'
                 : '';
+            // Форма: рывок за ≤10 с против размазанного движения. Не фильтр —
+            // оба вида в списке, но с разной пометкой.
+            const cov = s.coverage != null ? Math.round(s.coverage * 100) + '%' : '';
+            const shapeNote = s.shape === "burst"
+                ? '<div style="font-size:10px;color:#ffb74d;">⚡ рывок за 10 с — ' +
+                  cov + ' размаха</div>'
+                : (s.shape === "spread"
+                    ? '<div style="font-size:10px;color:#8a8a8a;">〜 движение размазано — ' +
+                      'лучшие 10 с дали ' + cov + '</div>'
+                    : '');
             return (
                 '<div onclick="gotoShock(' + idx + ')" ' +
                      'style="padding:6px 8px;border-radius:4px;cursor:pointer;' +
@@ -3933,7 +3948,7 @@ function renderShockPanel() {
                     '<b>' + s.symbol + '</b> ' +
                     '<span style="color:#aaa">' + s.sigma.toFixed(1) + 'σ</span> ' +
                     '<span style="color:#666;font-size:11px;">' + when + ' UTC</span>' +
-                  '</div>' + note +
+                  '</div>' + shapeNote + note +
                 '</div>');
         }).join("");
         body = '<div style="max-height:320px;overflow-y:auto;">' + rows + '</div>' +
@@ -4036,6 +4051,14 @@ function showShockPopup(ev) {
     const arrow = up ? "▲" : "▼";
     const time  = new Date(ev.time * 1000).toISOString().slice(11, 16);
 
+    // Форма: «рывок» — почти весь размах минуты сделан за ≤10 секунд;
+    // «размазан» — движение шло равномерно. Оба звучат, но это разные события.
+    const shapeLabel = ev.shape === "burst"
+        ? '⚡ рывок' + (ev.coverage ? ' ' + Math.round(ev.coverage * 100) + '%' : '')
+        : (ev.shape === "spread"
+            ? '〜 размазан' + (ev.coverage ? ' ' + Math.round(ev.coverage * 100) + '%' : '')
+            : '');
+
     popup.style.borderLeftColor = color;
     popup.innerHTML =
         '<div style="display:flex;align-items:center;gap:10px;">' +
@@ -4043,6 +4066,9 @@ function showShockPopup(ev) {
             '<div style="font-weight:bold;font-size:13px;">' +
               '<span style="color:' + color + '">' + arrow + '</span> ' +
               ev.symbol + ' — всплеск ' + ev.sigma.toFixed(1) + 'σ' +
+              (shapeLabel ? ' <span style="font-weight:normal;font-size:11px;color:' +
+                            (ev.shape === "burst" ? "#ffb74d" : "#8a8a8a") + '">' +
+                            shapeLabel + '</span>' : '') +
             '</div>' +
             '<div style="font-size:11px;color:#aaa;margin-top:2px;">' +
               time + ' UTC · порог ' + ev.threshold + 'σ · EUR/USD ' +
@@ -4104,6 +4130,11 @@ function getShockMarkersForPane(paneId) {
         .filter(d => d.type === "shock")
         .map(d => {
             const up = d.direction > 0;
+            // Резкий рывок помечается молнией, размазанное движение — тильдой.
+            // Фильтром форма не является: оба вида сигналят, но выглядят
+            // по-разному, чтобы на графике их было видно не читая панель.
+            const mark = d.shapeKind === "burst" ? "⚡"
+                       : (d.shapeKind === "spread" ? "〜" : "");
             return {
                 time:     d.time,
                 position: up ? "belowBar" : "aboveBar",
@@ -4112,7 +4143,7 @@ function getShockMarkersForPane(paneId) {
                 color:    d.blocked ? "#787b86" : (up ? "#26a69a" : "#ef5350"),
                 shape:    up ? "arrowUp" : "arrowDown",
                 size:     1,
-                text:     (d.sigma ? d.sigma.toFixed(1) + "σ" : ""),
+                text:     (mark ? mark + " " : "") + (d.sigma ? d.sigma.toFixed(1) + "σ" : ""),
                 id:       "shock-" + d.time,
             };
         })
@@ -4173,6 +4204,10 @@ function onShockEvent(ev) {
             existing.direction = ev.direction;
             existing.sigma     = ev.sigma;
             existing.blocked   = ev.blocked || null;
+            // Форма уточняется на закрытии минуты: живой сигнал видит только
+            // часть тиков (замер — 7 переклассификаций из 67 за две недели).
+            existing.shapeKind = ev.shape || null;
+            existing.coverage  = ev.coverage ?? null;
         } else {
             drawings[paneId].push({
                 paneId,
@@ -4182,6 +4217,8 @@ function onShockEvent(ev) {
                 direction: ev.direction,
                 sigma: ev.sigma,
                 blocked: ev.blocked || null,
+                shapeKind: ev.shape || null,
+                coverage: ev.coverage ?? null,
             });
         }
         StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
