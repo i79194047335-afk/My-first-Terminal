@@ -338,7 +338,9 @@ class IntradeClient:
             ) from err
 
         trade = parsers.parse_trade_open(response.text, symbol, investment)
-        latency_ms = int((trade.open_ts - request_ts) * 1000)
+        # round, а не int — как в journal.open_trade: цифра в логе и в
+        # журнале должна быть одна и та же.
+        latency_ms = round((trade.open_ts - request_ts) * 1000)
         log.info(
             "сделка %d открыта по %s, задержка %d мс, экспирация в %d",
             trade.trade_id,
