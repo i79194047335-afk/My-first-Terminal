@@ -1,0 +1,29 @@
+{
+  "_comment": "Скопировать в bot_config.json (тот в .gitignore). Секреты сюда НЕ класть — они в .env.",
+
+  "mode": "dry",
+  "account": "demo",
+
+  "base_url": "https://intrade35.bar",
+  "quotes_url": "https://intrade.bar/price_now",
+  "time_ws_url": "wss://intrade35.bar/req_info",
+
+  "default_investment": 1,
+  "default_expiry_minutes": 1,
+  "symbol_whitelist": ["USD/JPY", "EUR/USD", "AUD/USD", "USD/CAD"],
+  "sources": ["manual"],
+
+  "risk": {
+    "max_trades_per_day": 20,
+    "max_concurrent": 1,
+    "cooldown_sec": 60,
+    "max_consecutive_losses": 3,
+    "max_daily_loss": 20,
+    "min_payout_percent": 75,
+    "allowed_hours": [[6, 18]]
+  },
+
+  "panel_port": 8788,
+  "db_path": "bot_journal.db",
+  "stop_file": "bot/STOP"
+}

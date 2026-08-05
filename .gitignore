@@ -12,3 +12,12 @@ signal_log.json.bak_*
 *.db
 *.db-wal
 *.db-shm
+
+# intrade.bar bot (Слой 1+)
+bot_config.json
+# Пример конфига нужен в репозитории — общее правило *.json его скрывает.
+!bot_config.example.json
+bot_journal.db
+bot/STOP
+*.har
+cookies.txt
