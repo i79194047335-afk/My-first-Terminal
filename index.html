@@ -1205,6 +1205,9 @@ function handleMessage(id, state, msg) {
             setVolumeData(id, state.data);
             refreshSignalMarkers();
             refreshShockMarkers();
+            // Маркеры восстановлены из localStorage — журнал панели должен
+            // знать о них, даже если её ещё не открывали.
+            restoreShockLogFromDrawings();
             renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
             state.lastCandle = msg.data.at(-1);
 
@@ -3887,6 +3890,55 @@ function recordShock(ev) {
 }
 
 /**
+ * Восстановить журнал панели из сохранённых маркеров.
+ *
+ * Маркеры лежат в localStorage и переживают F5, а `shockLog` — нет: он живёт
+ * в памяти вкладки. Журнал хаба тоже в памяти и обнуляется его рестартом.
+ * Без этого после перезагрузки маркеры на графике были, а панель писала
+ * «Сигналов нет» — прямая ложь при наличии данных под рукой.
+ *
+ * Берём рисунки ОБЕИХ панелей и все инструменты из layout: журнал по смыслу
+ * общий, а не привязан к тому, что открыто сейчас.
+ */
+function restoreShockLogFromDrawings() {
+    const seen = new Set(shockLog.map(s => s.time + "|" + s.symbol));
+
+    const absorb = (symbol, list) => {
+        (list || []).forEach(d => {
+            if (d.type !== "shock") return;
+            const key = d.time + "|" + symbol;
+            if (seen.has(key)) return;
+            seen.add(key);
+            shockLog.push({
+                symbol,
+                time: d.time,
+                price: d.price,
+                direction: d.direction,
+                sigma: d.sigma,
+                blocked: d.blocked || null,
+                shape: d.shapeKind || null,
+                coverage: d.coverage ?? null,
+                origin: d.origin || null,
+                audible: !!d.audible,
+            });
+        });
+    };
+
+    // Текущие панели — самые свежие данные.
+    [1, 2].forEach(paneId => absorb(currentSymbol, drawings[paneId]));
+
+    // Остальные инструменты — из сохранённого layout.
+    const saved = layout.drawings || {};
+    Object.keys(saved).forEach(symbol => {
+        const perPane = saved[symbol] || {};
+        Object.keys(perPane).forEach(paneId => absorb(symbol, perPane[paneId]));
+    });
+
+    shockLog.sort((a, b) => b.time - a.time);
+    if (shockLog.length > 200) shockLog.length = 200;
+}
+
+/**
  * Перерисовать панель всплесков, если она открыта.
  */
 function renderShockPanel() {
@@ -3990,6 +4042,9 @@ function toggleShockPanel() {
     shockPanelOpen = !shockPanelOpen;
 
     if (shockPanelOpen) {
+        // Сначала поднимаем то, что уже сохранено локально: после F5 маркеры
+        // на графике есть, и панель обязана показывать их, а не «сигналов нет».
+        restoreShockLogFromDrawings();
         // Журнал хаба может быть полнее локального: другая вкладка, F5.
         const ws = panesState[1]?.ws;
         if (ws && ws.readyState === WebSocket.OPEN) {

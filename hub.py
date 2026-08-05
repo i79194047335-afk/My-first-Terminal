@@ -137,9 +137,13 @@ class Hub:
         self._shock_detector = ShockDetector()
         self._news_windows   = NewsWindows()
         # Последние сигналы для восстановления маркеров при переподключении:
-        # symbol -> [событие, ...], окно суток.
+        # symbol -> [событие, ...], окно суток. Персистится на диск: журнал в
+        # одной лишь памяти обнулялся КАЖДЫМ рестартом хаба, и фронт с чистым
+        # localStorage (другой браузер) оставался без истории сигналов.
         self._shock_log      = {}
         self._shock_id       = 1
+        self._shock_log_path = config.get("shock_log_file", "shock_log.json")
+        self._load_shock_log()
 
         # Рэндж-бары: билдеры создаются ЛЕНИВО по set_tf "R:<поинты>" и живут
         # только в памяти — источник истины у них один, тиковый архив, и после
@@ -1587,6 +1591,54 @@ class Hub:
                 # и повторно не сработает.
                 self._broadcast_alert(symbol, level, alert["id"])
 
+    def _load_shock_log(self):
+        """Поднять журнал всплесков с диска, отбросив всё старше суток.
+
+        Returns:
+            None. Битый или отсутствующий файл — просто пустой журнал.
+        """
+        try:
+            with open(self._shock_log_path, "r") as fh:
+                data = json.load(fh)
+        except (IOError, OSError, ValueError):
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        cutoff = time.time() - 86400
+        restored = 0
+        max_id = 0
+        for symbol, events in data.items():
+            if not isinstance(events, list):
+                continue
+            kept = [e for e in events
+                    if isinstance(e, dict) and e.get("time", 0) >= cutoff]
+            if kept:
+                self._shock_log[symbol] = kept
+                restored += len(kept)
+                for e in kept:
+                    max_id = max(max_id, e.get("id") or 0)
+        # id продолжаем с максимума: иначе новые события конфликтовали бы
+        # со старыми в журнале фронта.
+        self._shock_id = max_id + 1
+        if restored:
+            log.info("журнал всплесков восстановлен: %d событий", restored)
+
+    def _save_shock_log(self):
+        """Сохранить журнал всплесков на диск (атомарно).
+
+        Returns:
+            None. Ошибки записи не должны ронять обработку тика — только лог.
+        """
+        try:
+            tmp = self._shock_log_path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(self._shock_log, fh)
+            os.replace(tmp, self._shock_log_path)
+        except (IOError, OSError) as err:
+            log.warning("журнал всплесков не сохранён: %r", err)
+
     def _shock_live(self, provider, symbol, builder, tick_ts, price):
         """Проверить ФОРМИРУЮЩУЮСЯ M1 на всплеск (основной путь сигнала).
 
@@ -1694,6 +1746,7 @@ class Hub:
         # отражать итог минуты: иначе в панели останется «рывок» там, где по
         # факту вышло размазанное движение.
         event["audible"]     = (not event.get("blocked")) and shape["shape"] == "burst"
+        self._save_shock_log()
         self._broadcast_shock(event)
 
     def _shock_emit(self, provider, symbol, event):
@@ -1736,6 +1789,7 @@ class Hub:
             journal.append(event)
         cutoff = event["time"] - 86400
         self._shock_log[symbol] = [e for e in journal if e["time"] >= cutoff]
+        self._save_shock_log()
 
         phase = "живой" if event.get("live") else "добор"
         cov   = event.get("coverage")
