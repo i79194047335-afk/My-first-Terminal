@@ -253,12 +253,14 @@
     #signalPanel.skip { border-top: 3px solid #555; }
 
     /* Панель всплесков. В отличие от #signalPanel кликабельна целиком:
-       по строке журнала переходим к свече сигнала. */
+       по строке журнала переходим к свече сигнала.
+       Размеры +30% против первой версии — на 13" ноутбуке мелкий текст
+       не читался. */
     #shockPanel {
         position: absolute; left: 8px; top: 8px;
-        width: 300px; max-width: calc(60% - 16px);
+        width: 390px; max-width: calc(70% - 16px);
         background: rgba(15,15,15,0.94); color: #d1d4dc;
-        padding: 10px 12px; font-size: 12px; z-index: 2001;
+        padding: 13px 16px; font-size: 15px; z-index: 2001;
         box-sizing: border-box; border-radius: 5px; border: 1px solid #333;
         display: none; box-shadow: 0 6px 20px rgba(0,0,0,0.5);
     }
@@ -1391,6 +1393,8 @@ function handleMessage(id, state, msg) {
                 if (existing) {
                     // Журнал хаба точнее локальной копии: свеча уже закрылась.
                     existing.price     = ev.price;
+                    existing.high      = ev.high ?? existing.high ?? null;
+                    existing.low       = ev.low ?? existing.low ?? null;
                     existing.direction = ev.direction;
                     existing.sigma     = ev.sigma;
                     existing.blocked   = ev.blocked || null;
@@ -1402,6 +1406,7 @@ function handleMessage(id, state, msg) {
                 }
                 drawings[paneId].push({
                     paneId, type: "shock", time: ev.time, price: ev.price,
+                    high: ev.high ?? null, low: ev.low ?? null,
                     direction: ev.direction, sigma: ev.sigma,
                     blocked: ev.blocked || null,
                     shapeKind: ev.shape || null, coverage: ev.coverage ?? null,
@@ -2391,6 +2396,17 @@ function switchSymbol(symbol) {
             wireSocket(id, state, getPaneElements(id));
         }
     });
+    // Селектор выставляется ЗДЕСЬ, а не только при инициализации: switchSymbol
+    // зовут и программно (переход по сигналу из панели), и тогда выпадающий
+    // список оставался на прежней паре, противореча тому, что на графике.
+    const symSelect = document.getElementById("symbolSelect");
+    if (symSelect && symSelect.value !== symbol) {
+        // Значение может быть в другом формате имени (с префиксом провайдера
+        // или без) — ищем совпадающий пункт, прежде чем присваивать.
+        const match = Array.from(symSelect.options).find(
+            o => o.value === symbol || displaySymbol(o.value) === displaySymbol(symbol));
+        if (match) symSelect.value = match.value;
+    }
     syncOrderbookButtons();
     syncRossHooksButtons();
     refreshSignalMarkers();
@@ -3947,10 +3963,10 @@ function renderShockPanel() {
 
     const head =
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
-          '<b style="font-size:13px;">Сигналы — всплески</b>' +
+          '<b style="font-size:17px;">Сигналы — всплески</b>' +
           '<span style="flex:1"></span>' +
           '<span onclick="toggleShockPanel()" style="cursor:pointer;color:#888;' +
-                'font-weight:bold;padding:0 4px;">✕</span>' +
+                'font-weight:bold;padding:0 4px;font-size:17px;">✕</span>' +
         '</div>';
 
     // Что именно показывает движок — иначе пустой список неотличим от поломки.
@@ -3959,9 +3975,9 @@ function renderShockPanel() {
     let body;
     if (!shockLog.length) {
         body =
-            '<div style="color:#888;font-size:12px;line-height:1.6;">' +
+            '<div style="color:#888;font-size:15px;line-height:1.6;">' +
               'Сигналов нет.<br>' +
-              '<span style="color:#666;font-size:11px;">' +
+              '<span style="color:#666;font-size:14px;">' +
                 'Движок работает и ждёт всплеск: диапазон свечи M1 против своих ' +
                 'последних 30.<br>Пороги: ' + thresholds + '.<br>' +
                 '<span style="color:#ffb74d">⚡ рывок</span> — ≥70% размаха за 10 с, ' +
@@ -3979,7 +3995,7 @@ function renderShockPanel() {
             const d     = new Date(s.time * 1000);
             const when  = d.toISOString().slice(5, 16).replace("T", " ");
             const note  = s.blocked
-                ? '<div style="font-size:10px;color:#7a6a3a;">подавлен: ' +
+                ? '<div style="font-size:13px;color:#7a6a3a;">подавлен: ' +
                   (s.blocked.kind === "news" ? "новости" : "сессия") + ' — ' +
                   s.blocked.label + '</div>'
                 : '';
@@ -3987,44 +4003,44 @@ function renderShockPanel() {
             // оба вида в списке, но с разной пометкой.
             const cov = s.coverage != null ? Math.round(s.coverage * 100) + '%' : '';
             const shapeNote = s.shape === "burst"
-                ? '<div style="font-size:10px;color:#ffb74d;">⚡ рывок за 10 с — ' +
+                ? '<div style="font-size:13px;color:#ffb74d;">⚡ рывок за 10 с — ' +
                   cov + ' размаха</div>'
                 : (s.shape === "spread"
-                    ? '<div style="font-size:10px;color:#8a8a8a;">〜 движение размазано — ' +
+                    ? '<div style="font-size:13px;color:#8a8a8a;">〜 движение размазано — ' +
                       'лучшие 10 с дали ' + cov + '</div>'
                     : '');
             // SOLO выделен цветом: он означает, что двинулась именно эта пара,
             // а не весь доллар — самое содержательное различие в списке.
             const badge = s.origin === "solo"
                 ? '<span style="background:#1b5e20;color:#a5d6a7;padding:0 4px;' +
-                  'border-radius:3px;font-size:9px;font-weight:bold;">SOLO</span> '
+                  'border-radius:3px;font-size:12px;font-weight:bold;">SOLO</span> '
                 : (s.origin === "in_stream"
                     ? '<span style="background:#37474f;color:#b0bec5;padding:0 4px;' +
-                      'border-radius:3px;font-size:9px;">IN STREAM</span> '
+                      'border-radius:3px;font-size:12px;">IN STREAM</span> '
                     : '');
             // Молча прошедшие события помечаем, чтобы не искать, почему не было звука.
             const silent = (!s.audible && !s.blocked)
-                ? '<span style="color:#555;font-size:9px;"> (без звука)</span>' : '';
+                ? '<span style="color:#555;font-size:12px;"> (без звука)</span>' : '';
             return (
                 '<div onclick="gotoShock(' + idx + ')" ' +
-                     'style="padding:6px 8px;border-radius:4px;cursor:pointer;' +
+                     'style="padding:8px 10px;border-radius:4px;cursor:pointer;' +
                             'border-left:3px solid ' + color + ';background:#00000022;' +
                             'margin-bottom:4px;" ' +
                      'onmouseover="this.style.background=\'#ffffff14\'" ' +
                      'onmouseout="this.style.background=\'#00000022\'">' +
-                  '<div style="font-size:12px;">' +
+                  '<div style="font-size:15px;">' +
                     '<span style="color:' + color + '">' + arrow + '</span> ' +
                     '<b>' + s.symbol + '</b> ' +
                     '<span style="color:#aaa">' + s.sigma.toFixed(1) + 'σ</span> ' +
-                    '<span style="color:#666;font-size:11px;">' + when + ' UTC</span>' +
+                    '<span style="color:#666;font-size:14px;">' + when + ' UTC</span>' +
                     silent +
                   '</div>' +
                   '<div style="margin-top:3px;">' + badge + '</div>' +
                   shapeNote + note +
                 '</div>');
         }).join("");
-        body = '<div style="max-height:320px;overflow-y:auto;">' + rows + '</div>' +
-               '<div style="font-size:10px;color:#666;margin-top:6px;">' +
+        body = '<div style="max-height:420px;overflow-y:auto;">' + rows + '</div>' +
+               '<div style="font-size:13px;color:#666;margin-top:8px;">' +
                  'клик — перейти к свече · ' + thresholds +
                '</div>';
     }
@@ -4206,6 +4222,32 @@ function renderShockWindowBadge(blocked) {
 }
 
 /**
+ * Отступ маркера от свечи в единицах цены инструмента.
+ *
+ * Считается от размаха ВИДИМЫХ баров, поэтому выглядит одинаково на EUR/USD
+ * и USD/JPY, где цены отличаются в сотни раз. Пересчитывается на каждой
+ * перерисовке — при зуме масштаб меняется.
+ *
+ * @param {number} paneId Панель.
+ * @returns {number} Отступ в единицах цены; 0, если измерить не удалось.
+ */
+function shockMarkerGap(paneId) {
+    const st = panesState[paneId];
+    if (!st?.data?.length) return 0;
+    // Хвоста видимых баров достаточно: маркеры живут в свежей истории.
+    const tail = st.data.slice(-120);
+    let hi = -Infinity, lo = Infinity;
+    for (const c of tail) {
+        const h = c.high ?? c.close;
+        const l = c.low  ?? c.close;
+        if (h != null && h > hi) hi = h;
+        if (l != null && l < lo) lo = l;
+    }
+    if (!isFinite(hi) || !isFinite(lo) || hi <= lo) return 0;
+    return (hi - lo) * 0.04;   // ~4% видимого диапазона
+}
+
+/**
  * Собрать маркеры всплесков для панели из сохранённых рисунков.
  *
  * @param {number} paneId Панель.
@@ -4221,17 +4263,32 @@ function getShockMarkersForPane(paneId) {
             // по-разному, чтобы на графике их было видно не читая панель.
             const mark = d.shapeKind === "burst" ? "⚡"
                        : (d.shapeKind === "spread" ? "〜" : "");
-            return {
+            const marker = {
                 time:     d.time,
-                position: up ? "belowBar" : "aboveBar",
                 // Подавленный всплеск — серым: видно, что событие было, но
                 // сигналом оно не считалось.
                 color:    d.blocked ? "#787b86" : (up ? "#26a69a" : "#ef5350"),
                 shape:    up ? "arrowUp" : "arrowDown",
-                size:     1,
+                // +50%: на 13" маркер размера 1 сливался с телом свечи.
+                size:     1.5,
                 text:     (mark ? mark + " " : "") + (d.sigma ? d.sigma.toFixed(1) + "σ" : ""),
                 id:       "shock-" + d.time,
             };
+
+            // Отступ от свечи. У aboveBar/belowBar зазор фиксирован и мелкий —
+            // маркер налезает на тело. Позиции atPrice* (LWC 5.0.4+) принимают
+            // цену, и отступ задаётся в долях ВИДИМОГО диапазона: в пунктах он
+            // был бы разным у EUR/USD и USD/JPY (цены различаются в 130 раз).
+            const anchor = up ? (d.low ?? d.price) : (d.high ?? d.price);
+            const gap = shockMarkerGap(paneId);
+            if (anchor != null && gap > 0) {
+                marker.position = up ? "atPriceBottom" : "atPriceTop";
+                marker.price    = up ? anchor - gap : anchor + gap;
+            } else {
+                // Нет цены или не удалось измерить масштаб — обычное поведение.
+                marker.position = up ? "belowBar" : "aboveBar";
+            }
+            return marker;
         })
         .sort((a, b) => a.time - b.time);
 }
@@ -4287,6 +4344,8 @@ function onShockEvent(ev) {
             d => d.type === "shock" && d.time === ev.time);
         if (existing) {
             existing.price     = ev.price;
+            existing.high      = ev.high ?? existing.high ?? null;
+            existing.low       = ev.low ?? existing.low ?? null;
             existing.direction = ev.direction;
             existing.sigma     = ev.sigma;
             existing.blocked   = ev.blocked || null;
@@ -4302,6 +4361,8 @@ function onShockEvent(ev) {
                 type: "shock",
                 time: ev.time,
                 price: ev.price,
+                high: ev.high ?? null,
+                low: ev.low ?? null,
                 direction: ev.direction,
                 sigma: ev.sigma,
                 blocked: ev.blocked || null,
