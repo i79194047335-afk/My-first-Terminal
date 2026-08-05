@@ -3882,6 +3882,11 @@ function showAlertPopup(text) {
 // ВАЖНО: маркер отмечает необычную свечу, направление он НЕ предсказывает —
 // бэктест разворота эджа не дал (42.9% против базовых 52.0%).
 
+// Цвет маркеров всплеска. Между голубым и синим (azure): заметен и на светлой,
+// и на тёмной теме, и НЕ совпадает с зелёным/красным свечей — маркер про место
+// события, а не про направление.
+const SHOCK_MARKER_COLOR = "#1E88E5";
+
 // Активные окна тишины по инструментам: symbol -> {kind, label}.
 const shockWindowState = new Map();
 
@@ -4256,39 +4261,49 @@ function shockMarkerGap(paneId) {
 function getShockMarkersForPane(paneId) {
     return (drawings[paneId] || [])
         .filter(d => d.type === "shock")
-        .map(d => {
-            const up = d.direction > 0;
-            // Резкий рывок помечается молнией, размазанное движение — тильдой.
-            // Фильтром форма не является: оба вида сигналят, но выглядят
-            // по-разному, чтобы на графике их было видно не читая панель.
-            const mark = d.shapeKind === "burst" ? "⚡"
-                       : (d.shapeKind === "spread" ? "〜" : "");
-            const marker = {
-                time:     d.time,
-                // Подавленный всплеск — серым: видно, что событие было, но
-                // сигналом оно не считалось.
-                color:    d.blocked ? "#787b86" : (up ? "#26a69a" : "#ef5350"),
-                shape:    up ? "arrowUp" : "arrowDown",
-                // +50%: на 13" маркер размера 1 сливался с телом свечи.
-                size:     1.5,
-                text:     (mark ? mark + " " : "") + (d.sigma ? d.sigma.toFixed(1) + "σ" : ""),
-                id:       "shock-" + d.time,
+        .flatMap(d => {
+            // Свеча берётся В ВИЛКУ: стрелка сверху смотрит вниз, снизу —
+            // вверх, обе указывают на неё. Одна стрелка «от свечи» читалась
+            // как направление движения и путала.
+            //
+            // Цвет один для всех: направление и форма всплеска видны в панели,
+            // на графике маркер только показывает МЕСТО. Подавленный окном
+            // тишины приглушён — событие было, но сигналом не считалось.
+            const color = d.blocked ? "#5a7a99" : SHOCK_MARKER_COLOR;
+            const gap = shockMarkerGap(paneId);
+            const hi = d.high ?? d.price;
+            const lo = d.low ?? d.price;
+
+            const top = {
+                time:  d.time,
+                color: color,
+                shape: "arrowDown",     // сверху вниз — указывает на свечу
+                size:  1.5,
+                id:    "shock-top-" + d.time,
+            };
+            const bottom = {
+                time:  d.time,
+                color: color,
+                shape: "arrowUp",       // снизу вверх — указывает на свечу
+                size:  1.5,
+                id:    "shock-bot-" + d.time,
             };
 
             // Отступ от свечи. У aboveBar/belowBar зазор фиксирован и мелкий —
             // маркер налезает на тело. Позиции atPrice* (LWC 5.0.4+) принимают
             // цену, и отступ задаётся в долях ВИДИМОГО диапазона: в пунктах он
             // был бы разным у EUR/USD и USD/JPY (цены различаются в 130 раз).
-            const anchor = up ? (d.low ?? d.price) : (d.high ?? d.price);
-            const gap = shockMarkerGap(paneId);
-            if (anchor != null && gap > 0) {
-                marker.position = up ? "atPriceBottom" : "atPriceTop";
-                marker.price    = up ? anchor - gap : anchor + gap;
+            if (hi != null && lo != null && gap > 0) {
+                top.position    = "atPriceTop";
+                top.price       = hi + gap;
+                bottom.position = "atPriceBottom";
+                bottom.price    = lo - gap;
             } else {
                 // Нет цены или не удалось измерить масштаб — обычное поведение.
-                marker.position = up ? "belowBar" : "aboveBar";
+                top.position    = "aboveBar";
+                bottom.position = "belowBar";
             }
-            return marker;
+            return [top, bottom];
         })
         .sort((a, b) => a.time - b.time);
 }
