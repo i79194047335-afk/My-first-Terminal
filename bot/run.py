@@ -19,8 +19,10 @@ import argparse
 import asyncio
 import sys
 import time
+from datetime import datetime
 
 from bot import config as config_module
+from bot import payout
 from bot.api.auth import MANUAL_STEPS, credentials_from_config, probe
 from bot.api.client import IntradeClient
 from bot.api.models import PlatformError, mask_hash
@@ -119,16 +121,38 @@ def cmd_check(cfg) -> int:
             expiry_minutes=cfg.default_expiry_minutes,
             investment=cfg.default_investment,
         )
-        # Безубыточный винрейт при выплате p: 100/(100+p).
-        breakeven = 100.0 / (100.0 + percent) * 100.0
-        print(f"выплата {symbol}: {percent}%  "
-              f"(безубыточный винрейт {breakeven:.1f}%)")
-        if percent < cfg.risk.min_payout_percent:
+        print(f"выплата {symbol}: {payout.describe(percent)}")
+
+        # Расхождение с ожидаемой сеткой означает, что площадка поменяла
+        # правила — это надо заметить сразу, а не по итогам месяца ставок.
+        expected = payout.expected_percent(cfg.default_expiry_minutes,
+                                           cfg.default_investment)
+        if percent != expected and not payout.is_hour_edge():
+            print(f"    ВНИМАНИЕ: ожидалось {expected}% по известной сетке — "
+                  f"правила площадки могли измениться")
+
+        if percent <= 0:
+            # Ноль — это способ площадки сказать «сейчас не торгуется»
+            # (ночью так отвечают Classic-экспирации), а не сбой разбора.
+            print("    выплата 0% — инструмент/экспирация сейчас недоступны")
+        elif percent < cfg.risk.min_payout_percent:
             print(f"    ВНИМАНИЕ: ниже порога min_payout_percent="
                   f"{cfg.risk.min_payout_percent}")
     except PlatformError as err:
         print(f"выплата: ОШИБКА — {err}")
         failed = True
+
+    # Окно у начала часа: выплата падает до 60%, безубыточный винрейт
+    # прыгает с 54.9% до 62.5%. Показываем всегда, а не только при входе.
+    now_msk = datetime.now(payout.MSK)
+    if payout.is_hour_edge():
+        print(f"время МСК {now_msk:%H:%M} — ОКНО У НАЧАЛА ЧАСА, выплата урезана")
+    else:
+        until = payout.minutes_until_hour_edge()
+        if now_msk.hour >= payout.HOUR_EDGE_FROM_HOUR or now_msk.hour < payout.HOUR_EDGE_TO_HOUR:
+            print(f"время МСК {now_msk:%H:%M} — до окна у начала часа {until:.0f} мин")
+        else:
+            print(f"время МСК {now_msk:%H:%M} — день, окон пониженной выплаты нет")
 
     return 1 if failed else 0
 
