@@ -372,6 +372,10 @@ class Engine:
             meta=signal.meta,
         )
         self.journal.event("state", "SENDING → OPEN", trade_ref=row_id)
+        # Кулдаун и лимит одновременных сделок считаются от ФАКТА открытия,
+        # а не от попытки: отказ площадки паузу начинать не должен.
+        if self.risk:
+            self.risk.register_open()
 
         task = asyncio.create_task(self._settle(row_id, trade, investment))
         self._settle_tasks.add(task)
@@ -441,6 +445,8 @@ class Engine:
             meta=signal.meta,
         )
         self.journal.event("state", "SENDING → OPEN (имитация)", trade_ref=row_id)
+        if self.risk:
+            self.risk.register_open()
 
         fake_trade = Trade(
             trade_id=0, symbol=signal.symbol, direction=signal.direction,
@@ -458,6 +464,28 @@ class Engine:
     async def _settle(self, row_id: int, trade: Trade,
                       investment: float) -> None:
         """Дождаться экспирации и записать итог сделки.
+
+        Счётчик открытых сделок освобождается в finally: если расчёт упадёт
+        с исключением, место в лимите max_concurrent обязано вернуться,
+        иначе бот замолчит навсегда после первой же ошибки.
+
+        Args:
+            row_id:     Локальный id записи в журнале.
+            trade:      Открытая сделка.
+            investment: Размер ставки.
+
+        Returns:
+            None.
+        """
+        try:
+            await self._settle_inner(row_id, trade, investment)
+        finally:
+            if self.risk:
+                self.risk.register_close()
+
+    async def _settle_inner(self, row_id: int, trade: Trade,
+                            investment: float) -> None:
+        """Собственно ожидание экспирации и запись итога.
 
         Args:
             row_id:     Локальный id записи в журнале.
