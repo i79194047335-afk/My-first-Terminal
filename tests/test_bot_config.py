@@ -111,6 +111,54 @@ def test_live_blocked():
         os.unlink(path)
 
 
+def test_panel_host_defaults_safe():
+    """Панель по умолчанию слушает только localhost."""
+    print("адрес панели")
+    cfg = config_module.load("/nonexistent/bot_config.json",
+                             env_path="/nonexistent/.env")
+    check("умолчание — localhost", cfg.panel_host == "127.0.0.1", cfg.panel_host)
+
+    # Открыть наружу можно — но только осознанно, записью в конфиг.
+    path = write_config({"panel_host": "0.0.0.0"})
+    try:
+        cfg = config_module.load(path, env_path="/nonexistent/.env")
+        check("0.0.0.0 принимается в dry", cfg.panel_host == "0.0.0.0")
+    finally:
+        os.unlink(path)
+
+
+def test_live_forbids_open_panel():
+    """Реальные деньги + панель без пароля наружу = запрещено.
+
+    Сочетание не должно возникнуть даже случайно: у панели нет пароля,
+    и кнопка Call доступна любому, кто знает адрес.
+    """
+    print("live с открытой панелью")
+    path = write_config({"mode": "live", "panel_host": "0.0.0.0"})
+    saved = os.environ.get("INTRADE_ALLOW_LIVE")
+    try:
+        os.environ["INTRADE_ALLOW_LIVE"] = "yes"   # первый рубеж пройден
+        try:
+            config_module.load(path, env_path="/nonexistent/.env")
+            check("live + 0.0.0.0 отвергнут", False, "конфиг принят")
+        except ValueError as err:
+            check("live + 0.0.0.0 отвергнут", "panel_host" in str(err)
+                  or "панел" in str(err).lower(), str(err))
+
+        # На localhost live допустим (при наличии разрешения в окружении).
+        local = write_config({"mode": "live", "panel_host": "127.0.0.1"})
+        try:
+            cfg = config_module.load(local, env_path="/nonexistent/.env")
+            check("live на localhost проходит", cfg.is_live is True)
+        finally:
+            os.unlink(local)
+    finally:
+        os.environ.pop("INTRADE_ALLOW_LIVE", None)
+        if saved is not None:
+            os.environ["INTRADE_ALLOW_LIVE"] = saved
+        os.unlink(path)
+
+
 def test_env_overrides():
     """Секреты из окружения перекрывают файл конфигурации."""
     print("окружение поверх конфига")
@@ -184,6 +232,7 @@ def main():
         0 — всё прошло, 1 — есть провалы.
     """
     for test in (test_defaults, test_unknown_mode_falls_back, test_live_blocked,
+                 test_panel_host_defaults_safe, test_live_forbids_open_panel,
                  test_env_overrides, test_validation, test_unknown_risk_key_ignored,
                  test_touches_platform):
         test()

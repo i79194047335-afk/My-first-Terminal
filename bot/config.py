@@ -47,6 +47,10 @@ DEFAULTS = {
         "min_payout_percent": 75,
         "allowed_hours": [[6, 18]],
     },
+    # Адрес панели. По умолчанию только localhost: панель умеет открывать
+    # сделки, и пароля у неё нет. "0.0.0.0" открывает её всему интернету —
+    # осознанный выбор, который стоит делать только в режиме dry.
+    "panel_host": "127.0.0.1",
     "panel_port": 8788,
     "db_path": "bot_journal.db",
     "stop_file": "bot/STOP",
@@ -93,6 +97,9 @@ class BotConfig:
         symbol_whitelist:       Разрешённые инструменты (со слэшем).
         sources:                Имена включённых источников сигналов.
         risk:                   Пороги ограничителей.
+        panel_host:             Адрес панели. 127.0.0.1 — только локально
+                                (умолчание); 0.0.0.0 — открыть наружу, БЕЗ
+                                пароля, кнопки Call/Put доступны всем.
         panel_port:             Порт панели наблюдения.
         db_path:                Файл журнала (НЕ market.db).
         stop_file:              Путь kill-switch: есть файл — входы запрещены.
@@ -110,6 +117,7 @@ class BotConfig:
     symbol_whitelist: list = field(default_factory=lambda: list(DEFAULTS["symbol_whitelist"]))
     sources: list = field(default_factory=lambda: ["manual"])
     risk: RiskConfig = field(default_factory=RiskConfig)
+    panel_host: str = "127.0.0.1"
     panel_port: int = 8788
     db_path: str = "bot_journal.db"
     stop_file: str = "bot/STOP"
@@ -230,6 +238,7 @@ def load(path: str = DEFAULT_CONFIG_PATH, env_path: str = ".env") -> BotConfig:
         symbol_whitelist=list(data.get("symbol_whitelist") or []),
         sources=list(data.get("sources") or ["manual"]),
         risk=risk,
+        panel_host=str(data.get("panel_host") or DEFAULTS["panel_host"]),
         panel_port=int(data.get("panel_port", 8788)),
         db_path=str(data.get("db_path") or "bot_journal.db"),
         stop_file=str(data.get("stop_file") or "bot/STOP"),
@@ -266,4 +275,14 @@ def validate(config: BotConfig) -> None:
             raise ValueError(
                 "режим live запрещён: нет INTRADE_ALLOW_LIVE=yes в окружении. "
                 "В текущей задаче live не включается вовсе"
+            )
+
+        # Реальные деньги и панель без пароля в открытом интернете — это
+        # сочетание не должно существовать даже случайно.
+        if config.panel_host not in ("127.0.0.1", "localhost", "::1"):
+            raise ValueError(
+                f"режим live с панелью на {config.panel_host} запрещён: "
+                "у панели нет пароля, кнопка Call доступна всем. "
+                "Для live оставьте panel_host = 127.0.0.1 и ходите "
+                "через ssh-туннель"
             )

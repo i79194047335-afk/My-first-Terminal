@@ -99,17 +99,33 @@ class Panel:
             None.
         """
         self._running = True
+        host = getattr(self.config, "panel_host", "127.0.0.1")
+
         self._server = await websockets.serve(
             self._handle_client,
-            "127.0.0.1",
+            host,
             self.config.panel_port,
             process_request=self._serve_static,
         )
         self._task = asyncio.create_task(self._broadcast_loop())
-        log.info("панель слушает http://127.0.0.1:%d (только локально; "
-                 "снаружи — через ssh -L %d:127.0.0.1:%d)",
-                 self.config.panel_port, self.config.panel_port,
-                 self.config.panel_port)
+
+        if host in ("127.0.0.1", "localhost", "::1"):
+            log.info("панель слушает http://127.0.0.1:%d (только локально; "
+                     "снаружи — через ssh -L %d:127.0.0.1:%d)",
+                     self.config.panel_port, self.config.panel_port,
+                     self.config.panel_port)
+        else:
+            # Панель умеет открывать сделки. Наружу — только осознанно и
+            # ненадолго: пароля у неё нет, кнопка Call доступна любому,
+            # кто нашёл порт. В режимах demo/live это уже опасно.
+            log.warning("ПАНЕЛЬ ОТКРЫТА НАРУЖУ (%s:%d) БЕЗ ПАРОЛЯ — "
+                        "кнопки Call/Put доступны всем, кто знает адрес. "
+                        "Режим сейчас: %s",
+                        host, self.config.panel_port, self.config.mode)
+            if self.config.touches_platform:
+                log.warning("ВНИМАНИЕ: режим %s тратит реальные средства "
+                            "счёта, а панель открыта без защиты",
+                            self.config.mode)
 
     async def stop(self) -> None:
         """Остановить сервер и рассылку.
