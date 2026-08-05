@@ -4067,8 +4067,12 @@ function toggleShockPanel() {
         // на графике есть, и панель обязана показывать их, а не «сигналов нет».
         restoreShockLogFromDrawings();
         // Журнал хаба может быть полнее локального: другая вкладка, F5.
-        const ws = panesState[1]?.ws;
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        // Достаточно ЛЮБОГО живого сокета — журнал общий, не по панелям;
+        // первая панель могла быть закрыта или переподключаться.
+        const ws = [1, 2]
+            .map(id => panesState[id]?.ws)
+            .find(s => s && s.readyState === WebSocket.OPEN);
+        if (ws) {
             try { ws.send(JSON.stringify({ type: "get_shocks" })); } catch (e) {}
         }
         if (btn) btn.classList.add("on");
@@ -4094,42 +4098,120 @@ function gotoShock(idx) {
     // вместо простого центрирования.
     if (displaySymbol(s.symbol) !== displaySymbol(currentSymbol)) {
         switchSymbol(s.symbol);
-        // История нового инструмента приходит асинхронно — центрируем, когда
-        // бары действительно на графике, иначе setVisibleRange отработает
-        // по пустой серии и ничего не сдвинет.
-        centerOnShockWhenReady(s.time, 12);
+        // История нового инструмента приходит асинхронно — центрируем и
+        // ставим маркер, когда бары действительно на графике, иначе
+        // setVisibleRange отработает по пустой серии и ничего не сдвинет.
+        centerOnShockWhenReady(s, 12);
     } else {
         centerOnTime(s.time);
+        // Маркер мог не существовать: событие по ЧУЖОМУ инструменту при
+        // получении отбрасывалось (панели показывают только currentSymbol),
+        // и после переключения его никто не создавал — маркер появлялся лишь
+        // со второго клика по строке.
+        attachShockToPanes(s);
+        refreshShockMarkers();
     }
 }
 
 /**
- * Центрировать первую панель на времени свечи.
+ * Привязать событие к панелям текущего инструмента (создать/обновить маркер).
  *
- * @param {number} time Unix-время свечи.
- * @returns {boolean} true, если центрирование удалось.
+ * @param {Object} ev Событие всплеска (живое или из журнала).
+ * @returns {boolean} true, если хоть одна панель приняла маркер.
  */
-function centerOnTime(time) {
-    const st = panesState[1];
-    if (!st?.chart || !st.data?.length) return false;
-    // Показать окрестность свечи, а не одну её: контекст важнее точности.
-    const span = (st.tfSeconds || 60) * 60;
-    try {
-        st.chart.timeScale().setVisibleRange({ from: time - span, to: time + span });
-        return true;
-    } catch (e) { return false; }
+function attachShockToPanes(ev) {
+    if (!ev || typeof ev.time !== "number") return false;
+    // Панели всегда показывают currentSymbol — отдельного st.symbol в проекте
+    // нет. Сравнение БЕЗ префикса провайдера: хаб шлёт wire-имя клиента.
+    if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return false;
+
+    let attached = false;
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st?.series) return;
+        drawings[paneId] = drawings[paneId] || [];
+        // Сигнал приходит по ЖИВОЙ свече; направление, σ и форма у неё ещё
+        // уточняются до закрытия минуты — запись той же минуты обновляем
+        // на месте, а не плодим вторую.
+        const existing = drawings[paneId].find(
+            d => d.type === "shock" && d.time === ev.time);
+        if (existing) {
+            existing.price     = ev.price;
+            existing.high      = ev.high ?? existing.high ?? null;
+            existing.low       = ev.low ?? existing.low ?? null;
+            existing.direction = ev.direction;
+            existing.sigma     = ev.sigma;
+            existing.blocked   = ev.blocked || null;
+            existing.shapeKind = ev.shape || existing.shapeKind || null;
+            existing.coverage  = ev.coverage ?? existing.coverage ?? null;
+            existing.origin    = ev.origin || existing.origin || null;
+            existing.audible   = !!ev.audible;
+        } else {
+            drawings[paneId].push({
+                paneId,
+                type: "shock",
+                time: ev.time,
+                price: ev.price,
+                high: ev.high ?? null,
+                low: ev.low ?? null,
+                direction: ev.direction,
+                sigma: ev.sigma,
+                blocked: ev.blocked || null,
+                shapeKind: ev.shape || null,
+                coverage: ev.coverage ?? null,
+                origin: ev.origin || null,
+                audible: !!ev.audible,
+            });
+        }
+        StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+        attached = true;
+    });
+    return attached;
 }
 
 /**
- * Дождаться загрузки истории и центрировать график на свече.
+ * Центрировать ВСЕ видимые панели на времени свечи.
+ *
+ * При сплите обе панели показывают один инструмент, и промотать надо обе —
+ * иначе вторую приходится крутить руками. ТФ у панелей разные, поэтому окно
+ * считается для каждой отдельно.
  *
  * @param {number} time Unix-время свечи.
+ * @returns {boolean} true, если центрирование удалось хотя бы на одной.
+ */
+function centerOnTime(time) {
+    let done = false;
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st?.chart || !st.data?.length) return;
+        // Показать окрестность свечи, а не одну её: контекст важнее точности.
+        const span = (st.tfSeconds || 60) * 60;
+        try {
+            st.chart.timeScale().setVisibleRange({ from: time - span, to: time + span });
+            done = true;
+        } catch (e) { /* панель могла быть скрыта или ещё без данных */ }
+    });
+    return done;
+}
+
+/**
+ * Дождаться загрузки истории, центрировать графики и поставить маркер.
+ *
+ * История нового инструмента приходит асинхронно, поэтому и центрирование,
+ * и маркер делаются здесь: на момент switchSymbol серия ещё пуста, а
+ * `drawings` только что очищены сменой инструмента.
+ *
+ * @param {Object} ev Событие всплеска, к которому переходим.
  * @param {number} tries Сколько попыток осталось (по ~250 мс).
  */
-function centerOnShockWhenReady(time, tries) {
+function centerOnShockWhenReady(ev, tries) {
     if (tries <= 0) return;
-    if (centerOnTime(time)) return;
-    setTimeout(() => centerOnShockWhenReady(time, tries - 1), 250);
+    if (centerOnTime(ev.time)) {
+        attachShockToPanes(ev);
+        refreshShockMarkers();
+        return;
+    }
+    setTimeout(() => centerOnShockWhenReady(ev, tries - 1), 250);
 }
 
 /**
@@ -4342,53 +4424,10 @@ function onShockEvent(ev) {
     shockWindowState.set(ev.symbol, ev.blocked || null);
     if (ev.symbol === currentSymbol) renderShockWindowBadge(ev.blocked || null);
 
-    // Маркер ставим ТОЛЬКО на панель, где открыт этот инструмент: на чужом
-    // графике время свечи чужое, маркер повис бы в случайной точке.
-    [1, 2].forEach(paneId => {
-        const st = panesState[paneId];
-        // Обе панели всегда показывают currentSymbol — отдельного st.symbol в
-        // проекте нет. Сравнение идёт БЕЗ префикса провайдера: хаб шлёт символ
-        // в wire-формате клиента ("fxcm:AUD/USD" против "AUD/USD").
-        if (!st?.series) return;
-        if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return;
-        drawings[paneId] = drawings[paneId] || [];
-        // Сигнал приходит по ЖИВОЙ свече; направление и σ у неё ещё меняются,
-        // пока минута не закрылась. Поэтому маркер той же минуты обновляем на
-        // месте, а не плодим второй.
-        const existing = drawings[paneId].find(
-            d => d.type === "shock" && d.time === ev.time);
-        if (existing) {
-            existing.price     = ev.price;
-            existing.high      = ev.high ?? existing.high ?? null;
-            existing.low       = ev.low ?? existing.low ?? null;
-            existing.direction = ev.direction;
-            existing.sigma     = ev.sigma;
-            existing.blocked   = ev.blocked || null;
-            // Форма уточняется на закрытии минуты: живой сигнал видит только
-            // часть тиков (замер — 7 переклассификаций из 67 за две недели).
-            existing.shapeKind = ev.shape || null;
-            existing.coverage  = ev.coverage ?? null;
-            existing.origin    = ev.origin || null;
-            existing.audible   = !!ev.audible;
-        } else {
-            drawings[paneId].push({
-                paneId,
-                type: "shock",
-                time: ev.time,
-                price: ev.price,
-                high: ev.high ?? null,
-                low: ev.low ?? null,
-                direction: ev.direction,
-                sigma: ev.sigma,
-                blocked: ev.blocked || null,
-                shapeKind: ev.shape || null,
-                coverage: ev.coverage ?? null,
-                origin: ev.origin || null,
-                audible: !!ev.audible,
-            });
-        }
-        StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
-    });
+    // Маркер ставим ТОЛЬКО на панели с этим инструментом: на чужом графике
+    // время свечи чужое, маркер повис бы в случайной точке. Событие остаётся
+    // в журнале, и маркер появится после перехода по нему из панели.
+    attachShockToPanes(ev);
     refreshShockMarkers();
 
     // Звучат только РЫВКИ вне окон тишины — решение принимает хаб (audible).
