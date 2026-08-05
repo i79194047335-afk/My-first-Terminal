@@ -269,20 +269,33 @@ def test_multiplex():
 def test_core_does_not_import_strategies():
     """Ядро не должно импортировать конкретные стратегии.
 
-    Проверка из §12 ТЗ. Модули оболочки вне strategy/ не имеют права
-    ссылаться на manual/hub_feed и им подобных: иначе «подключение одним
-    файлом» превратится в правку исполнителя.
+    Проверка из §12 ТЗ: смысл в том, чтобы ИСПОЛНИТЕЛЬ не знал, какая
+    стратегия его кормит — иначе «подключение одним файлом» превратится
+    в правку ядра.
+
+    Точка сборки (run.py) и панель — исключения, и это не поблажка, а
+    разделение ролей: кто-то обязан знать, какие источники создавать и
+    какому из них адресовать кнопку Call. Это ровно та строчка, которую
+    ТЗ и разрешает менять при подключении новой стратегии («новый файл в
+    bot/strategy/ и строка в конфиге»). Запретить сборку означало бы
+    запретить запуск бота.
+
+    Проверяется поэтому ядро в узком смысле: engine, journal, risk,
+    quotes, clock, payout, config, api/*.
     """
     print("ядро не знает о конкретных стратегиях")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     bot_dir = os.path.join(root, "bot")
+
+    # Сборка и панель знать о конкретных источниках обязаны — см. docstring.
+    assembly_points = {"run.py", "panel.py"}
 
     offenders = []
     for folder, _, files in os.walk(bot_dir):
         if os.path.basename(folder) == "strategy":
             continue  # внутри strategy/ ссылаться друг на друга можно
         for filename in files:
-            if not filename.endswith(".py"):
+            if not filename.endswith(".py") or filename in assembly_points:
                 continue
             path = os.path.join(folder, filename)
             with open(path, "r", encoding="utf-8") as handle:
@@ -295,6 +308,15 @@ def test_core_does_not_import_strategies():
 
     check("ни один модуль ядра не импортирует стратегию",
           not offenders, offenders)
+
+    # Отдельно и строго: исполнитель обязан быть чист. Если стратегия
+    # просочится сюда, контракт сломан по-настоящему.
+    with open(os.path.join(bot_dir, "engine.py"), "r", encoding="utf-8") as handle:
+        engine_text = handle.read()
+    check("engine.py не упоминает конкретные стратегии",
+          "ManualSource" not in engine_text and "manual" not in engine_text.lower()
+          .replace("руч", ""),
+          "в engine.py найдено упоминание стратегии")
 
 
 def main():

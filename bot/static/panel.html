@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Бот intrade.bar — панель</title>
+<style>
+    /* Палитра повторяет dashboard.html — та же система переменных. */
+    :root {
+        --bg:#0d1117; --panel:#141a21; --card:#161d25; --btn:#232a31;
+        --btn-border:#2c343d; --divider:#232a33; --text:#e8eaed; --muted:#828a94;
+        --accent:#4d84ff; --accent-soft:#22314f;
+        --up:#2ecc8f; --down:#ff5c7c; --up-soft:#12291f; --down-soft:#2a1520;
+        --warn:#ffb020; --warn-soft:#2e2410;
+        --shadow:0 1px 3px rgba(0,0,0,.35);
+    }
+    * { box-sizing:border-box; }
+    body {
+        margin:0; background:var(--bg); color:var(--text);
+        font:13px/1.45 -apple-system,"Segoe UI",Arial,sans-serif;
+        -webkit-font-smoothing:antialiased; padding:14px;
+    }
+    h2 { font-size:13px; margin:0 0 10px; color:var(--muted); font-weight:600;
+         text-transform:uppercase; letter-spacing:.04em; }
+
+    #grid { display:grid; grid-template-columns:1fr 1fr; gap:12px;
+            max-width:1400px; margin:0 auto; }
+    .card { background:var(--card); border:1px solid var(--divider);
+            border-radius:10px; padding:14px; box-shadow:var(--shadow); }
+    .wide { grid-column:1 / -1; }
+
+    /* ── Шапка: режим крупно, он определяет всё остальное ───────────── */
+    #head { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+    #mode { font-size:26px; font-weight:700; letter-spacing:.05em;
+            padding:6px 16px; border-radius:8px; }
+    .mode-dry    { background:var(--accent-soft); color:var(--accent); }
+    .mode-shadow { background:var(--warn-soft);   color:var(--warn); }
+    .mode-demo   { background:var(--up-soft);     color:var(--up); }
+    .mode-live   { background:var(--down-soft);   color:var(--down); }
+
+    .metric { display:flex; flex-direction:column; gap:2px; }
+    .metric .label { font-size:11px; color:var(--muted); text-transform:uppercase;
+                     letter-spacing:.03em; }
+    .metric .value { font-size:18px; font-weight:600; font-variant-numeric:tabular-nums; }
+
+    #conn { margin-left:auto; display:flex; align-items:center; gap:6px;
+            font-size:12px; color:var(--muted); }
+    #dot { width:8px; height:8px; border-radius:50%; background:var(--down); }
+    #dot.on { background:var(--up); }
+
+    /* ── Баннеры предупреждений ─────────────────────────────────────── */
+    .banner { padding:10px 12px; border-radius:8px; margin-bottom:10px;
+              font-weight:600; display:none; }
+    .banner.show { display:block; }
+    #edgeBanner { background:var(--warn-soft); color:var(--warn);
+                  border:1px solid var(--warn); }
+    #stopBanner { background:var(--down-soft); color:var(--down);
+                  border:1px solid var(--down); }
+
+    /* ── Кнопки ─────────────────────────────────────────────────────── */
+    #controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    button { font:inherit; font-weight:600; border-radius:8px; cursor:pointer;
+             border:1px solid var(--btn-border); background:var(--btn);
+             color:var(--text); padding:10px 18px; }
+    button:hover:not(:disabled) { filter:brightness(1.15); }
+    button:disabled { opacity:.4; cursor:not-allowed; }
+    .big { font-size:15px; padding:14px 30px; }
+    #btnCall { background:var(--up-soft);   color:var(--up);   border-color:var(--up); }
+    #btnPut  { background:var(--down-soft); color:var(--down); border-color:var(--down); }
+    #btnStop { background:var(--down); color:#fff; border-color:var(--down);
+               margin-left:auto; }
+    #btnResume { background:var(--btn); }
+    select, input { font:inherit; background:var(--btn); color:var(--text);
+                    border:1px solid var(--btn-border); border-radius:7px;
+                    padding:9px 10px; }
+    input { width:80px; }
+
+    /* ── Таблицы ────────────────────────────────────────────────────── */
+    table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+    th { text-align:left; font-size:11px; color:var(--muted); font-weight:600;
+         text-transform:uppercase; letter-spacing:.03em;
+         padding:0 8px 8px 0; border-bottom:1px solid var(--divider); }
+    td { padding:7px 8px 7px 0; border-bottom:1px solid var(--divider); }
+    tr:last-child td { border-bottom:none; }
+    .win  { color:var(--up); font-weight:600; }
+    .loss { color:var(--down); font-weight:600; }
+    .muted { color:var(--muted); }
+    .empty { color:var(--muted); padding:14px 0; text-align:center; }
+
+    /* ── Сводка ограничителей ───────────────────────────────────────── */
+    .limits { display:grid; grid-template-columns:repeat(2,1fr); gap:10px 18px; }
+    .limit { display:flex; justify-content:space-between; align-items:baseline;
+             gap:10px; }
+    .limit .name { color:var(--muted); font-size:12px; }
+    .limit .val { font-weight:600; font-variant-numeric:tabular-nums; }
+    .limit .val.danger { color:var(--down); }
+    .limit .val.warn { color:var(--warn); }
+
+    #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+             background:var(--card); border:1px solid var(--divider);
+             border-radius:8px; padding:11px 18px; box-shadow:var(--shadow);
+             display:none; font-weight:600; }
+    #toast.err { border-color:var(--down); color:var(--down); }
+    #toast.ok { border-color:var(--up); color:var(--up); }
+
+    @media (max-width:900px) { #grid { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<div id="grid">
+
+    <!-- Шапка -->
+    <div class="card wide">
+        <div id="head">
+            <div id="mode" class="mode-dry">DRY</div>
+            <div class="metric">
+                <span class="label">Баланс</span>
+                <span class="value" id="balance">—</span>
+            </div>
+            <div class="metric">
+                <span class="label">Выплата</span>
+                <span class="value" id="payout">—</span>
+            </div>
+            <div class="metric">
+                <span class="label">Безубыток</span>
+                <span class="value" id="breakeven">—</span>
+            </div>
+            <div class="metric">
+                <span class="label">P&amp;L за сутки</span>
+                <span class="value" id="pnl">—</span>
+            </div>
+            <div id="conn"><span id="dot"></span><span id="connText">нет связи</span></div>
+        </div>
+    </div>
+
+    <!-- Управление -->
+    <div class="card wide">
+        <div class="banner" id="edgeBanner"></div>
+        <div class="banner" id="stopBanner"></div>
+        <div id="controls">
+            <select id="symbol"></select>
+            <input id="amount" type="number" min="1" step="1" value="1" title="ставка">
+            <button id="btnCall" class="big">▲ CALL</button>
+            <button id="btnPut" class="big">▼ PUT</button>
+            <button id="btnStop">■ STOP</button>
+            <button id="btnResume">снять стоп</button>
+        </div>
+    </div>
+
+    <!-- Открытые сделки -->
+    <div class="card">
+        <h2>Открытые сделки</h2>
+        <div id="openWrap"><div class="empty">нет открытых сделок</div></div>
+    </div>
+
+    <!-- Ограничители -->
+    <div class="card">
+        <h2>Ограничители</h2>
+        <div class="limits" id="limits"></div>
+    </div>
+
+    <!-- Лента сделок -->
+    <div class="card wide">
+        <h2>Последние сделки</h2>
+        <div id="tradesWrap"><div class="empty">сделок ещё не было</div></div>
+    </div>
+
+    <!-- События -->
+    <div class="card wide">
+        <h2>События</h2>
+        <div id="eventsWrap"><div class="empty">пусто</div></div>
+    </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+/* Панель показывает состояние бота и умеет открывать сделки.
+   Сервер шлёт полный срез раз в секунду — дельт нет намеренно:
+   объём мизерный, а полный срез переживает переподключение без
+   какой-либо синхронизации. */
+
+const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+let ws = null, state = null;
+
+/* ── связь ──────────────────────────────────────────────────────────── */
+function connect() {
+    try { ws = new WebSocket(WS_URL); }
+    catch (e) { setTimeout(connect, 2000); return; }
+
+    ws.onopen = () => setConn(true);
+    ws.onclose = () => { setConn(false); setTimeout(connect, 2000); };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.type === "state") { state = msg; render(msg); }
+        else if (msg.type === "reply") { toast(msg.message, msg.status); }
+    };
+}
+
+function setConn(on) {
+    document.getElementById("dot").classList.toggle("on", on);
+    document.getElementById("connText").textContent = on ? "на связи" : "нет связи";
+}
+
+function send(payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { toast("нет связи", "error"); return; }
+    ws.send(JSON.stringify(payload));
+}
+
+/* ── отрисовка ──────────────────────────────────────────────────────── */
+function render(s) {
+    // Режим — крупно и цветом: это первое, что должно быть видно.
+    const mode = document.getElementById("mode");
+    mode.textContent = s.mode.toUpperCase();
+    mode.className = "mode-" + s.mode;
+
+    document.getElementById("balance").textContent =
+        s.balance ? `${s.balance.amount.toFixed(2)} ${s.balance.currency}` : "—";
+
+    document.getElementById("payout").textContent =
+        s.payout_percent != null ? s.payout_percent + "%" : "—";
+    document.getElementById("breakeven").textContent =
+        s.payout_breakeven != null ? s.payout_breakeven.toFixed(1) + "%" : "—";
+
+    const pnl = document.getElementById("pnl");
+    const pnlValue = s.stats ? s.stats.pnl : 0;
+    pnl.textContent = (pnlValue >= 0 ? "+" : "") + pnlValue.toFixed(2);
+    pnl.className = "value " + (pnlValue > 0 ? "win" : pnlValue < 0 ? "loss" : "");
+
+    renderBanners(s);
+    renderSymbols(s);
+    renderOpen(s.open_positions || []);
+    renderLimits(s);
+    renderTrades(s.trades || []);
+    renderEvents(s.events || []);
+    renderButtons(s);
+}
+
+function renderBanners(s) {
+    // Окно у начала часа: выплата падает 82% → 60%, безубыточный винрейт
+    // прыгает 54.9% → 62.5%. Подтверждено живым замером 2026-08-05.
+    const edge = document.getElementById("edgeBanner");
+    if (s.hour_edge) {
+        edge.textContent = "⚠ ОКНО У НАЧАЛА ЧАСА — выплата урезана до 60%, " +
+                           "безубыточный винрейт 62.5%. Входы заблокированы.";
+        edge.classList.add("show");
+    } else if (s.minutes_to_hour_edge != null && s.minutes_to_hour_edge <= 5) {
+        edge.textContent = `⚠ до окна у начала часа ${s.minutes_to_hour_edge} мин`;
+        edge.classList.add("show");
+    } else {
+        edge.classList.remove("show");
+    }
+
+    const stop = document.getElementById("stopBanner");
+    const halted = s.risk && s.risk.halted;
+    if (s.kill_switch || halted) {
+        stop.textContent = s.kill_switch
+            ? "■ KILL-SWITCH ВЗВЕДЁН — новые входы запрещены"
+            : "■ ТОРГОВЛЯ ОСТАНОВЛЕНА: " + halted;
+        stop.classList.add("show");
+    } else {
+        stop.classList.remove("show");
+    }
+}
+
+function renderSymbols(s) {
+    const select = document.getElementById("symbol");
+    if (select.options.length === (s.symbols || []).length) return;
+    select.innerHTML = "";
+    (s.symbols || []).forEach(sym => {
+        const option = document.createElement("option");
+        option.value = sym; option.textContent = sym;
+        select.appendChild(option);
+    });
+}
+
+function renderOpen(positions) {
+    const wrap = document.getElementById("openWrap");
+    if (!positions.length) {
+        wrap.innerHTML = '<div class="empty">нет открытых сделок</div>';
+        return;
+    }
+    let html = "<table><tr><th>Инструмент</th><th>Напр.</th><th>Ставка</th>" +
+               "<th>Вход</th><th>До экспирации</th></tr>";
+    positions.forEach(p => {
+        const left = p.seconds_left != null ? Math.max(0, Math.round(p.seconds_left)) : null;
+        html += `<tr>
+            <td>${p.symbol}</td>
+            <td class="${p.direction === 'call' ? 'win' : 'loss'}">
+                ${p.direction === 'call' ? '▲ CALL' : '▼ PUT'}</td>
+            <td>${p.investment}</td>
+            <td>${p.entry_price != null ? p.entry_price : '—'}</td>
+            <td>${left != null ? left + ' с' : '—'}</td>
+        </tr>`;
+    });
+    wrap.innerHTML = html + "</table>";
+}
+
+function renderLimits(s) {
+    const risk = s.risk;
+    const box = document.getElementById("limits");
+    if (!risk) { box.innerHTML = '<div class="empty">ограничители не подключены</div>'; return; }
+
+    const rows = [
+        ["Сделок сегодня", `${risk.trades_today} / ${risk.max_trades_per_day}`,
+         risk.trades_today >= risk.max_trades_per_day ? "danger" : ""],
+        ["Убытков подряд", `${risk.consecutive_losses} / ${risk.max_consecutive_losses}`,
+         risk.consecutive_losses >= risk.max_consecutive_losses ? "danger" :
+         risk.consecutive_losses > 0 ? "warn" : ""],
+        ["Просадка за день", `${risk.pnl_today} / −${risk.max_daily_loss}`,
+         risk.pnl_today <= -risk.max_daily_loss ? "danger" : ""],
+        ["Открыто сейчас", `${risk.open_count} / ${risk.max_concurrent}`, ""],
+        ["Кулдаун", risk.cooldown_left_sec != null ? risk.cooldown_left_sec + " с" : "—",
+         risk.cooldown_left_sec != null ? "warn" : ""],
+        ["До окна у часа", risk.hour_edge ? "идёт сейчас" : risk.minutes_to_hour_edge + " мин",
+         risk.hour_edge ? "danger" : ""],
+    ];
+
+    box.innerHTML = rows.map(([name, value, cls]) =>
+        `<div class="limit"><span class="name">${name}</span>` +
+        `<span class="val ${cls}">${value}</span></div>`).join("");
+}
+
+function renderTrades(trades) {
+    const wrap = document.getElementById("tradesWrap");
+    if (!trades.length) {
+        wrap.innerHTML = '<div class="empty">сделок ещё не было</div>';
+        return;
+    }
+    let html = "<table><tr><th>Время</th><th>Режим</th><th>Инструмент</th>" +
+               "<th>Напр.</th><th>Ставка</th><th>Вход</th>" +
+               "<th>Задержка</th><th>Итог</th><th>P&amp;L</th><th>Источник</th></tr>";
+    trades.forEach(t => {
+        const time = new Date(t.created_ts * 1000).toLocaleTimeString("ru-RU");
+        const cls = t.result === "win" ? "win" : t.result === "loss" ? "loss" : "muted";
+        html += `<tr>
+            <td class="muted">${time}</td>
+            <td class="muted">${t.mode}</td>
+            <td>${t.symbol}</td>
+            <td class="${t.direction === 'call' ? 'win' : 'loss'}">
+                ${t.direction === 'call' ? '▲' : '▼'}</td>
+            <td>${t.investment}</td>
+            <td>${t.entry_price != null ? t.entry_price : '—'}</td>
+            <td>${t.latency_ms != null ? t.latency_ms + ' мс' : '—'}</td>
+            <td class="${cls}">${t.result || 'ждём'}</td>
+            <td class="${cls}">${t.pnl != null ? (t.pnl > 0 ? '+' : '') + t.pnl : '—'}</td>
+            <td class="muted">${t.source || '—'}</td>
+        </tr>`;
+    });
+    wrap.innerHTML = html + "</table>";
+}
+
+function renderEvents(events) {
+    const wrap = document.getElementById("eventsWrap");
+    if (!events.length) { wrap.innerHTML = '<div class="empty">пусто</div>'; return; }
+    let html = "<table>";
+    events.forEach(e => {
+        const time = new Date(e.ts * 1000).toLocaleTimeString("ru-RU");
+        const cls = e.kind === "error" ? "loss" : e.kind === "risk" ? "warn" : "muted";
+        html += `<tr><td class="muted" style="width:80px">${time}</td>` +
+                `<td class="${cls}" style="width:70px">${e.kind}</td>` +
+                `<td>${e.message}</td></tr>`;
+    });
+    wrap.innerHTML = html + "</table>";
+}
+
+function renderButtons(s) {
+    // Кнопки входа гаснут, когда вход запрещён: нажимать бессмысленно,
+    // и лучше видеть это до нажатия, чем получать отказ после.
+    const blocked = s.kill_switch || (s.risk && s.risk.halted) || s.hour_edge;
+    document.getElementById("btnCall").disabled = blocked;
+    document.getElementById("btnPut").disabled = blocked;
+    document.getElementById("btnResume").disabled =
+        !(s.kill_switch || (s.risk && s.risk.halted));
+}
+
+/* ── команды ────────────────────────────────────────────────────────── */
+function fire(direction) {
+    const symbol = document.getElementById("symbol").value;
+    const amount = parseFloat(document.getElementById("amount").value) || null;
+
+    // Подтверждение, когда речь о настоящих деньгах. В dry и shadow не
+    // спрашиваем — там ставки нет и переспрашивать не за что.
+    if (state && (state.mode === "demo" || state.mode === "live")) {
+        const what = `${direction.toUpperCase()} ${symbol}, ставка ${amount}`;
+        if (!confirm(`Открыть сделку на счёте ${state.account}?\n\n${what}`)) return;
+    }
+    send({cmd: direction, symbol: symbol, amount: amount});
+}
+
+document.getElementById("btnCall").onclick = () => fire("call");
+document.getElementById("btnPut").onclick = () => fire("put");
+document.getElementById("btnStop").onclick = () => {
+    if (confirm("Остановить торговлю?\n\nНовые входы будут запрещены, " +
+                "открытые сделки доведутся до расчёта.")) send({cmd: "stop"});
+};
+document.getElementById("btnResume").onclick = () => {
+    if (confirm("Снять стоп и разрешить входы?")) send({cmd: "resume"});
+};
+
+function toast(message, status) {
+    const box = document.getElementById("toast");
+    box.textContent = message;
+    box.className = status === "error" ? "err" : "ok";
+    box.style.display = "block";
+    clearTimeout(box._timer);
+    box._timer = setTimeout(() => { box.style.display = "none"; }, 3500);
+}
+
+connect();
+</script>
+</body>
+</html>

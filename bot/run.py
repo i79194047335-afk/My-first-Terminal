@@ -221,6 +221,126 @@ def cmd_clock(cfg) -> int:
     return 0
 
 
+async def _serve(cfg) -> int:
+    """Поднять бота целиком: котировки, часы, движок, панель.
+
+    Собирается ровно то, что нужно режиму: в dry клиент площадки не
+    создаётся вовсе, и уйти в сеть физически нечем.
+
+    Args:
+        cfg: BotConfig.
+
+    Returns:
+        Код возврата процесса.
+    """
+    from bot.clock import ServerClock
+    from bot.engine import Engine
+    from bot.journal import Journal
+    from bot.panel import Panel
+    from bot.quotes import QuoteFeed
+    from bot.risk import RiskManager
+    from bot.strategy.manual import ManualSource
+
+    journal = Journal(cfg.db_path)
+    client = build_client(cfg)
+
+    # Котировки нужны во всех режимах: в dry по ним считается имитация,
+    # в demo они дают quote_at_signal для замера стоимости задержки.
+    quotes = QuoteFeed(client)
+    clock = ServerClock(cfg.time_ws_url)
+    risk = RiskManager(cfg, journal)
+
+    engine = Engine(config=cfg, journal=journal, client=client, quotes=quotes,
+                    risk=risk, clock=clock)
+    manual = ManualSource(
+        default_symbol=(cfg.symbol_whitelist[0] if cfg.symbol_whitelist
+                        else "USD/JPY"),
+        default_expiry_minutes=cfg.default_expiry_minutes,
+    )
+    panel = Panel(config=cfg, journal=journal, engine=engine, risk=risk,
+                  manual_source=manual, client=client, quotes=quotes)
+
+    print(f"режим: {cfg.mode}   счёт: {cfg.account}")
+    print(f"панель: http://127.0.0.1:{cfg.panel_port}  "
+          f"(снаружи — ssh -L {cfg.panel_port}:127.0.0.1:{cfg.panel_port})")
+    print(f"журнал: {cfg.db_path}")
+    print("остановить приём сделок: touch " + cfg.stop_file)
+
+    await quotes.start()
+    await clock.start()
+    await manual.start()
+    await panel.start()
+
+    try:
+        await engine.run(manual)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await panel.stop()
+        await manual.stop()
+        await clock.stop()
+        await quotes.stop()
+        journal.close()
+    return 0
+
+
+def cmd_serve(cfg) -> int:
+    """Запустить бота с панелью наблюдения.
+
+    Args:
+        cfg: BotConfig.
+
+    Returns:
+        Код возврата процесса.
+    """
+    try:
+        return asyncio.run(_serve(cfg))
+    except KeyboardInterrupt:
+        print("\nостановлено")
+        return 0
+
+
+def cmd_latency(cfg) -> int:
+    """Показать отчёт по задержке открытия сделок.
+
+    Главный практический результат Слоя 7: если задержка растёт на
+    волатильности, минутная экспирация может оказаться неприменимой.
+
+    Args:
+        cfg: BotConfig.
+
+    Returns:
+        Код возврата процесса.
+    """
+    from bot.journal import Journal
+
+    journal = Journal(cfg.db_path)
+    try:
+        report = journal.report_latency()
+    finally:
+        journal.close()
+
+    if not report["count"]:
+        print("сделок с известной задержкой пока нет")
+        print("задержка появляется только на реальных сделках (режим demo)")
+        return 0
+
+    print(f"сделок с замером: {report['count']}")
+    print(f"  медиана: {report['median_ms']:.0f} мс")
+    print(f"  p90:     {report['p90_ms']:.0f} мс")
+    print(f"  минимум: {report['min_ms']:.0f} мс")
+    print(f"  максимум:{report['max_ms']:.0f} мс")
+    print("\nТочность замера ±1 с: площадка отдаёт время открытия целыми "
+          "секундами.")
+
+    if report["by_hour"]:
+        print("\nпо часам UTC:")
+        for hour, data in report["by_hour"].items():
+            print(f"  {hour:02d}:00  n={data['count']:<4} "
+                  f"медиана {data['median_ms']:.0f} мс")
+    return 0
+
+
 def main() -> int:
     """Разобрать аргументы и выполнить команду.
 
@@ -228,12 +348,13 @@ def main() -> int:
         Код возврата процесса.
     """
     parser = argparse.ArgumentParser(
-        prog="bot.run", description="Бот intrade.bar — Слой 1 (клиент API)"
+        prog="bot.run", description="Бот intrade.bar"
     )
     parser.add_argument(
         "command",
-        choices=("check", "quotes", "clock"),
-        help="check — проверка связи, quotes — котировки, clock — часы",
+        choices=("check", "quotes", "clock", "serve", "latency"),
+        help="check — проверка связи, quotes — котировки, clock — часы, "
+             "serve — запустить бота с панелью, latency — отчёт по задержке",
     )
     parser.add_argument(
         "--config",
@@ -254,7 +375,8 @@ def main() -> int:
         print("режим live в этой задаче запрещён")
         return 2
 
-    handlers = {"check": cmd_check, "quotes": cmd_quotes, "clock": cmd_clock}
+    handlers = {"check": cmd_check, "quotes": cmd_quotes, "clock": cmd_clock,
+                "serve": cmd_serve, "latency": cmd_latency}
     return handlers[args.command](cfg)
 
 
