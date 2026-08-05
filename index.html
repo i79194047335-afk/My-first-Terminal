@@ -1206,10 +1206,15 @@ function handleMessage(id, state, msg) {
             state.series.setData(state.data);
             setVolumeData(id, state.data);
             refreshSignalMarkers();
-            refreshShockMarkers();
             // Маркеры восстановлены из localStorage — журнал панели должен
             // знать о них, даже если её ещё не открывали.
             restoreShockLogFromDrawings();
+            // И обратно: сигнал мог прийти, пока ЭТА панель ещё грузилась
+            // (series/chart не созданы) — attachShockToPanes её пропустил, и
+            // маркер не появлялся до ручной перерисовки. Теперь панель, получив
+            // историю, сама подтягивает всё из журнала.
+            syncShockMarkersFromLog();
+            refreshShockMarkers();
             renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
             state.lastCandle = msg.data.at(-1);
 
@@ -3960,6 +3965,39 @@ function restoreShockLogFromDrawings() {
 }
 
 /**
+ * Повторять привязку маркера, пока панель не будет готова.
+ *
+ * @param {Object} ev Событие всплеска.
+ * @param {number} tries Сколько попыток осталось (по ~300 мс).
+ */
+function retryAttachShock(ev, tries) {
+    if (tries <= 0) return;
+    // Инструмент могли переключить, пока ждали — событие тогда уже не наше.
+    if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return;
+    if (attachShockToPanes(ev)) {
+        refreshShockMarkers();
+        return;
+    }
+    setTimeout(() => retryAttachShock(ev, tries - 1), 300);
+}
+
+/**
+ * Досоздать маркеры для событий журнала, которых нет на панелях.
+ *
+ * Зеркало restoreShockLogFromDrawings(). Нужна, потому что сигнал может
+ * прийти в момент, когда панель ещё не готова (`series`/`chart` не созданы
+ * при старте или после смены инструмента) — тогда attachShockToPanes её
+ * пропускает, событие остаётся только в журнале, и маркер не появляется до
+ * ручной перерисовки.
+ */
+function syncShockMarkersFromLog() {
+    shockLog.forEach(s => {
+        if (displaySymbol(s.symbol) !== displaySymbol(currentSymbol)) return;
+        attachShockToPanes(s);
+    });
+}
+
+/**
  * Перерисовать панель всплесков, если она открыта.
  */
 function renderShockPanel() {
@@ -4125,10 +4163,16 @@ function attachShockToPanes(ev) {
     // нет. Сравнение БЕЗ префикса провайдера: хаб шлёт wire-имя клиента.
     if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return false;
 
-    let attached = false;
+    // Успех — только когда маркер лёг на ВСЕ панели, которые вообще существуют
+    // в текущей раскладке. Возврат по принципу «хотя бы одна» скрывал случай,
+    // когда первая панель готова, а вторая ещё грузится: ретрай считал работу
+    // сделанной, и на второй панели маркера не появлялось.
+    let attached = true;
     [1, 2].forEach(paneId => {
         const st = panesState[paneId];
-        if (!st?.series) return;
+        // Панели нет в раскладке вовсе — не наша забота.
+        if (!st) return;
+        if (!st.series) { attached = false; return; }
         drawings[paneId] = drawings[paneId] || [];
         // Сигнал приходит по ЖИВОЙ свече; направление, σ и форма у неё ещё
         // уточняются до закрытия минуты — запись той же минуты обновляем
@@ -4164,7 +4208,6 @@ function attachShockToPanes(ev) {
             });
         }
         StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
-        attached = true;
     });
     return attached;
 }
@@ -4427,8 +4470,15 @@ function onShockEvent(ev) {
     // Маркер ставим ТОЛЬКО на панели с этим инструментом: на чужом графике
     // время свечи чужое, маркер повис бы в случайной точке. Событие остаётся
     // в журнале, и маркер появится после перехода по нему из панели.
-    attachShockToPanes(ev);
+    const attached = attachShockToPanes(ev);
     refreshShockMarkers();
+
+    // Панель могла быть ещё не готова (series/chart не созданы) — тогда
+    // маркера нет, хотя событие в журнале есть. Повторяем короткой серией
+    // попыток, чтобы маркер появился сам, без нажатия кнопки.
+    if (!attached && displaySymbol(ev.symbol) === displaySymbol(currentSymbol)) {
+        retryAttachShock(ev, 20);
+    }
 
     // Звучат только РЫВКИ вне окон тишины — решение принимает хаб (audible).
     // Размазанные события и подавленные окном остаются в панели и на графике,
