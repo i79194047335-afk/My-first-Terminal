@@ -15,12 +15,10 @@ import os
 from openai import OpenAI
 
 DEEPSEEK_BASE    = "https://api.deepseek.com"
-# deepseek-v4-pro — умнее flash (=алиас deepseek-chat): тоньше видит расхождения
-# консенсуса с техникой, глубже reasoning (сравнение 2026-07-18). Медленнее
-# (~80с vs 18с), но для крон-задачи 3×/сутки это неважно; токены дешёвые.
-DEEPSEEK_MODEL   = "deepseek-v4-pro"
-# Потолок ответа. Pro реально пишет ~7000 токенов на 4 пары (finish_reason=stop);
-# 7500 — запас от обрыва JSON, не цель. Платим за реально сгенерированное.
+# deepseek-chat (=flash) — быстрее (~18s vs ~80s pro), для брифинга хватает.
+DEEPSEEK_MODEL   = "deepseek-chat"
+# Потолок ответа. Flash пишет меньше pro, но 7500 — с запасом.
+# Платим за реально сгенерированное.
 DEFAULT_MAX_TOKENS = 7500
 
 

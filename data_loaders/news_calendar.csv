@@ -1,13 +1,19 @@
-ts_utc,currency,impact,event
-1784032200,USD,High,CPI m/m
-1784032200,USD,High,CPI y/y
-1784032200,USD,High,Core CPI m/m
-1784032200,USD,High,Core CPI y/y
-1784037600,USD,High,Fed Chairman Warsh Testifies
-1784118600,USD,High,Core PPI m/m
-1784118600,USD,High,PPI m/m
-1784123100,CAD,High,BOC Monetary Policy Report
-1784123100,CAD,High,BOC Rate Statement
-1784123100,CAD,High,Overnight Rate
-1784124000,USD,High,Fed Chairman Warsh Testifies
-1784126700,CAD,High,BOC Press Conference
+ts_utc,datetime_utc,currency,impact,event
+1784032200,2026-07-14 12:30,USD,High,CPI m/m
+1784032200,2026-07-14 12:30,USD,High,CPI y/y
+1784032200,2026-07-14 12:30,USD,High,Core CPI m/m
+1784032200,2026-07-14 12:30,USD,High,Core CPI y/y
+1784037600,2026-07-14 14:00,USD,High,Fed Chairman Warsh Testifies
+1784118600,2026-07-15 12:30,USD,High,Core PPI m/m
+1784118600,2026-07-15 12:30,USD,High,PPI m/m
+1784123100,2026-07-15 13:45,CAD,High,BOC Monetary Policy Report
+1784123100,2026-07-15 13:45,CAD,High,BOC Rate Statement
+1784123100,2026-07-15 13:45,CAD,High,Overnight Rate
+1784124000,2026-07-15 14:00,USD,High,Fed Chairman Warsh Testifies
+1784126700,2026-07-15 14:45,CAD,High,BOC Press Conference
+1785765600,2026-08-03 14:00,USD,High,ISM Manufacturing PMI
+1786105800,2026-08-07 12:30,CAD,High,Employment Change
+1786105800,2026-08-07 12:30,CAD,High,Unemployment Rate
+1786105800,2026-08-07 12:30,USD,High,Average Hourly Earnings m/m
+1786105800,2026-08-07 12:30,USD,High,Non-Farm Employment Change
+1786105800,2026-08-07 12:30,USD,High,Unemployment Rate

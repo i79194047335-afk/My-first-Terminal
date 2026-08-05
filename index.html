@@ -252,6 +252,19 @@
     #signalPanel.down { border-top: 3px solid #ef5350; }
     #signalPanel.skip { border-top: 3px solid #555; }
 
+    /* Панель всплесков. В отличие от #signalPanel кликабельна целиком:
+       по строке журнала переходим к свече сигнала.
+       Размеры +30% против первой версии — на 13" ноутбуке мелкий текст
+       не читался. */
+    #shockPanel {
+        position: absolute; left: 8px; top: 8px;
+        width: 390px; max-width: calc(70% - 16px);
+        background: rgba(15,15,15,0.94); color: #d1d4dc;
+        padding: 13px 16px; font-size: 15px; z-index: 2001;
+        box-sizing: border-box; border-radius: 5px; border: 1px solid #333;
+        display: none; box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    }
+
     /* Briefing panel — overlays right chart, scrollable */
     #briefPanel {
         position: absolute; left: 0; top: 0; width: 100%; height: 100%;
@@ -678,13 +691,17 @@
             <div id="rhMenu2" class="tb-more-menu rh-menu"></div>
             <div class="tb-spacer"></div>
             <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
-            <button id="signalLogBtn" class="tb-txt" onclick="toggleSignalPanel()" data-tip="Сигналы"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
+            <button id="signalLogBtn" class="tb-txt" onclick="toggleShockPanel()" data-tip="Сигналы — всплески"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
             <button id="tapeBtn" class="tb-ic" onclick="toggleTape()" data-tip="Лента крупных сделок"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
             <button id="infoBtn" class="tb-ic" onclick="toggleInfo()" data-tip="Карточка инструмента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
         </div>
         <div class="chart-wrapper" id="wrapper2">
             <div id="signalPanel"></div>
+            <!-- Панель всплесков (кнопка «Сигналы»). Показывает состояние
+                 движка даже когда сигналов нет — иначе тишину не отличить
+                 от поломки. -->
+            <div id="shockPanel"></div>
             <div id="briefPanel" style="display:none;"><div id="briefContent"></div></div>
             <!-- Карточка инструмента: mark/index, суточные объём и изменение,
                  открытый интерес, фандинг. Только у биржевых инструментов —
@@ -1006,6 +1023,9 @@ function wireSocket(id, state, els) {
         setTF(id, tf);
         ws.send(JSON.stringify({ type: "get_instruments" }));
         if (id === 1) ws.send(JSON.stringify({ type: "get_signals" }));
+        // Журнал всплесков за сутки: восстанавливает маркеры после рестарта
+        // хаба, когда localStorage пуст (другой браузер/чистый профиль).
+        if (id === 1) ws.send(JSON.stringify({ type: "get_shocks" }));
     };
     ws.onmessage = e => handleMessage(id, state, JSON.parse(e.data));
     ws.onclose   = () => scheduleReconnect(id, state);
@@ -1138,6 +1158,10 @@ function isDrawingActive() {
 const BROADCAST_TYPES = new Set([
     "alert", "alert_created", "analysis", "signal", "briefing",
     "signals_history", "instruments", "large_trade", "orderbook", "ticker",
+    // shock/shocks идут ВСЕМ и без requestId: всплеск приходит по паре, которую
+    // клиент может не смотреть. Без записи здесь фильтр устаревших ответов
+    // отбросил бы их молча (undefined !== state.requestId).
+    "shock", "shocks",
 ]);
 
 function handleMessage(id, state, msg) {
@@ -1182,6 +1206,16 @@ function handleMessage(id, state, msg) {
             state.series.setData(state.data);
             setVolumeData(id, state.data);
             refreshSignalMarkers();
+            // Маркеры восстановлены из localStorage — журнал панели должен
+            // знать о них, даже если её ещё не открывали.
+            restoreShockLogFromDrawings();
+            // И обратно: сигнал мог прийти, пока ЭТА панель ещё грузилась
+            // (series/chart не созданы) — attachShockToPanes её пропустил, и
+            // маркер не появлялся до ручной перерисовки. Теперь панель, получив
+            // историю, сама подтягивает всё из журнала.
+            syncShockMarkersFromLog();
+            refreshShockMarkers();
+            renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
             state.lastCandle = msg.data.at(-1);
 
             // Load or recompute indicators after first history
@@ -1340,6 +1374,56 @@ function handleMessage(id, state, msg) {
                 }
             });
         });
+    }
+
+    // Всплеск приходит по ЛЮБОЙ паре, не только по текущей: уведомление даёт
+    // перейти на инструмент сигнала, поэтому фильтра по currentSymbol здесь нет.
+    if (msg.type === "shock") {
+        onShockEvent(msg);
+        return;
+    }
+
+    // Журнал всплесков за сутки — ответ на get_shocks после переподключения.
+    if (msg.type === "shocks") {
+        (msg.events || []).forEach(ev => {
+            recordShock(ev);
+            shockWindowState.set(ev.symbol, ev.blocked || null);
+            [1, 2].forEach(paneId => {
+                const st = panesState[paneId];
+                if (!st?.series) return;
+                if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return;
+                drawings[paneId] = drawings[paneId] || [];
+                const existing = drawings[paneId].find(
+                    d => d.type === "shock" && d.time === ev.time);
+                if (existing) {
+                    // Журнал хаба точнее локальной копии: свеча уже закрылась.
+                    existing.price     = ev.price;
+                    existing.high      = ev.high ?? existing.high ?? null;
+                    existing.low       = ev.low ?? existing.low ?? null;
+                    existing.direction = ev.direction;
+                    existing.sigma     = ev.sigma;
+                    existing.blocked   = ev.blocked || null;
+                    existing.shapeKind = ev.shape || null;
+                    existing.coverage  = ev.coverage ?? null;
+                    existing.origin    = ev.origin || null;
+                    existing.audible   = !!ev.audible;
+                    return;
+                }
+                drawings[paneId].push({
+                    paneId, type: "shock", time: ev.time, price: ev.price,
+                    high: ev.high ?? null, low: ev.low ?? null,
+                    direction: ev.direction, sigma: ev.sigma,
+                    blocked: ev.blocked || null,
+                    shapeKind: ev.shape || null, coverage: ev.coverage ?? null,
+                    origin: ev.origin || null, audible: !!ev.audible,
+                });
+                StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+            });
+        });
+        refreshShockMarkers();
+        renderShockPanel();
+        renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
+        return;
     }
 
     if (msg.type === "alert_created") {
@@ -2317,6 +2401,17 @@ function switchSymbol(symbol) {
             wireSocket(id, state, getPaneElements(id));
         }
     });
+    // Селектор выставляется ЗДЕСЬ, а не только при инициализации: switchSymbol
+    // зовут и программно (переход по сигналу из панели), и тогда выпадающий
+    // список оставался на прежней паре, противореча тому, что на графике.
+    const symSelect = document.getElementById("symbolSelect");
+    if (symSelect && symSelect.value !== symbol) {
+        // Значение может быть в другом формате имени (с префиксом провайдера
+        // или без) — ищем совпадающий пункт, прежде чем присваивать.
+        const match = Array.from(symSelect.options).find(
+            o => o.value === symbol || displaySymbol(o.value) === displaySymbol(symbol));
+        if (match) symSelect.value = match.value;
+    }
     syncOrderbookButtons();
     syncRossHooksButtons();
     refreshSignalMarkers();
@@ -3776,6 +3871,624 @@ function showAlertPopup(text) {
 }
 
 // ============================================================================
+// ВСПЛЕСКИ (shock) — сигнальщик по четырём форекс-парам
+// ============================================================================
+//
+// Хаб считает всплеск по ЗАКРЫТОЙ M1: диапазон свечи против её же последних 30
+// (z-score), пороги у каждой пары свои (USD/JPY 8σ, AUD/USD 5σ, USD/CAD 4.5σ —
+// это их p99.9 за две недели). EUR/USD — ведущая: сама сигналов не даёт, но
+// обязана быть спокойной, иначе всплеск — общий долларовый импульс, а не
+// событие пары.
+//
+// Всплеск в окне тишины (сессия ±30 мин, новости ±15 мин) НЕ звучит и не
+// всплывает, но маркер ставится серым — владелец просил видеть индикацию всё
+// время ограничения.
+//
+// ВАЖНО: маркер отмечает необычную свечу, направление он НЕ предсказывает —
+// бэктест разворота эджа не дал (42.9% против базовых 52.0%).
+
+// Цвет маркеров всплеска. Между голубым и синим (azure): заметен и на светлой,
+// и на тёмной теме, и НЕ совпадает с зелёным/красным свечей — маркер про место
+// события, а не про направление.
+const SHOCK_MARKER_COLOR = "#1E88E5";
+
+// Активные окна тишины по инструментам: symbol -> {kind, label}.
+const shockWindowState = new Map();
+
+// Журнал всплесков для панели: живые события + ответ на get_shocks.
+// Живёт только в памяти вкладки; источник истины — хаб (окно суток).
+const shockLog = [];
+let shockPanelOpen = false;
+
+/**
+ * Добавить событие в журнал панели, не плодя дублей.
+ *
+ * Сигнал приходит по ЖИВОЙ свече и может обновиться на закрытии (σ уточняется),
+ * поэтому запись той же минуты обновляется на месте.
+ * @param {Object} ev Событие всплеска.
+ */
+function recordShock(ev) {
+    const i = shockLog.findIndex(s => s.time === ev.time && s.symbol === ev.symbol);
+    if (i >= 0) shockLog[i] = ev;
+    else shockLog.push(ev);
+    shockLog.sort((a, b) => b.time - a.time);   // свежие сверху
+    if (shockLog.length > 200) shockLog.length = 200;
+}
+
+/**
+ * Восстановить журнал панели из сохранённых маркеров.
+ *
+ * Маркеры лежат в localStorage и переживают F5, а `shockLog` — нет: он живёт
+ * в памяти вкладки. Журнал хаба тоже в памяти и обнуляется его рестартом.
+ * Без этого после перезагрузки маркеры на графике были, а панель писала
+ * «Сигналов нет» — прямая ложь при наличии данных под рукой.
+ *
+ * Берём рисунки ОБЕИХ панелей и все инструменты из layout: журнал по смыслу
+ * общий, а не привязан к тому, что открыто сейчас.
+ */
+function restoreShockLogFromDrawings() {
+    const seen = new Set(shockLog.map(s => s.time + "|" + s.symbol));
+
+    const absorb = (symbol, list) => {
+        (list || []).forEach(d => {
+            if (d.type !== "shock") return;
+            const key = d.time + "|" + symbol;
+            if (seen.has(key)) return;
+            seen.add(key);
+            shockLog.push({
+                symbol,
+                time: d.time,
+                price: d.price,
+                direction: d.direction,
+                sigma: d.sigma,
+                blocked: d.blocked || null,
+                shape: d.shapeKind || null,
+                coverage: d.coverage ?? null,
+                origin: d.origin || null,
+                audible: !!d.audible,
+            });
+        });
+    };
+
+    // Текущие панели — самые свежие данные.
+    [1, 2].forEach(paneId => absorb(currentSymbol, drawings[paneId]));
+
+    // Остальные инструменты — из сохранённого layout.
+    const saved = layout.drawings || {};
+    Object.keys(saved).forEach(symbol => {
+        const perPane = saved[symbol] || {};
+        Object.keys(perPane).forEach(paneId => absorb(symbol, perPane[paneId]));
+    });
+
+    shockLog.sort((a, b) => b.time - a.time);
+    if (shockLog.length > 200) shockLog.length = 200;
+}
+
+/**
+ * Повторять привязку маркера, пока панель не будет готова.
+ *
+ * @param {Object} ev Событие всплеска.
+ * @param {number} tries Сколько попыток осталось (по ~300 мс).
+ */
+function retryAttachShock(ev, tries) {
+    if (tries <= 0) return;
+    // Инструмент могли переключить, пока ждали — событие тогда уже не наше.
+    if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return;
+    if (attachShockToPanes(ev)) {
+        refreshShockMarkers();
+        return;
+    }
+    setTimeout(() => retryAttachShock(ev, tries - 1), 300);
+}
+
+/**
+ * Досоздать маркеры для событий журнала, которых нет на панелях.
+ *
+ * Зеркало restoreShockLogFromDrawings(). Нужна, потому что сигнал может
+ * прийти в момент, когда панель ещё не готова (`series`/`chart` не созданы
+ * при старте или после смены инструмента) — тогда attachShockToPanes её
+ * пропускает, событие остаётся только в журнале, и маркер не появляется до
+ * ручной перерисовки.
+ */
+function syncShockMarkersFromLog() {
+    shockLog.forEach(s => {
+        if (displaySymbol(s.symbol) !== displaySymbol(currentSymbol)) return;
+        attachShockToPanes(s);
+    });
+}
+
+/**
+ * Перерисовать панель всплесков, если она открыта.
+ */
+function renderShockPanel() {
+    const panel = document.getElementById("shockPanel");
+    if (!panel || !shockPanelOpen) return;
+
+    const head =
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
+          '<b style="font-size:17px;">Сигналы — всплески</b>' +
+          '<span style="flex:1"></span>' +
+          '<span onclick="toggleShockPanel()" style="cursor:pointer;color:#888;' +
+                'font-weight:bold;padding:0 4px;font-size:17px;">✕</span>' +
+        '</div>';
+
+    // Что именно показывает движок — иначе пустой список неотличим от поломки.
+    const thresholds = 'USD/JPY 6σ · AUD/USD 4.5σ · USD/CAD 4.5σ';
+
+    let body;
+    if (!shockLog.length) {
+        body =
+            '<div style="color:#888;font-size:15px;line-height:1.6;">' +
+              'Сигналов нет.<br>' +
+              '<span style="color:#666;font-size:14px;">' +
+                'Движок работает и ждёт всплеск: диапазон свечи M1 против своих ' +
+                'последних 30.<br>Пороги: ' + thresholds + '.<br>' +
+                '<span style="color:#ffb74d">⚡ рывок</span> — ≥70% размаха за 10 с, ' +
+                'звучит · <span style="color:#8a8a8a">〜 размазан</span> — молча в список.<br>' +
+                '<b>SOLO</b> — двинулась только эта пара · <b>IN STREAM</b> — ' +
+                'общее движение доллара (EUR/USD шёл вместе).<br>' +
+                'Ожидаемо ~11 событий в сутки, из них со звуком ~4–5.' +
+              '</span>' +
+            '</div>';
+    } else {
+        const rows = shockLog.map((s, idx) => {
+            const up    = s.direction > 0;
+            const color = s.blocked ? "#787b86" : (up ? "#26a69a" : "#ef5350");
+            const arrow = up ? "▲" : "▼";
+            const d     = new Date(s.time * 1000);
+            const when  = d.toISOString().slice(5, 16).replace("T", " ");
+            const note  = s.blocked
+                ? '<div style="font-size:13px;color:#7a6a3a;">подавлен: ' +
+                  (s.blocked.kind === "news" ? "новости" : "сессия") + ' — ' +
+                  s.blocked.label + '</div>'
+                : '';
+            // Форма: рывок за ≤10 с против размазанного движения. Не фильтр —
+            // оба вида в списке, но с разной пометкой.
+            const cov = s.coverage != null ? Math.round(s.coverage * 100) + '%' : '';
+            const shapeNote = s.shape === "burst"
+                ? '<div style="font-size:13px;color:#ffb74d;">⚡ рывок за 10 с — ' +
+                  cov + ' размаха</div>'
+                : (s.shape === "spread"
+                    ? '<div style="font-size:13px;color:#8a8a8a;">〜 движение размазано — ' +
+                      'лучшие 10 с дали ' + cov + '</div>'
+                    : '');
+            // SOLO выделен цветом: он означает, что двинулась именно эта пара,
+            // а не весь доллар — самое содержательное различие в списке.
+            const badge = s.origin === "solo"
+                ? '<span style="background:#1b5e20;color:#a5d6a7;padding:0 4px;' +
+                  'border-radius:3px;font-size:12px;font-weight:bold;">SOLO</span> '
+                : (s.origin === "in_stream"
+                    ? '<span style="background:#37474f;color:#b0bec5;padding:0 4px;' +
+                      'border-radius:3px;font-size:12px;">IN STREAM</span> '
+                    : '');
+            // Молча прошедшие события помечаем, чтобы не искать, почему не было звука.
+            const silent = (!s.audible && !s.blocked)
+                ? '<span style="color:#555;font-size:12px;"> (без звука)</span>' : '';
+            return (
+                '<div onclick="gotoShock(' + idx + ')" ' +
+                     'style="padding:8px 10px;border-radius:4px;cursor:pointer;' +
+                            'border-left:3px solid ' + color + ';background:#00000022;' +
+                            'margin-bottom:4px;" ' +
+                     'onmouseover="this.style.background=\'#ffffff14\'" ' +
+                     'onmouseout="this.style.background=\'#00000022\'">' +
+                  '<div style="font-size:15px;">' +
+                    '<span style="color:' + color + '">' + arrow + '</span> ' +
+                    '<b>' + s.symbol + '</b> ' +
+                    '<span style="color:#aaa">' + s.sigma.toFixed(1) + 'σ</span> ' +
+                    '<span style="color:#666;font-size:14px;">' + when + ' UTC</span>' +
+                    silent +
+                  '</div>' +
+                  '<div style="margin-top:3px;">' + badge + '</div>' +
+                  shapeNote + note +
+                '</div>');
+        }).join("");
+        body = '<div style="max-height:420px;overflow-y:auto;">' + rows + '</div>' +
+               '<div style="font-size:13px;color:#666;margin-top:8px;">' +
+                 'клик — перейти к свече · ' + thresholds +
+               '</div>';
+    }
+
+    panel.innerHTML = head + body;
+    panel.style.display = "block";
+}
+
+/**
+ * Открыть/закрыть панель всплесков (кнопка «Сигналы»).
+ */
+function toggleShockPanel() {
+    const panel = document.getElementById("shockPanel");
+    const btn   = document.getElementById("signalLogBtn");
+    shockPanelOpen = !shockPanelOpen;
+
+    if (shockPanelOpen) {
+        // Сначала поднимаем то, что уже сохранено локально: после F5 маркеры
+        // на графике есть, и панель обязана показывать их, а не «сигналов нет».
+        restoreShockLogFromDrawings();
+        // Журнал хаба может быть полнее локального: другая вкладка, F5.
+        // Достаточно ЛЮБОГО живого сокета — журнал общий, не по панелям;
+        // первая панель могла быть закрыта или переподключаться.
+        const ws = [1, 2]
+            .map(id => panesState[id]?.ws)
+            .find(s => s && s.readyState === WebSocket.OPEN);
+        if (ws) {
+            try { ws.send(JSON.stringify({ type: "get_shocks" })); } catch (e) {}
+        }
+        if (btn) btn.classList.add("on");
+        renderShockPanel();
+    } else {
+        if (btn) btn.classList.remove("on");
+        if (panel) panel.style.display = "none";
+    }
+}
+
+/**
+ * Перейти к свече сигнала: инструмент, затем центрирование графика.
+ *
+ * @param {number} idx Индекс в shockLog.
+ */
+function gotoShock(idx) {
+    const s = shockLog[idx];
+    if (!s) return;
+
+    // Сравниваем БЕЗ префикса провайдера: хаб шлёт символ в wire-формате
+    // клиента, и "fxcm:AUD/USD" против "AUD/USD" — тот же инструмент. Без
+    // нормализации был бы лишний полный switchSymbol с перезагрузкой истории
+    // вместо простого центрирования.
+    if (displaySymbol(s.symbol) !== displaySymbol(currentSymbol)) {
+        switchSymbol(s.symbol);
+        // История нового инструмента приходит асинхронно — центрируем и
+        // ставим маркер, когда бары действительно на графике, иначе
+        // setVisibleRange отработает по пустой серии и ничего не сдвинет.
+        centerOnShockWhenReady(s, 12);
+    } else {
+        centerOnTime(s.time);
+        // Маркер мог не существовать: событие по ЧУЖОМУ инструменту при
+        // получении отбрасывалось (панели показывают только currentSymbol),
+        // и после переключения его никто не создавал — маркер появлялся лишь
+        // со второго клика по строке.
+        attachShockToPanes(s);
+        refreshShockMarkers();
+    }
+}
+
+/**
+ * Привязать событие к панелям текущего инструмента (создать/обновить маркер).
+ *
+ * @param {Object} ev Событие всплеска (живое или из журнала).
+ * @returns {boolean} true, если хоть одна панель приняла маркер.
+ */
+function attachShockToPanes(ev) {
+    if (!ev || typeof ev.time !== "number") return false;
+    // Панели всегда показывают currentSymbol — отдельного st.symbol в проекте
+    // нет. Сравнение БЕЗ префикса провайдера: хаб шлёт wire-имя клиента.
+    if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) return false;
+
+    // Успех — только когда маркер лёг на ВСЕ панели, которые вообще существуют
+    // в текущей раскладке. Возврат по принципу «хотя бы одна» скрывал случай,
+    // когда первая панель готова, а вторая ещё грузится: ретрай считал работу
+    // сделанной, и на второй панели маркера не появлялось.
+    let attached = true;
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        // Панели нет в раскладке вовсе — не наша забота.
+        if (!st) return;
+        if (!st.series) { attached = false; return; }
+        drawings[paneId] = drawings[paneId] || [];
+        // Сигнал приходит по ЖИВОЙ свече; направление, σ и форма у неё ещё
+        // уточняются до закрытия минуты — запись той же минуты обновляем
+        // на месте, а не плодим вторую.
+        const existing = drawings[paneId].find(
+            d => d.type === "shock" && d.time === ev.time);
+        if (existing) {
+            existing.price     = ev.price;
+            existing.high      = ev.high ?? existing.high ?? null;
+            existing.low       = ev.low ?? existing.low ?? null;
+            existing.direction = ev.direction;
+            existing.sigma     = ev.sigma;
+            existing.blocked   = ev.blocked || null;
+            existing.shapeKind = ev.shape || existing.shapeKind || null;
+            existing.coverage  = ev.coverage ?? existing.coverage ?? null;
+            existing.origin    = ev.origin || existing.origin || null;
+            existing.audible   = !!ev.audible;
+        } else {
+            drawings[paneId].push({
+                paneId,
+                type: "shock",
+                time: ev.time,
+                price: ev.price,
+                high: ev.high ?? null,
+                low: ev.low ?? null,
+                direction: ev.direction,
+                sigma: ev.sigma,
+                blocked: ev.blocked || null,
+                shapeKind: ev.shape || null,
+                coverage: ev.coverage ?? null,
+                origin: ev.origin || null,
+                audible: !!ev.audible,
+            });
+        }
+        StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+    });
+    return attached;
+}
+
+/**
+ * Центрировать ВСЕ видимые панели на времени свечи.
+ *
+ * При сплите обе панели показывают один инструмент, и промотать надо обе —
+ * иначе вторую приходится крутить руками. ТФ у панелей разные, поэтому окно
+ * считается для каждой отдельно.
+ *
+ * @param {number} time Unix-время свечи.
+ * @returns {boolean} true, если центрирование удалось хотя бы на одной.
+ */
+function centerOnTime(time) {
+    let done = false;
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st?.chart || !st.data?.length) return;
+        // Показать окрестность свечи, а не одну её: контекст важнее точности.
+        const span = (st.tfSeconds || 60) * 60;
+        try {
+            st.chart.timeScale().setVisibleRange({ from: time - span, to: time + span });
+            done = true;
+        } catch (e) { /* панель могла быть скрыта или ещё без данных */ }
+    });
+    return done;
+}
+
+/**
+ * Дождаться загрузки истории, центрировать графики и поставить маркер.
+ *
+ * История нового инструмента приходит асинхронно, поэтому и центрирование,
+ * и маркер делаются здесь: на момент switchSymbol серия ещё пуста, а
+ * `drawings` только что очищены сменой инструмента.
+ *
+ * @param {Object} ev Событие всплеска, к которому переходим.
+ * @param {number} tries Сколько попыток осталось (по ~250 мс).
+ */
+function centerOnShockWhenReady(ev, tries) {
+    if (tries <= 0) return;
+    if (centerOnTime(ev.time)) {
+        attachShockToPanes(ev);
+        refreshShockMarkers();
+        return;
+    }
+    setTimeout(() => centerOnShockWhenReady(ev, tries - 1), 250);
+}
+
+/**
+ * Показать кликабельное уведомление о всплеске.
+ *
+ * По клику переключает терминал на инструмент, с которого пришёл сигнал.
+ * @param {Object} ev Событие всплеска от хаба.
+ */
+function showShockPopup(ev) {
+    const popup = document.getElementById("shockPopup");
+    if (!popup) return;
+
+    const up    = ev.direction > 0;
+    const color = up ? "#26a69a" : "#ef5350";
+    const arrow = up ? "▲" : "▼";
+    const time  = new Date(ev.time * 1000).toISOString().slice(11, 16);
+
+    // Форма: «рывок» — почти весь размах минуты сделан за ≤10 секунд;
+    // «размазан» — движение шло равномерно. Оба звучат, но это разные события.
+    const shapeLabel = ev.shape === "burst"
+        ? '⚡ рывок' + (ev.coverage ? ' ' + Math.round(ev.coverage * 100) + '%' : '')
+        : (ev.shape === "spread"
+            ? '〜 размазан' + (ev.coverage ? ' ' + Math.round(ev.coverage * 100) + '%' : '')
+            : '');
+
+    // Происхождение: SOLO — двинулась только эта пара, IN STREAM — её несло
+    // общим движением доллара (EUR/USD шёл вместе с ней).
+    const originBadge = ev.origin === "solo"
+        ? '<span style="background:#1b5e20;color:#a5d6a7;padding:1px 5px;' +
+          'border-radius:3px;font-size:10px;font-weight:bold;">SOLO</span>'
+        : (ev.origin === "in_stream"
+            ? '<span style="background:#37474f;color:#b0bec5;padding:1px 5px;' +
+              'border-radius:3px;font-size:10px;">IN STREAM</span>'
+            : '');
+
+    popup.style.borderLeftColor = color;
+    popup.innerHTML =
+        '<div style="display:flex;align-items:center;gap:10px;">' +
+          '<div style="flex:1;">' +
+            '<div style="font-weight:bold;font-size:13px;">' +
+              '<span style="color:' + color + '">' + arrow + '</span> ' +
+              ev.symbol + ' — всплеск ' + ev.sigma.toFixed(1) + 'σ' +
+              (shapeLabel ? ' <span style="font-weight:normal;font-size:11px;color:' +
+                            (ev.shape === "burst" ? "#ffb74d" : "#8a8a8a") + '">' +
+                            shapeLabel + '</span>' : '') +
+            '</div>' +
+            '<div style="margin-top:4px;">' + originBadge + '</div>' +
+            '<div style="font-size:11px;color:#aaa;margin-top:3px;">' +
+              time + ' UTC · порог ' + ev.threshold + 'σ · EUR/USD ' +
+              (ev.leader_sigma == null ? 'н/д' : ev.leader_sigma.toFixed(1) + 'σ') +
+            '</div>' +
+            '<div style="font-size:10px;color:#777;margin-top:3px;">' +
+              'нажмите, чтобы перейти к инструменту' +
+            '</div>' +
+          '</div>' +
+          '<span id="closeShock" style="cursor:pointer;font-weight:bold;' +
+                'color:#888;padding:0 4px;">✕</span>' +
+        '</div>';
+    popup.style.display = "block";
+
+    // Клик по телу — переход на инструмент сигнала; по крестику — только закрыть.
+    popup.onclick = () => {
+        // Тот же нормализованный сравниватель, что и в gotoShock: префикс
+        // провайдера не делает инструмент другим.
+        if (ev.symbol && displaySymbol(ev.symbol) !== displaySymbol(currentSymbol))
+            switchSymbol(ev.symbol);
+        popup.style.display = "none";
+    };
+    const close = document.getElementById("closeShock");
+    if (close) close.onclick = (e) => {
+        e.stopPropagation();
+        popup.style.display = "none";
+    };
+
+    clearTimeout(popup._hideTimer);
+    popup._hideTimer = setTimeout(() => { popup.style.display = "none"; }, 20000);
+}
+
+/**
+ * Обновить бейдж окна тишины для текущего инструмента.
+ *
+ * Показывает, что сигналы сейчас подавлены и по какой причине.
+ * @param {Object|null} blocked Окно из хаба ({kind,label}) или null.
+ */
+function renderShockWindowBadge(blocked) {
+    const badge = document.getElementById("shockWindowBadge");
+    if (!badge) return;
+    if (!blocked) { badge.style.display = "none"; return; }
+
+    const isNews = blocked.kind === "news";
+    badge.textContent = (isNews ? "📰 новости: " : "🕐 сессия: ") + blocked.label +
+                        " — сигналы подавлены";
+    badge.style.background = isNews ? "#7a4b00" : "#3a3a3a";
+    badge.style.display = "block";
+}
+
+/**
+ * Отступ маркера от свечи в единицах цены инструмента.
+ *
+ * Считается от размаха ВИДИМЫХ баров, поэтому выглядит одинаково на EUR/USD
+ * и USD/JPY, где цены отличаются в сотни раз. Пересчитывается на каждой
+ * перерисовке — при зуме масштаб меняется.
+ *
+ * @param {number} paneId Панель.
+ * @returns {number} Отступ в единицах цены; 0, если измерить не удалось.
+ */
+function shockMarkerGap(paneId) {
+    const st = panesState[paneId];
+    if (!st?.data?.length) return 0;
+    // Хвоста видимых баров достаточно: маркеры живут в свежей истории.
+    const tail = st.data.slice(-120);
+    let hi = -Infinity, lo = Infinity;
+    for (const c of tail) {
+        const h = c.high ?? c.close;
+        const l = c.low  ?? c.close;
+        if (h != null && h > hi) hi = h;
+        if (l != null && l < lo) lo = l;
+    }
+    if (!isFinite(hi) || !isFinite(lo) || hi <= lo) return 0;
+    return (hi - lo) * 0.04;   // ~4% видимого диапазона
+}
+
+/**
+ * Собрать маркеры всплесков для панели из сохранённых рисунков.
+ *
+ * @param {number} paneId Панель.
+ * @returns {Array} Маркеры для createSeriesMarkers, отсортированные по времени.
+ */
+function getShockMarkersForPane(paneId) {
+    return (drawings[paneId] || [])
+        .filter(d => d.type === "shock")
+        .flatMap(d => {
+            // Свеча берётся В ВИЛКУ: стрелка сверху смотрит вниз, снизу —
+            // вверх, обе указывают на неё. Одна стрелка «от свечи» читалась
+            // как направление движения и путала.
+            //
+            // Цвет один для всех: направление и форма всплеска видны в панели,
+            // на графике маркер только показывает МЕСТО. Подавленный окном
+            // тишины приглушён — событие было, но сигналом не считалось.
+            const color = d.blocked ? "#5a7a99" : SHOCK_MARKER_COLOR;
+            const gap = shockMarkerGap(paneId);
+            const hi = d.high ?? d.price;
+            const lo = d.low ?? d.price;
+
+            const top = {
+                time:  d.time,
+                color: color,
+                shape: "arrowDown",     // сверху вниз — указывает на свечу
+                size:  1.5,
+                id:    "shock-top-" + d.time,
+            };
+            const bottom = {
+                time:  d.time,
+                color: color,
+                shape: "arrowUp",       // снизу вверх — указывает на свечу
+                size:  1.5,
+                id:    "shock-bot-" + d.time,
+            };
+
+            // Отступ от свечи. У aboveBar/belowBar зазор фиксирован и мелкий —
+            // маркер налезает на тело. Позиции atPrice* (LWC 5.0.4+) принимают
+            // цену, и отступ задаётся в долях ВИДИМОГО диапазона: в пунктах он
+            // был бы разным у EUR/USD и USD/JPY (цены различаются в 130 раз).
+            if (hi != null && lo != null && gap > 0) {
+                top.position    = "atPriceTop";
+                top.price       = hi + gap;
+                bottom.position = "atPriceBottom";
+                bottom.price    = lo - gap;
+            } else {
+                // Нет цены или не удалось измерить масштаб — обычное поведение.
+                top.position    = "aboveBar";
+                bottom.position = "belowBar";
+            }
+            return [top, bottom];
+        })
+        .sort((a, b) => a.time - b.time);
+}
+
+/**
+ * Перерисовать маркеры всплесков на обеих панелях.
+ *
+ * Маркеры сигналов и всплесков живут в РАЗНЫХ плагинах: один слой на серию
+ * перезаписывался бы целиком, и вторая группа маркеров пропадала бы.
+ */
+function refreshShockMarkers() {
+    [1, 2].forEach(paneId => {
+        const st = panesState[paneId];
+        if (!st?.series) return;
+        const markers = getShockMarkersForPane(paneId);
+        try {
+            if (!st.shockMarkers) {
+                st.shockMarkers = LightweightCharts.createSeriesMarkers(st.series, markers);
+            } else {
+                st.shockMarkers.setMarkers(markers);
+            }
+        } catch (e) { console.error("shock markers failed:", e); }
+    });
+}
+
+/**
+ * Принять всплеск от хаба: маркер, звук, уведомление.
+ *
+ * @param {Object} ev Сообщение хаба типа "shock".
+ */
+function onShockEvent(ev) {
+    if (!ev || typeof ev.time !== "number") return;
+
+    recordShock(ev);
+    renderShockPanel();
+    shockWindowState.set(ev.symbol, ev.blocked || null);
+    if (ev.symbol === currentSymbol) renderShockWindowBadge(ev.blocked || null);
+
+    // Маркер ставим ТОЛЬКО на панели с этим инструментом: на чужом графике
+    // время свечи чужое, маркер повис бы в случайной точке. Событие остаётся
+    // в журнале, и маркер появится после перехода по нему из панели.
+    const attached = attachShockToPanes(ev);
+    refreshShockMarkers();
+
+    // Панель могла быть ещё не готова (series/chart не созданы) — тогда
+    // маркера нет, хотя событие в журнале есть. Повторяем короткой серией
+    // попыток, чтобы маркер появился сам, без нажатия кнопки.
+    if (!attached && displaySymbol(ev.symbol) === displaySymbol(currentSymbol)) {
+        retryAttachShock(ev, 20);
+    }
+
+    // Звучат только РЫВКИ вне окон тишины — решение принимает хаб (audible).
+    // Размазанные события и подавленные окном остаются в панели и на графике,
+    // но молча: без блокировки по ведущей их стало слишком много для звука.
+    if (!ev.audible) return;
+    playAlertSound();
+    showShockPopup(ev);
+}
+
+// ============================================================================
 // INDICATORS PANEL
 // ============================================================================
 
@@ -4695,6 +5408,21 @@ initialize();
     style="position:fixed;bottom:20px;right:20px;background:#ff4444;color:white;
            padding:12px 18px;border-radius:6px;font-size:13px;display:none;
            z-index:999999;box-shadow:0 4px 12px rgba(0,0,0,0.4);">
+</div>
+
+<!-- Всплеск: некрупное уведомление, клик по телу — переход на инструмент. -->
+<div id="shockPopup"
+    style="position:fixed;bottom:20px;right:20px;background:#1e222d;color:#d1d4dc;
+           padding:10px 14px;border-radius:6px;font-size:13px;display:none;
+           z-index:999999;box-shadow:0 4px 14px rgba(0,0,0,0.5);cursor:pointer;
+           border-left:3px solid #26a69a;max-width:280px;">
+</div>
+
+<!-- Индикация окна тишины: висит всё время ограничения. -->
+<div id="shockWindowBadge"
+    style="position:fixed;bottom:20px;left:20px;background:#3a3a3a;color:#ddd;
+           padding:6px 12px;border-radius:4px;font-size:11px;display:none;
+           z-index:999998;box-shadow:0 2px 8px rgba(0,0,0,0.4);">
 </div>
 
 </body>

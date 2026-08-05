@@ -36,7 +36,9 @@ from core.db import init_db, load_history, load_instruments, \
 from core.large_trades import LargeTradeFilter
 from core.logfmt import setup as _log_setup
 from core.market_hours import forex_open as market_open
+from core.news_windows import NewsWindows
 from core.range_bars import RangeBarBuilder, backfill_tail
+from core.shock_detector import ShockDetector, _range_of, warmup_from_ticks
 from core.volume_profile import VolumeProfile
 
 log = _log_setup("hub")
@@ -125,6 +127,23 @@ class Hub:
         self._briefing        = None
         self._briefing_mtime  = 0
         self._briefing_lock   = threading.Lock()
+
+        # Детектор всплесков (M1): ведущая пара EUR/USD, ведомые — остальные три
+        # форекс-пары. Пороги в сигмах у каждой пары свои (core/shock_detector),
+        # окна тишины — сессионные ±30 мин и новостные ±15 мин
+        # (core/news_windows, календарь обновляет крон sync_calendar.py).
+        # ВАЖНО: сигнал помечает НЕОБЫЧНУЮ свечу, а не предсказывает движение —
+        # бэктест разворота эджа не нашёл (42.9% против базовых 52.0%).
+        self._shock_detector = ShockDetector()
+        self._news_windows   = NewsWindows()
+        # Последние сигналы для восстановления маркеров при переподключении:
+        # symbol -> [событие, ...], окно суток. Персиста НЕТ намеренно:
+        # источник правды — тиковый архив, из которого журнал и статистика
+        # детектора восстанавливаются при старте (_shock_warmup). Отдельный
+        # JSON был бы вторым источником правды и разошёлся бы с архивом при
+        # первой же смене порогов.
+        self._shock_log      = {}
+        self._shock_id       = 1
 
         # Рэндж-бары: билдеры создаются ЛЕНИВО по set_tf "R:<поинты>" и живут
         # только в памяти — источник истины у них один, тиковый архив, и после
@@ -248,6 +267,37 @@ class Hub:
                 total = sum(len(b) for b in hist.values())
                 log.info("[restore] %s:%s — %d баров, смещения %s",
                      provider, symbol, total, offsets or "{}")
+
+        self._shock_warmup()
+
+    def _shock_warmup(self):
+        """Прогреть детектор всплесков тиками из архива.
+
+        Без этого детектору нужно 30 закрытых минут ЖИВОГО потока, и после
+        каждого рестарта хаб полчаса слеп. Те же минуты уже лежат в тиковом
+        архиве — берём их оттуда и работаем с первого же тика.
+
+        Тики, а не свечи из БД: форма всплеска (рывок против размазанного
+        движения) измерима только по тикам.
+
+        Returns:
+            None. Ошибка прогрева не должна мешать старту — хаб просто
+            наберёт статистику сам, как раньше.
+        """
+        symbols = self._config.get("markets", {}).get("fxcm", [])
+        if not symbols:
+            return
+        try:
+            restored = warmup_from_ticks(self._shock_detector, self._data_dir,
+                                         symbols)
+        except Exception as err:            # прогрев не критичен для старта
+            log.warning("прогрев детектора всплесков не удался: %r", err)
+            return
+
+        ready = sum(1 for n in restored.values() if n >= 30)
+        log.info("детектор всплесков прогрет: %s (готовы к работе: %d из %d)",
+                 ", ".join("%s %d мин" % (s, n) for s, n in sorted(restored.items())),
+                 ready, len(restored))
 
     def _restore_forming(self, provider, symbol, now_ts, quiet=False):
         """Восстановить незакрытую свечу текущего бакета для всех ТФ >= 1 мин.
@@ -558,6 +608,11 @@ class Hub:
             if len(bars) > keep:
                 del bars[:len(bars) - keep]
             self._enqueue_closed(provider, symbol, tf, candle)
+            # Закрытая M1 — во-первых, история для скользящей статистики;
+            # во-вторых, добор всплеска, который перешагнул порог на самых
+            # последних тиках и потому не успел сработать живым.
+            if tf == "M1":
+                self._shock_close(provider, symbol, candle)
 
         self._profile_ingest(provider, symbol, price, msg.get("size"),
                              msg.get("side"), msg["ts"])
@@ -565,6 +620,10 @@ class Hub:
                                 msg.get("side"), msg["ts"])
         self._range_ingest(provider, symbol, price, msg["ts"],
                            msg.get("size"), msg.get("side"))
+        # Всплеск ищем по ФОРМИРУЮЩЕЙСЯ M1 — ждать закрытия значит опоздать на
+        # минуту. Диапазон живой свечи только растёт, поэтому сигнал даёт первый
+        # тик, перешагнувший порог, а дальше эта минута молчит.
+        self._shock_live(provider, symbol, builder, msg["ts"], price)
         self._broadcast_update(provider, symbol)
 
     def _handle_instruments(self, msg):
@@ -1273,6 +1332,9 @@ class Hub:
 
                 elif mtype == "orderbook":
                     await self._on_orderbook_toggle(ws, data)
+
+                elif mtype == "get_shocks":
+                    self._on_get_shocks(ws, data)
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -1559,6 +1621,230 @@ class Hub:
                 # половины из них, причём молча: алерт уже помечен triggered
                 # и повторно не сработает.
                 self._broadcast_alert(symbol, level, alert["id"])
+
+
+
+    def _shock_live(self, provider, symbol, builder, tick_ts, price):
+        """Проверить ФОРМИРУЮЩУЮСЯ M1 на всплеск (основной путь сигнала).
+
+        Зовётся на каждом тике. Живая свеча в историю НЕ попадает — её растущий
+        диапазон испортил бы ту самую статистику, против которой считается.
+        Если свеча потом откатится, останется длинный хвост вместо тела: это
+        тоже диапазон, и сигнал остаётся в силе (решение владельца).
+
+        Args:
+            provider: Провайдер (сигналы только для fxcm).
+            symbol:   Чистый символ, напр. "USD/JPY".
+            builder:  CandleBuilder пары — источник живой свечи.
+            tick_ts:  Время тика (unix-секунды) — для формы всплеска.
+            price:    Цена тика.
+
+        Returns:
+            None.
+        """
+        if provider != "fxcm":
+            return
+
+        candle = builder.current("M1")
+        if not candle:
+            return
+
+        # Тик нужен детектору отдельно от свечи: форма всплеска (один рывок
+        # против размазанного движения) считается по тикам внутри минуты, из
+        # OHLC её не восстановить.
+        self._shock_detector.push_tick(symbol, tick_ts, price)
+
+        # Ведущую пару запоминаем живой, но сигналов она не даёт: её роль —
+        # показать, что движение НЕ общедолларовое.
+        if symbol == self._shock_detector.leader_symbol:
+            self._shock_detector.push_live(symbol, candle)
+            return
+
+        event = self._shock_detector.evaluate_live(symbol, candle)
+        if event is not None:
+            self._shock_emit(provider, symbol, event)
+
+    def _shock_close(self, provider, symbol, candle):
+        """Добавить закрытую M1 в историю и добрать поздний всплеск.
+
+        Свеча, перешагнувшая порог на последних тиках, живым путём сработать не
+        успевает — здесь она добирается. Повтор исключён: детектор помнит,
+        какая минута уже сигналила.
+
+        Args:
+            provider: Провайдер (сигналы только для fxcm).
+            symbol:   Чистый символ.
+            candle:   Закрытая свеча M1.
+
+        Returns:
+            None.
+        """
+        if provider != "fxcm":
+            return
+
+        # Форма считается ДО push: буфер тиков этой минуты ещё цел.
+        # Живой сигнал видит только часть тиков, и «100% за 10 секунд» в
+        # середине минуты может к закрытию оказаться размазанным движением
+        # (замер: 7 случаев из 67 за две недели, все burst→spread). Уточняем,
+        # чтобы в журнале и на маркере осталась правда о минуте.
+        self._shock_refine_shape(symbol, candle)
+
+        self._shock_detector.push(symbol, candle)
+        event = self._shock_detector.evaluate(symbol, candle)
+        if event is not None:
+            self._shock_emit(provider, symbol, event)
+
+    def _shock_refine_shape(self, symbol, candle):
+        """Пересчитать форму закрытой минуты и разослать уточнение.
+
+        Args:
+            symbol: Чистый символ.
+            candle: Закрытая свеча M1.
+
+        Returns:
+            None.
+        """
+        journal = self._shock_log.get(symbol)
+        if not journal:
+            return
+
+        event = None
+        for item in journal:
+            if item["time"] == candle.get("time"):
+                event = item
+                break
+        if event is None:
+            return
+
+        # Через _range_of: CandleBuilder отдаёт open/high/low/close, а БД —
+        # o/h/l/c. Прямое чтение коротких ключей давало нулевой диапазон.
+        rng = _range_of(candle)
+        shape = self._shock_detector.shape_of(symbol, candle["time"], rng)
+        if shape["shape"] == "unknown" or shape["shape"] == event.get("shape"):
+            return
+
+        log.info("форма уточнена %s %s→%s (%d%%)", symbol, event.get("shape"),
+                 shape["shape"], round((shape["coverage"] or 0) * 100))
+        event["shape"]       = shape["shape"]
+        event["coverage"]    = shape["coverage"]
+        event["burst_start"] = shape["burst_start"]
+        event["refined"]     = True
+        # Звук уже прозвучал живьём и обратно не отыграется, но журнал должен
+        # отражать итог минуты: иначе в панели останется «рывок» там, где по
+        # факту вышло размазанное движение.
+        event["audible"]     = (not event.get("blocked")) and shape["shape"] == "burst"
+        self._broadcast_shock(event)
+
+    def _shock_emit(self, provider, symbol, event):
+        """Записать всплеск в журнал, залогировать и разослать.
+
+        Сигнал ГАСИТСЯ в окнах тишины, но факт всплеска всё равно уходит на
+        фронт с пометкой — владелец просил видеть индикацию на всё время
+        ограничения, а не глухую тишину.
+
+        Args:
+            provider: Провайдер.
+            symbol:   Чистый символ.
+            event:    Событие от ShockDetector.
+
+        Returns:
+            None.
+        """
+        blocked = self._news_windows.blocked(event["time"], symbol)
+        event["provider"] = provider
+        event["blocked"]  = blocked
+        event["id"]       = self._shock_id
+        self._shock_id   += 1
+        # Звук — только на РЫВОК вне окна тишины. Сняв блокировку по ведущей,
+        # мы утроили поток событий (14.4/день против 2.3), и форма осталась
+        # единственным, что удерживает звуковой поток около пяти в сутки.
+        # Размазанные события идут в панель молча.
+        event["audible"]  = (not blocked) and event.get("shape") == "burst"
+
+        # Журнал на сутки — чтобы фронт восстановил маркеры после F5.
+        # Имя переменной НЕ log: это затенило бы модульный логгер, и следующий
+        # же log.info() упал бы с AttributeError прямо в обработке тика.
+        journal = self._shock_log.setdefault(symbol, [])
+        # Минута могла сигналить живой и добраться на закрытии — храним одну
+        # запись на свечу, с последними цифрами.
+        for i, prev in enumerate(journal):
+            if prev["time"] == event["time"]:
+                journal[i] = event
+                break
+        else:
+            journal.append(event)
+        cutoff = event["time"] - 86400
+        self._shock_log[symbol] = [e for e in journal if e["time"] >= cutoff]
+
+        phase = "живой" if event.get("live") else "добор"
+        cov   = event.get("coverage")
+        shape = "%s%s" % (event.get("shape", "unknown"),
+                          "" if cov is None else " %d%%" % round(cov * 100))
+        lead  = event.get("leader_sigma")
+        lead_s = "n/a" if lead is None else "%.1f" % lead
+        origin = event.get("origin", "unknown").upper()
+        if blocked:
+            log.info("всплеск подавлен (%s) %s sigma=%.1f leader=%s %s форма=%s окно=%s(%s)",
+                     phase, symbol, event["sigma"], lead_s, origin, shape,
+                     blocked["kind"], blocked["label"])
+        else:
+            log.info("ВСПЛЕСК (%s) %s sigma=%.1f leader=%s %s форма=%s звук=%s dir=%+d",
+                     phase, symbol, event["sigma"], lead_s, origin, shape,
+                     "да" if event.get("audible") else "нет", event["direction"])
+
+        self._broadcast_shock(event)
+
+    def _broadcast_shock(self, event):
+        """Разослать всплеск всем клиентам, каждому — под его именем символа.
+
+        Как и у алертов, symbol подставляется в «wire»-формате клиента: фронт
+        сверяет имя с текущим инструментом, и чужой формат отбросил бы сигнал
+        молча. Сигнал глобален — приходит и тем, кто смотрит другую пару
+        (по клику фронт переключится на инструмент сигнала).
+
+        Args:
+            event: Событие всплеска из ShockDetector с полями blocked/id.
+
+        Returns:
+            None.
+        """
+        symbol    = event["symbol"]
+        canonical = self.display_symbol(symbol)
+        for ws, info in list(self._clients.items()):
+            wire = (info or {}).get("wire")
+            if not wire or self.resolve_symbol(wire)[1] != symbol:
+                wire = canonical
+            payload = dict(event)
+            payload["type"]   = "shock"
+            payload["symbol"] = wire
+            self._send(ws, json.dumps(payload))
+
+    def _on_get_shocks(self, ws, data):
+        """Отдать журнал всплесков за сутки — восстановление маркеров после F5.
+
+        Args:
+            ws:   Сокет клиента.
+            data: Сообщение get_shocks (symbol — опционально).
+
+        Returns:
+            None.
+        """
+        wire   = data.get("symbol")
+        events = []
+        if wire:
+            _prov, symbol = self.resolve_symbol(wire)
+            for ev in self._shock_log.get(symbol, []):
+                item = dict(ev)
+                item["symbol"] = wire
+                events.append(item)
+        else:
+            for symbol, log in self._shock_log.items():
+                for ev in log:
+                    item = dict(ev)
+                    item["symbol"] = self.display_symbol(symbol)
+                    events.append(item)
+        events.sort(key=lambda e: e["time"])
+        self._send(ws, json.dumps({"type": "shocks", "events": events}))
 
     def _broadcast_alert(self, symbol, level, alert_id):
         """Разослать срабатывание алерта, каждому клиенту — под его именем.

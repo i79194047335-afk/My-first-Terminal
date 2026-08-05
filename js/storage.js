@@ -70,6 +70,27 @@ function saveDrawings(paneId, layout, panesState, drawings) {
     });
 }
 
+    // Маркер всплеска. Сохраняется как рисунок (просьба владельца): маркеры
+    // переживают F5 и переключение инструмента наравне с линиями. Хаб держит
+    // свой журнал только сутки, а этот — столько, сколько живёт layout.
+    if (d.type === "shock") {
+        filtered.push({
+            type: "shock",
+            time: d.time,
+            price: d.price,
+            high: d.high ?? null,
+            low: d.low ?? null,
+            direction: d.direction,
+            sigma: d.sigma,
+            blocked: d.blocked || null,
+            // Форма всплеска: "burst" — рывок за ≤10 с, "spread" — размазан.
+            shapeKind: d.shapeKind || null,
+            coverage: d.coverage ?? null,
+            origin: d.origin || null,
+            audible: !!d.audible
+        });
+    }
+
 
 });;
 
@@ -177,6 +198,29 @@ if (st.drawingEngine) {
     if (!saved || !saved.length) return;
 
     saved.forEach(d => {
+
+        // ---------- SHOCK MARKER ----------
+        // Маркеры не создают priceLine: их рисует плагин createSeriesMarkers
+        // одним слоем. Здесь только восстанавливаем объект, а перерисовку
+        // делает refreshShockMarkers() в index.html.
+        if (d.type === "shock") {
+            drawings[paneId].push({
+                paneId,
+                type: "shock",
+                time: d.time,
+                price: d.price,
+                high: d.high ?? null,
+                low: d.low ?? null,
+                direction: d.direction,
+                sigma: d.sigma,
+                blocked: d.blocked || null,
+                shapeKind: d.shapeKind || null,
+                coverage: d.coverage ?? null,
+                origin: d.origin || null,
+                audible: !!d.audible
+            });
+            return;
+        }
 
         // ---------- HLINE ----------
         if (d.type === "hline") {
