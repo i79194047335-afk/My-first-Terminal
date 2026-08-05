@@ -57,7 +57,11 @@ not predict direction.
 
 Python 3.7 compatible: lives in core/ and must parse on the feed interpreter.
 """
+import csv
+import os
 import statistics
+import time
+from datetime import datetime
 
 # Per-pair range z-score thresholds. See module docstring for provenance.
 SHOCK_SIGMA = {
@@ -75,6 +79,10 @@ LEADER_CALM_SIGMA = 2.0
 # Trailing candles used for the rolling range mean/stdev.
 LOOKBACK = 30
 
+# How far back warmup_from_ticks() rebuilds. Slightly more than LOOKBACK so a
+# gap or two in the archive still leaves a full window.
+WARMUP_MINUTES = 40
+
 # Burst shape. A shock is "burst" when at least BURST_MIN_COVERAGE of the
 # minute's range happened inside one BURST_SECONDS sliding window.
 #
@@ -85,19 +93,49 @@ BURST_SECONDS = 10
 BURST_MIN_COVERAGE = 0.70
 
 
+# Two candle dialects coexist in this project and BOTH reach this module:
+# CandleBuilder emits open/high/low/close, while core/db and the archive
+# scripts use o/h/l/c. Reading only the short keys silently yielded a zero
+# range for every live candle, so the hub could never fire a signal — that was
+# the state of production between 2026-08-04 and 2026-08-05.
+def _field(candle, short, long_name):
+    """Read one OHLC field, accepting either candle dialect.
+
+    Args:
+        candle: Candle mapping in either dialect.
+        short: Short key, e.g. "h".
+        long_name: Long key, e.g. "high".
+
+    Returns:
+        Field value as float, or None when absent/unreadable.
+    """
+    if not isinstance(candle, dict):
+        return None
+    value = candle.get(short)
+    if value is None:
+        value = candle.get(long_name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _range_of(candle):
     """Return a candle's high-low range.
 
     Args:
-        candle: Mapping with "h" and "l" keys.
+        candle: Mapping with h/l or high/low keys.
 
     Returns:
         Range as a float, 0.0 when the keys are missing.
     """
-    try:
-        return float(candle["h"]) - float(candle["l"])
-    except (KeyError, TypeError, ValueError):
+    high = _field(candle, "h", "high")
+    low = _field(candle, "l", "low")
+    if high is None or low is None:
         return 0.0
+    return high - low
 
 
 def range_zscore(candle, history):
@@ -169,20 +207,101 @@ def direction(candle):
     """Classify a candle's colour.
 
     Args:
-        candle: Mapping with "o" and "c" keys.
+        candle: Mapping with o/c or open/close keys.
 
     Returns:
         1 for up, -1 for down, 0 for doji or unreadable.
     """
-    try:
-        o, c = float(candle["o"]), float(candle["c"])
-    except (KeyError, TypeError, ValueError):
+    o = _field(candle, "o", "open")
+    c = _field(candle, "c", "close")
+    if o is None or c is None:
         return 0
     if c > o:
         return 1
     if c < o:
         return -1
     return 0
+
+
+def warmup_from_ticks(detector, data_dir, symbols, now_ts=None,
+                      minutes=WARMUP_MINUTES):
+    """Prime a detector from the tick archive so it works from the first tick.
+
+    The rolling statistics need LOOKBACK finished minutes before anything can
+    be scored. Started cold, the hub is therefore blind for half an hour — and
+    the archive already holds those minutes, so there is no reason to wait for
+    them to happen again.
+
+    Ticks are read (not candles) because burst shape is measurable only from
+    ticks; a minute rebuilt from OHLC alone could never be classified.
+
+    Args:
+        detector: ShockDetector to fill.
+        data_dir: Directory holding <SYMBOL>_<YYYYMMDD>.csv tick files.
+        symbols: Iterable of provider-form symbols, e.g. ["EUR/USD", ...].
+        now_ts: Reference time, unix seconds; defaults to the current time.
+        minutes: How many minutes back to rebuild.
+
+    Returns:
+        Dict {symbol: minutes_restored} — how many finished minutes each
+        symbol contributed.
+    """
+    if now_ts is None:
+        now_ts = time.time()
+    start_ts = int(now_ts) - minutes * 60
+    restored = {}
+
+    for symbol in symbols:
+        prefix = symbol.replace("/", "")
+        # Ticks may straddle midnight, so read yesterday's file too.
+        days = sorted({
+            datetime.utcfromtimestamp(start_ts).strftime("%Y%m%d"),
+            datetime.utcfromtimestamp(now_ts).strftime("%Y%m%d"),
+        })
+
+        buckets = {}
+        for day in days:
+            path = os.path.join(data_dir, "%s_%s.csv" % (prefix, day))
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r") as fh:
+                    for row in csv.DictReader(fh):
+                        try:
+                            ts = float(row["timestamp_utc"])
+                            mid = float(row["mid"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if ts < start_ts or ts > now_ts:
+                            continue
+                        bucket = int(ts // 60) * 60
+                        candle = buckets.get(bucket)
+                        if candle is None:
+                            buckets[bucket] = {"time": bucket, "o": mid, "h": mid,
+                                               "l": mid, "c": mid,
+                                               "ticks": [(ts - bucket, mid)]}
+                        else:
+                            if mid > candle["h"]:
+                                candle["h"] = mid
+                            if mid < candle["l"]:
+                                candle["l"] = mid
+                            candle["c"] = mid
+                            candle["ticks"].append((ts - bucket, mid))
+            except (IOError, OSError):
+                continue
+
+        if not buckets:
+            restored[symbol] = 0
+            continue
+
+        # The most recent bucket is still forming in the live feed; leaving it
+        # in history would let a partial minute into the statistics.
+        ordered = [buckets[b] for b in sorted(buckets)][:-1]
+        for candle in ordered:
+            detector.push(symbol, {k: candle[k] for k in ("time", "o", "h", "l", "c")})
+        restored[symbol] = len(ordered)
+
+    return restored
 
 
 class ShockDetector(object):
@@ -431,9 +550,9 @@ class ShockDetector(object):
             "origin": origin,
             "direction": direction(candle),
             "range": _range_of(candle),
-            "price": candle.get("c"),
-            "high": candle.get("h"),
-            "low": candle.get("l"),
+            "price": _field(candle, "c", "close"),
+            "high": _field(candle, "h", "high"),
+            "low": _field(candle, "l", "low"),
             "shape": shape["shape"],
             "coverage": shape["coverage"],
             "burst_start": shape["burst_start"],

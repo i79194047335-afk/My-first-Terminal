@@ -208,6 +208,51 @@ def test_leader_labels_not_blocks():
     return ok
 
 
+def test_hub_candle_dialect():
+    """Candles from CandleBuilder (open/high/low/close) must work as well.
+
+    Regression: the detector originally read only o/h/l/c, so every live candle
+    from the hub scored a zero range and no signal could ever fire. Production
+    was silent for 11 hours before this was noticed.
+    """
+    print("\nhub candle dialect")
+    from core.shock_detector import _range_of, direction
+
+    ok = True
+    hub_candle = {"time": 1785000000, "open": 150.0, "high": 150.5,
+                  "low": 149.5, "close": 150.4}
+    db_candle = {"time": 1785000000, "o": 150.0, "h": 150.5,
+                 "l": 149.5, "c": 150.4}
+
+    ok &= check("long keys give a real range", _range_of(hub_candle) == 1.0,
+                "range={}".format(_range_of(hub_candle)))
+    ok &= check("short keys still work", _range_of(db_candle) == 1.0)
+    ok &= check("long keys give direction", direction(hub_candle) == 1)
+    ok &= check("short keys give direction", direction(db_candle) == 1)
+    ok &= check("missing keys stay safe", _range_of({"time": 1}) == 0.0)
+
+    # End to end: feed the detector nothing but hub-dialect candles.
+    det = ShockDetector()
+    base = 1_780_500_000 // 60 * 60
+    for i in range(30):
+        t = base + i * 60
+        det.push("USD/JPY", {"time": t, "open": 150.0,
+                             "high": 150.010 + (i % 3) * 0.001,
+                             "low": 150.0, "close": 150.005})
+        det.push("EUR/USD", {"time": t, "open": 1.15,
+                             "high": 1.1501 + (i % 3) * 0.00001,
+                             "low": 1.15, "close": 1.15005})
+    t = base + 30 * 60
+    det.push_live("EUR/USD", {"time": t, "open": 1.15, "high": 1.15012,
+                              "low": 1.15, "close": 1.15005})
+    ev = det.evaluate_live("USD/JPY", {"time": t, "open": 150.0, "high": 150.30,
+                                       "low": 150.0, "close": 150.29})
+    ok &= check("hub-dialect candles produce a signal", ev is not None,
+                "sigma={}".format(ev["sigma"] if ev else None))
+    ok &= check("signal carries a direction", bool(ev and ev["direction"] == 1))
+    return ok
+
+
 def test_burst_shape():
     """Concentration separates a single jump from evenly spread movement."""
     print("\nburst shape")
@@ -277,6 +322,56 @@ def test_burst_shape():
                                          "l": 150.0, "c": 150.30})
     ok &= check("no ticks -> shape unknown, still signals",
                 bool(ev2 and ev2.get("shape") == "unknown"))
+    return ok
+
+
+def test_warmup_from_ticks():
+    """Warmup fills history from the archive so no cold start is needed."""
+    print("\nwarmup from ticks")
+    from core.shock_detector import LOOKBACK, warmup_from_ticks
+
+    ok = True
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+
+    # Anchor to a time the archive definitely covers rather than "now", so the
+    # test does not depend on the market being open when it runs.
+    anchor = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc).timestamp()
+    det = ShockDetector()
+    restored = warmup_from_ticks(det, data_dir,
+                                 ["EUR/USD", "USD/JPY", "AUD/USD", "USD/CAD"],
+                                 now_ts=anchor)
+
+    ok &= check("every pair restored something", all(n > 0 for n in restored.values()),
+                str(restored))
+    ok &= check("history reaches the lookback",
+                all(len(det.history(s)) >= LOOKBACK for s in restored),
+                str({s: len(det.history(s)) for s in restored}))
+
+    # The still-forming final minute must be excluded from history.
+    last_times = [det.history(s)[-1]["time"] for s in restored if det.history(s)]
+    ok &= check("forming minute left out of history",
+                all(t < int(anchor // 60) * 60 for t in last_times))
+
+    # A warmed detector must score immediately — that is the entire point.
+    # Aim at the minute right after the restored history: warmup deliberately
+    # drops the still-forming minute, so `anchor` itself is one minute further
+    # on. In production that gap closes as soon as the live minute finishes.
+    hist = det.history("USD/JPY")
+    bucket = hist[-1]["time"] + 60
+    big_range = max(c["h"] - c["l"] for c in hist) * 8
+    ref = hist[-1]["c"]
+    det.push_live("EUR/USD", {"time": bucket, "o": ref, "h": ref,
+                              "l": ref, "c": ref})
+    ev = det.evaluate_live("USD/JPY", {"time": bucket, "o": ref,
+                                       "h": ref + big_range, "l": ref,
+                                       "c": ref + big_range})
+    ok &= check("warmed detector scores at once", ev is not None,
+                "sigma={}".format(ev["sigma"] if ev else None))
+
+    # Missing archive must not raise.
+    det2 = ShockDetector()
+    empty = warmup_from_ticks(det2, "/nonexistent-dir", ["EUR/USD"], now_ts=anchor)
+    ok &= check("missing archive handled", empty == {"EUR/USD": 0}, str(empty))
     return ok
 
 
@@ -352,7 +447,9 @@ def main():
         test_leader_never_signals(),
         test_live_fires_once_and_early(),
         test_leader_labels_not_blocks(),
+        test_hub_candle_dialect(),
         test_burst_shape(),
+        test_warmup_from_ticks(),
         test_archive_replay(),
     ]
     print("\n{}".format("ALL PASS" if all(results) else "FAILURES PRESENT"))

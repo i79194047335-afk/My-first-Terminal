@@ -38,7 +38,7 @@ from core.logfmt import setup as _log_setup
 from core.market_hours import forex_open as market_open
 from core.news_windows import NewsWindows
 from core.range_bars import RangeBarBuilder, backfill_tail
-from core.shock_detector import ShockDetector
+from core.shock_detector import ShockDetector, _range_of, warmup_from_ticks
 from core.volume_profile import VolumeProfile
 
 log = _log_setup("hub")
@@ -137,13 +137,13 @@ class Hub:
         self._shock_detector = ShockDetector()
         self._news_windows   = NewsWindows()
         # Последние сигналы для восстановления маркеров при переподключении:
-        # symbol -> [событие, ...], окно суток. Персистится на диск: журнал в
-        # одной лишь памяти обнулялся КАЖДЫМ рестартом хаба, и фронт с чистым
-        # localStorage (другой браузер) оставался без истории сигналов.
+        # symbol -> [событие, ...], окно суток. Персиста НЕТ намеренно:
+        # источник правды — тиковый архив, из которого журнал и статистика
+        # детектора восстанавливаются при старте (_shock_warmup). Отдельный
+        # JSON был бы вторым источником правды и разошёлся бы с архивом при
+        # первой же смене порогов.
         self._shock_log      = {}
         self._shock_id       = 1
-        self._shock_log_path = config.get("shock_log_file", "shock_log.json")
-        self._load_shock_log()
 
         # Рэндж-бары: билдеры создаются ЛЕНИВО по set_tf "R:<поинты>" и живут
         # только в памяти — источник истины у них один, тиковый архив, и после
@@ -267,6 +267,37 @@ class Hub:
                 total = sum(len(b) for b in hist.values())
                 log.info("[restore] %s:%s — %d баров, смещения %s",
                      provider, symbol, total, offsets or "{}")
+
+        self._shock_warmup()
+
+    def _shock_warmup(self):
+        """Прогреть детектор всплесков тиками из архива.
+
+        Без этого детектору нужно 30 закрытых минут ЖИВОГО потока, и после
+        каждого рестарта хаб полчаса слеп. Те же минуты уже лежат в тиковом
+        архиве — берём их оттуда и работаем с первого же тика.
+
+        Тики, а не свечи из БД: форма всплеска (рывок против размазанного
+        движения) измерима только по тикам.
+
+        Returns:
+            None. Ошибка прогрева не должна мешать старту — хаб просто
+            наберёт статистику сам, как раньше.
+        """
+        symbols = self._config.get("markets", {}).get("fxcm", [])
+        if not symbols:
+            return
+        try:
+            restored = warmup_from_ticks(self._shock_detector, self._data_dir,
+                                         symbols)
+        except Exception as err:            # прогрев не критичен для старта
+            log.warning("прогрев детектора всплесков не удался: %r", err)
+            return
+
+        ready = sum(1 for n in restored.values() if n >= 30)
+        log.info("детектор всплесков прогрет: %s (готовы к работе: %d из %d)",
+                 ", ".join("%s %d мин" % (s, n) for s, n in sorted(restored.items())),
+                 ready, len(restored))
 
     def _restore_forming(self, provider, symbol, now_ts, quiet=False):
         """Восстановить незакрытую свечу текущего бакета для всех ТФ >= 1 мин.
@@ -1591,53 +1622,7 @@ class Hub:
                 # и повторно не сработает.
                 self._broadcast_alert(symbol, level, alert["id"])
 
-    def _load_shock_log(self):
-        """Поднять журнал всплесков с диска, отбросив всё старше суток.
 
-        Returns:
-            None. Битый или отсутствующий файл — просто пустой журнал.
-        """
-        try:
-            with open(self._shock_log_path, "r") as fh:
-                data = json.load(fh)
-        except (IOError, OSError, ValueError):
-            return
-
-        if not isinstance(data, dict):
-            return
-
-        cutoff = time.time() - 86400
-        restored = 0
-        max_id = 0
-        for symbol, events in data.items():
-            if not isinstance(events, list):
-                continue
-            kept = [e for e in events
-                    if isinstance(e, dict) and e.get("time", 0) >= cutoff]
-            if kept:
-                self._shock_log[symbol] = kept
-                restored += len(kept)
-                for e in kept:
-                    max_id = max(max_id, e.get("id") or 0)
-        # id продолжаем с максимума: иначе новые события конфликтовали бы
-        # со старыми в журнале фронта.
-        self._shock_id = max_id + 1
-        if restored:
-            log.info("журнал всплесков восстановлен: %d событий", restored)
-
-    def _save_shock_log(self):
-        """Сохранить журнал всплесков на диск (атомарно).
-
-        Returns:
-            None. Ошибки записи не должны ронять обработку тика — только лог.
-        """
-        try:
-            tmp = self._shock_log_path + ".tmp"
-            with open(tmp, "w") as fh:
-                json.dump(self._shock_log, fh)
-            os.replace(tmp, self._shock_log_path)
-        except (IOError, OSError) as err:
-            log.warning("журнал всплесков не сохранён: %r", err)
 
     def _shock_live(self, provider, symbol, builder, tick_ts, price):
         """Проверить ФОРМИРУЮЩУЮСЯ M1 на всплеск (основной путь сигнала).
@@ -1731,7 +1716,9 @@ class Hub:
         if event is None:
             return
 
-        rng = (candle.get("h") or 0) - (candle.get("l") or 0)
+        # Через _range_of: CandleBuilder отдаёт open/high/low/close, а БД —
+        # o/h/l/c. Прямое чтение коротких ключей давало нулевой диапазон.
+        rng = _range_of(candle)
         shape = self._shock_detector.shape_of(symbol, candle["time"], rng)
         if shape["shape"] == "unknown" or shape["shape"] == event.get("shape"):
             return
@@ -1746,7 +1733,6 @@ class Hub:
         # отражать итог минуты: иначе в панели останется «рывок» там, где по
         # факту вышло размазанное движение.
         event["audible"]     = (not event.get("blocked")) and shape["shape"] == "burst"
-        self._save_shock_log()
         self._broadcast_shock(event)
 
     def _shock_emit(self, provider, symbol, event):
@@ -1789,7 +1775,6 @@ class Hub:
             journal.append(event)
         cutoff = event["time"] - 86400
         self._shock_log[symbol] = [e for e in journal if e["time"] >= cutoff]
-        self._save_shock_log()
 
         phase = "живой" if event.get("live") else "добор"
         cov   = event.get("coverage")
