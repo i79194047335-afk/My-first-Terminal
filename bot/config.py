@@ -54,6 +54,24 @@ DEFAULTS = {
     "panel_port": 8788,
     "db_path": "bot_journal.db",
     "stop_file": "bot/STOP",
+
+    # ПРЕДОХРАНИТЕЛЬ ПО БАЛАНСУ. Площадка НЕ сообщает через API, какой счёт
+    # активен — демо или реальный: balance.php один на оба и отдаёт баланс
+    # того, что выбран в браузере. Переключение делается в кабинете и на
+    # user_hash никак не отражается.
+    #
+    # Отсюда дыра, которую поле "mode" закрыть не может: конфиг говорит
+    # "demo", на площадке активен реал — и ставки уходят с реальных денег,
+    # а все три рубежа защиты live спокойно спят.
+    #
+    # Единственный доступный признак — величина баланса. Демо у intrade.bar
+    # исчисляется тысячами, реальный счёт владельца — единицами долларов.
+    # Поэтому: перед КАЖДОЙ реальной ставкой баланс сверяется с этим
+    # порогом, и если он ниже — бот отказывается торговать.
+    #
+    # Значение подобрано по факту: демо ≈ 9363 $, реал ≈ 11.56 $ (2026-08-06).
+    # Это груборезкий, но работающий рубеж; точнее площадка знать не даёт.
+    "min_balance_for_demo": 1000.0,
 }
 
 
@@ -119,6 +137,7 @@ class BotConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     panel_host: str = "127.0.0.1"
     panel_port: int = 8788
+    min_balance_for_demo: float = 1000.0
     db_path: str = "bot_journal.db"
     stop_file: str = "bot/STOP"
 
@@ -240,6 +259,8 @@ def load(path: str = DEFAULT_CONFIG_PATH, env_path: str = ".env") -> BotConfig:
         risk=risk,
         panel_host=str(data.get("panel_host") or DEFAULTS["panel_host"]),
         panel_port=int(data.get("panel_port", 8788)),
+        min_balance_for_demo=float(data.get("min_balance_for_demo",
+                                            DEFAULTS["min_balance_for_demo"])),
         db_path=str(data.get("db_path") or "bot_journal.db"),
         stop_file=str(data.get("stop_file") or "bot/STOP"),
     )

@@ -209,10 +209,62 @@ class Engine:
 
         self.state = State.SENDING
         if self.config.touches_platform:
+            # ПОСЛЕДНИЙ РУБЕЖ перед реальной ставкой: убедиться, что активен
+            # ожидаемый счёт. Площадка не сообщает тип счёта через API —
+            # см. _verify_account.
+            refusal = await self._verify_account()
+            if refusal:
+                self.state = State.REJECTED
+                self.rejected += 1
+                log.error("ставка отменена: %s", refusal)
+                self.journal.event("risk", f"отказ: {refusal}")
+                return None
             return await self._send_real(signal, investment, quote_at_signal,
                                          payout_percent)
         return await self._send_simulated(signal, investment, quote_at_signal,
                                           payout_percent)
+
+    async def _verify_account(self) -> Optional[str]:
+        """Проверить, что активен тот счёт, на котором мы согласны торговать.
+
+        Зачем это нужно. intrade.bar переключает демо/реал в кабинете, и
+        API об этом НЕ СООБЩАЕТ: `balance.php` один на оба счёта и отдаёт
+        баланс активного. `user_hash` при переключении не меняется. Значит,
+        конфиг с `"account": "demo"` не гарантирует ровно ничего — ставка
+        уйдёт туда, что выбрано в браузере.
+
+        Единственный доступный признак — величина баланса: демо исчисляется
+        тысячами, реальный счёт владельца — единицами долларов. Грубо, но
+        это всё, что даёт площадка.
+
+        Проверка делается перед КАЖДОЙ ставкой, а не раз при старте:
+        переключить счёт можно в любой момент, в том числе посреди прогона.
+
+        Returns:
+            Причина отказа либо None, если счёт похож на ожидаемый.
+        """
+        if self.config.account != "demo" or not self.client:
+            # Явно объявленная торговля на реале проверку не проходит —
+            # там решение принимает человек, а не эвристика по балансу.
+            return None
+
+        loop = asyncio.get_running_loop()
+        try:
+            balance = await loop.run_in_executor(None, self.client.balance)
+        except PlatformError as err:
+            # Не смогли узнать баланс — не ставим. Слепая ставка при
+            # неизвестном счёте недопустима.
+            return f"не проверить счёт: {err}"
+
+        threshold = getattr(self.config, "min_balance_for_demo", 1000.0)
+        if balance.amount < threshold:
+            return (
+                f"баланс {balance.amount:.2f} {balance.currency} ниже порога "
+                f"{threshold:.0f} — похоже, на площадке активен РЕАЛЬНЫЙ счёт, "
+                f"а конфиг требует демо. Переключите счёт в кабинете "
+                f"intrade.bar либо поднимите min_balance_for_demo осознанно"
+            )
+        return None
 
     # ── проверки ───────────────────────────────────────────────────────
 

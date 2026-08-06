@@ -72,6 +72,7 @@ class FakeClient:
         self.open_calls = 0
         self.check_calls = 0
         self.active_calls = 0
+        self.balance_calls = 0
         self.settle_outcome = "win"
 
     def open_trade(self, symbol, direction, investment, expiry_minutes=1,
@@ -146,6 +147,22 @@ class FakeClient:
             Процент выплаты.
         """
         return 82
+
+    def balance(self):
+        """Изобразить баланс ДЕМО-счёта.
+
+        Нужен предохранителю движка: перед каждой реальной ставкой он
+        сверяет баланс с порогом, потому что площадка не сообщает через
+        API, демо активно или реал. По умолчанию заглушка изображает
+        демо — иначе все тесты режима demo упирались бы в предохранитель.
+
+        Returns:
+            Balance с демо-суммой.
+        """
+        from bot.api.models import Balance
+
+        self.balance_calls += 1
+        return Balance(amount=9363.20, currency="$", raw="9 363,20 $")
 
     def active_trades(self):
         """Изобразить список активных сделок.
@@ -520,6 +537,117 @@ def test_dry_settlement_direction():
         cleanup(path)
 
 
+def test_balance_safeguard_blocks_real_account():
+    """Низкий баланс останавливает ставку: похоже на реальный счёт.
+
+    Площадка НЕ сообщает через API, демо активно или реал: balance.php
+    один на оба счёта, user_hash при переключении не меняется. Значит,
+    конфиг с account="demo" сам по себе не гарантирует ничего — и
+    единственный доступный признак это величина баланса.
+
+    Случай не выдуманный: 2026-08-06 владелец переключился на реальный
+    счёт в кабинете, и баланс по тому же хешу сменился с 9363 $ на
+    11.56 $. Запусти бот прогон по плану — ставки ушли бы с реальных
+    денег при конфиге, где написано «демо».
+    """
+    print("предохранитель по балансу")
+    engine, journal, client, path = make_setup(mode="demo")
+    try:
+        engine.config.account = "demo"
+        engine.config.min_balance_for_demo = 1000.0
+
+        # Баланс реального счёта — ниже порога.
+        class LowBalanceClient(FakeClient):
+            """Заглушка, отдающая баланс реального счёта."""
+
+            def balance(self):
+                """Вернуть низкий баланс.
+
+                Returns:
+                    Balance.
+                """
+                from bot.api.models import Balance
+
+                return Balance(amount=11.56, currency="$", raw="11,56 $")
+
+        low = LowBalanceClient()
+        engine.client = low
+
+        row_id = asyncio.run(engine.handle(signal("call")))
+        check("сделка отклонена", row_id is None)
+        check("ставка НЕ отправлялась", low.open_calls == 0,
+              f"было {low.open_calls} попыток — ДЕНЬГИ УШЛИ БЫ")
+        check("состояние REJECTED", engine.state == State.REJECTED, engine.state)
+
+        risks = [e["message"] for e in journal.recent_events(kind="risk")]
+        check("причина в журнале",
+              any("РЕАЛЬНЫЙ" in message for message in risks), risks)
+
+        # А при балансе демо ставка проходит.
+        class DemoBalanceClient(FakeClient):
+            """Заглушка, отдающая баланс демо-счёта."""
+
+            def balance(self):
+                """Вернуть высокий баланс.
+
+                Returns:
+                    Balance.
+                """
+                from bot.api.models import Balance
+
+                return Balance(amount=9363.20, currency="$", raw="9 363,20 $")
+
+        demo = DemoBalanceClient()
+        engine.client = demo
+        engine.risk = None
+
+        async def scenario():
+            """Открыть сделку при демо-балансе.
+
+            Returns:
+                Локальный id записи.
+            """
+            row = await engine.handle(signal("call"))
+            await asyncio.gather(*engine._settle_tasks, return_exceptions=True)
+            return row
+
+        row_id = asyncio.run(asyncio.wait_for(scenario(), timeout=90))
+        check("при демо-балансе ставка прошла", row_id is not None)
+        check("запрос отправлен один раз", demo.open_calls == 1, demo.open_calls)
+    finally:
+        journal.close()
+        cleanup(path)
+
+
+def test_balance_unknown_blocks_bet():
+    """Если баланс не узнать — не ставим. Слепая ставка недопустима."""
+    print("неизвестный баланс останавливает ставку")
+    engine, journal, client, path = make_setup(mode="demo")
+    try:
+        engine.config.account = "demo"
+
+        class BrokenBalanceClient(FakeClient):
+            """Заглушка, у которой баланс не читается."""
+
+            def balance(self):
+                """Изобразить сбой запроса баланса.
+
+                Raises:
+                    PlatformError: Всегда.
+                """
+                raise PlatformError(code="network", message="сеть не ответила")
+
+        broken = BrokenBalanceClient()
+        engine.client = broken
+
+        row_id = asyncio.run(engine.handle(signal("call")))
+        check("сделка отклонена", row_id is None)
+        check("ставка НЕ отправлялась", broken.open_calls == 0, broken.open_calls)
+    finally:
+        journal.close()
+        cleanup(path)
+
+
 def test_summary():
     """Сводка движка отражает счётчики."""
     print("сводка движка")
@@ -546,7 +674,9 @@ def main():
                  test_platform_error_is_not_unknown, test_kill_switch_blocks,
                  test_whitelist_and_stale, test_dry_mode_never_touches_platform,
                  test_shadow_mode_records_without_betting,
-                 test_dry_settlement_direction, test_summary):
+                 test_dry_settlement_direction,
+                 test_balance_safeguard_blocks_real_account,
+                 test_balance_unknown_blocks_bet, test_summary):
         test()
         print()
 
