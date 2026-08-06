@@ -28,6 +28,7 @@ from typing import Optional
 
 from bot.api.models import (
     STATUS_TO_DIRECTION,
+    AccountProfile,
     Balance,
     PlatformError,
     Quote,
@@ -400,3 +401,91 @@ def _search_float(pattern: re.Pattern, text: str, field: str) -> float:
             raw=text,
         )
     return float(match.group(1))
+
+
+# ── профиль аккаунта ────────────────────────────────────────────────────
+#
+# /profile — единственное место, где виден тип счёта (см. INTRADE_API_MAP.md
+# §3.1). Каждая настройка — пара radio с фиксированными id; сервер рендерит
+# checked="checked" на АКТИВНОМ варианте, а onclick вешает на противоположный
+# (тот, куда переключит). Перепутать эти два признака = определить режим
+# наоборот и открыть сделку на реале, считая её демо. Поэтому разбор смотрит
+# ТОЛЬКО на checked и требует ровно одного отмеченного в паре.
+#
+# id пар (из разметки /profile, разбор 2026-08-06):
+#   personal-radio1 / personal-radio2  — Реал / Демо
+#   personal-radio3 / personal-radio4  — Classic / Sprint
+#   personal-radio9 / personal-radio10 — USD / RUB
+_PROFILE_RADIO_PAIRS = {
+    "account": (("personal-radio1", "real"), ("personal-radio2", "demo")),
+    "trade_type": (("personal-radio3", "classic"), ("personal-radio4", "sprint")),
+    "currency": (("personal-radio9", "usd"), ("personal-radio10", "rub")),
+}
+
+
+def _radio_checked(html: str, radio_id: str) -> Optional[bool]:
+    """Определить, отмечен ли radio с данным id.
+
+    Args:
+        html:     HTML страницы /profile.
+        radio_id: Значение атрибута id тега input.
+
+    Returns:
+        True/False, либо None, если тега с таким id в разметке нет.
+    """
+    # Тег ищем по id; атрибуты внутри тега могут идти в любом порядке.
+    match = re.search(
+        r'<input\b[^>]*\bid="%s"[^>]*>' % re.escape(radio_id), html)
+    if not match:
+        return None
+    return "checked" in match.group(0)
+
+
+def parse_profile(html: str) -> "AccountProfile":
+    """Разобрать /profile: тип счёта, тип сделок, валюта.
+
+    Не угадывает. Для каждой пары radio требуется РОВНО ОДИН отмеченный
+    вариант: оба пустых, оба отмеченных или отсутствие тегов — отказ.
+    Цена догадки здесь — ставка реальными деньгами при конфиге "demo",
+    поэтому любая неожиданность в разметке останавливает торговлю.
+
+    Args:
+        html: HTML страницы /profile.
+
+    Returns:
+        AccountProfile.
+
+    Raises:
+        PlatformError: Разметка не позволяет определить состояние однозначно.
+    """
+    resolved = {}
+    for field, ((id_a, val_a), (id_b, val_b)) in _PROFILE_RADIO_PAIRS.items():
+        checked_a = _radio_checked(html, id_a)
+        checked_b = _radio_checked(html, id_b)
+
+        if checked_a is None or checked_b is None:
+            raise PlatformError(
+                code="profile_layout_changed",
+                message=(
+                    f"в /profile нет пары radio для «{field}» "
+                    f"({id_a}/{id_b}) — вёрстка изменилась, разбор ненадёжен"
+                ),
+                raw=html[:2000],
+            )
+        if checked_a == checked_b:
+            # Оба отмечены или оба пусты — состояние неопределимо.
+            raise PlatformError(
+                code="profile_ambiguous",
+                message=(
+                    f"состояние «{field}» неоднозначно: "
+                    f"{id_a}={checked_a}, {id_b}={checked_b}"
+                ),
+                raw=html[:2000],
+            )
+        resolved[field] = val_a if checked_a else val_b
+
+    return AccountProfile(
+        account=resolved["account"],
+        trade_type=resolved["trade_type"],
+        currency=resolved["currency"],
+    )

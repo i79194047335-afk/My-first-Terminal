@@ -73,6 +73,7 @@ class FakeClient:
         self.check_calls = 0
         self.active_calls = 0
         self.balance_calls = 0
+        self.profile_calls = 0
         self.settle_outcome = "win"
 
     def open_trade(self, symbol, direction, investment, expiry_minutes=1,
@@ -163,6 +164,24 @@ class FakeClient:
 
         self.balance_calls += 1
         return Balance(amount=9363.20, currency="$", raw="9 363,20 $")
+
+    def profile(self):
+        """Изобразить /profile с демо-счётом.
+
+        Нужен предохранителю движка: с 2026-08-06 перед каждой ставкой
+        первой линией сверяется /profile (авторитетный источник типа
+        счёта), и только второй — эвристика по балансу. По умолчанию
+        заглушка изображает демо/sprint/usd — иначе все тесты режима demo
+        упирались бы в предохранитель.
+
+        Returns:
+            AccountProfile демо-счёта.
+        """
+        from bot.api.models import AccountProfile
+
+        self.profile_calls += 1
+        return AccountProfile(account="demo", trade_type="sprint",
+                              currency="usd")
 
     def active_trades(self):
         """Изобразить список активных сделок.
@@ -648,6 +667,102 @@ def test_balance_unknown_blocks_bet():
         cleanup(path)
 
 
+def test_profile_safeguard_hard_stop():
+    """Расхождение /profile с конфигом — жёсткий стоп, не переключение.
+
+    Первая линия предохранителя (с 2026-08-06): /profile — авторитетный
+    источник типа счёта. Требование карты API §3.1: при расхождении бот
+    останавливается, а НЕ приводит счёт к конфигу на лету — тумблер без
+    параметра слишком опасен для торгового цикла.
+    """
+    print("предохранитель по /profile")
+    from bot.api.models import AccountProfile
+
+    engine, journal, client, path = make_setup(mode="demo")
+    try:
+        engine.config.account = "demo"
+
+        # Площадка на РЕАЛЕ при конфиге demo.
+        class RealProfileClient(FakeClient):
+            """Заглушка: /profile говорит «реал»."""
+
+            def profile(self):
+                """Вернуть профиль реального счёта.
+
+                Returns:
+                    AccountProfile.
+                """
+                self.profile_calls += 1
+                return AccountProfile(account="real", trade_type="sprint",
+                                      currency="usd")
+
+        real = RealProfileClient()
+        engine.client = real
+        row_id = asyncio.run(engine.handle(signal("call")))
+        check("реал при конфиге demo: отклонено", row_id is None)
+        check("ставка НЕ отправлялась", real.open_calls == 0, real.open_calls)
+        check("тумблер НЕ дёргался (нет такого метода в пути ставки)",
+              not hasattr(real, "toggle_calls") or real.toggle_calls == 0)
+
+        # Тип сделок аккаунта classic при отправляемом sprint.
+        class ClassicProfileClient(FakeClient):
+            """Заглушка: аккаунт в режиме classic."""
+
+            def profile(self):
+                """Вернуть профиль с classic.
+
+                Returns:
+                    AccountProfile.
+                """
+                return AccountProfile(account="demo", trade_type="classic",
+                                      currency="usd")
+
+        classic = ClassicProfileClient()
+        engine.client = classic
+        row_id = asyncio.run(engine.handle(signal("call")))
+        check("classic на аккаунте: отклонено", row_id is None)
+        check("ставка НЕ отправлялась (classic)", classic.open_calls == 0)
+
+        # Валюта RUB — лимиты и суммы другие.
+        class RubProfileClient(FakeClient):
+            """Заглушка: счёт в рублях."""
+
+            def profile(self):
+                """Вернуть профиль с RUB.
+
+                Returns:
+                    AccountProfile.
+                """
+                return AccountProfile(account="demo", trade_type="sprint",
+                                      currency="rub")
+
+        rub = RubProfileClient()
+        engine.client = rub
+        row_id = asyncio.run(engine.handle(signal("call")))
+        check("RUB на счёте: отклонено", row_id is None)
+
+        # /profile не читается — не ставим («не смог проверить» ≠ «всё ок»).
+        class BrokenProfileClient(FakeClient):
+            """Заглушка: /profile не отвечает."""
+
+            def profile(self):
+                """Изобразить сбой чтения профиля.
+
+                Raises:
+                    PlatformError: Всегда.
+                """
+                raise PlatformError(code="network", message="сеть не ответила")
+
+        broken = BrokenProfileClient()
+        engine.client = broken
+        row_id = asyncio.run(engine.handle(signal("call")))
+        check("профиль не читается: отклонено", row_id is None)
+        check("ставка НЕ отправлялась (сбой)", broken.open_calls == 0)
+    finally:
+        journal.close()
+        cleanup(path)
+
+
 def test_summary():
     """Сводка движка отражает счётчики."""
     print("сводка движка")
@@ -676,7 +791,8 @@ def main():
                  test_shadow_mode_records_without_betting,
                  test_dry_settlement_direction,
                  test_balance_safeguard_blocks_real_account,
-                 test_balance_unknown_blocks_bet, test_summary):
+                 test_balance_unknown_blocks_bet,
+                 test_profile_safeguard_hard_stop, test_summary):
         test()
         print()
 

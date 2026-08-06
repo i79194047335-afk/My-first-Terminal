@@ -1,0 +1,19 @@
+<!-- Фрагмент /profile: активен РЕАЛЬНЫЙ счёт (тот самый случай, который
+     бот обязан ловить до ставки). Происхождение — как у profile_demo.html:
+     разметка по разбору 2026-08-06, заменить сохранённым дампом. -->
+<div class="personal-settings">
+  <div class="setting-row">
+    <input id="personal-radio1" type="radio" name="account" checked="checked">
+    <label for="personal-radio1">Реальный счёт</label>
+    <input id="personal-radio2" type="radio" name="account" onclick="user_demo_trade();">
+    <label for="personal-radio2">Демо счёт</label>
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio3" type="radio" name="tradetype" onclick="user_trade_type();">
+    <input id="personal-radio4" type="radio" name="tradetype" checked="checked">
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio9" type="radio" name="currency" checked="checked">
+    <input id="personal-radio10" type="radio" name="currency" onclick="user_currency_edit();">
+  </div>
+</div>

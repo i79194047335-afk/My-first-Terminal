@@ -32,6 +32,7 @@ import requests
 
 from bot.api.models import (
     DIRECTION_TO_STATUS,
+    AccountProfile,
     Balance,
     Credentials,
     PlatformError,
@@ -230,20 +231,149 @@ class IntradeClient:
         return parsers.parse_quotes(payload)
 
     def active_trades(self) -> str:
-        """Запросить список активных сделок сырым текстом.
+        """Запросить список последних сделок сырым текстом.
 
         Нужен для разрешения состояния UNKNOWN: если ответ на открытие
         потерялся, сверяемся здесь, а не повторяем ставку. Разбор HTML не
         делается намеренно — формат живьём не изучен, а для сверки по
-        подстроке trade_id хватает сырого текста.
+        подстроке символа хватает сырого текста.
+
+        ИСТОРИЯ БАГА: до 2026-08-06 метод ходил на /user_real_trade.php —
+        по ПЕРВОЙ версии карты API тот числился «списком активных сделок».
+        Разбор /profile показал, что это ТУМБЛЕР Реал⇄Демо без параметра
+        (INTRADE_API_MAP.md §3.1): каждая сверка UNKNOWN молча переключала
+        бы тип счёта, возможно на реал. Список сделок отдаёт
+        /trade_load_more2.php.
 
         Returns:
-            Сырой ответ площадки.
+            Сырой ответ площадки (HTML истории сделок).
 
         Raises:
             PlatformError: Отказ площадки.
         """
-        return self._post("/user_real_trade.php", self._auth_fields())
+        data = self._auth_fields()
+        # last=0 — с самого свежего края истории (так листает их фронт).
+        data["last"] = "0"
+        return self._post("/trade_load_more2.php", data)
+
+    def profile(self) -> "AccountProfile":
+        """Прочитать состояние настроек аккаунта из /profile.
+
+        ЕДИНСТВЕННЫЙ способ узнать тип счёта (реал/демо): API площадки —
+        голые тумблеры без параметра, и «спросить» больше негде. Чтение
+        идемпотентно, поэтому ретраи _get допустимы.
+
+        Returns:
+            AccountProfile (account / trade_type / currency).
+
+        Raises:
+            PlatformError: Сеть, отказ или неоднозначная разметка.
+        """
+        url = f"{self.base_url}/profile"
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = self.session.get(url, timeout=self.timeout)
+                response.raise_for_status()
+                return parsers.parse_profile(response.text)
+            except requests.RequestException as err:
+                last_error = err
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+        raise PlatformError(
+            code="network", message=f"/profile: сеть не ответила ({last_error})"
+        )
+
+    def _toggle_account_mode(self) -> str:
+        """Дёрнуть тумблер Реал⇄Демо. ОДИН запрос, без ретраев.
+
+        Приватный намеренно: у вызова НЕТ параметра с желаемым состоянием,
+        он просто инвертирует текущий тип счёта (INTRADE_API_MAP.md §3.1).
+        Слепой вызов может перевести счёт на РЕАЛ. Единственный законный
+        путь — ensure_account_mode(), который читает состояние до и после.
+
+        Ретраев нет по той же причине, что у open_trade: вызов не
+        идемпотентен. Запрос мог дойти при потерянном ответе — повтор
+        переключил бы счёт ВТОРОЙ раз, молча вернув его в исходное
+        состояние при видимой ошибке.
+
+        Returns:
+            Сырой ответ площадки ("error" = есть незакрытые сделки).
+
+        Raises:
+            PlatformError: Сеть не отдала ответ; состояние счёта после
+                этого НЕИЗВЕСТНО — обязательна перечитка /profile.
+        """
+        try:
+            response = self.session.post(
+                f"{self.base_url}/user_real_trade.php",
+                data=self._auth_fields(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as err:
+            raise PlatformError(
+                code="toggle_unknown",
+                message=(
+                    f"ответ тумблера счёта не получен ({err}); состояние "
+                    "НЕИЗВЕСТНО — перечитайте /profile перед любой ставкой"
+                ),
+            ) from err
+
+    def ensure_account_mode(self, target: str) -> "AccountProfile":
+        """Привести тип счёта к целевому по строгому протоколу.
+
+        Порядок из INTRADE_API_MAP.md §3.1: прочитать /profile → сравнить
+        с целью → переключить ТОЛЬКО при расхождении → перечитать /profile
+        и убедиться. Никакой шаг не пропускается: тумблер без параметра не
+        оставляет права на ошибку.
+
+        Args:
+            target: "demo" либо "real".
+
+        Returns:
+            AccountProfile после приведения (account == target).
+
+        Raises:
+            ValueError:    Неизвестная цель.
+            PlatformError: Открытые сделки мешают переключению, площадка
+                не ответила, либо счёт после переключения не в целевом
+                состоянии.
+        """
+        if target not in ("demo", "real"):
+            raise ValueError(f"неизвестный тип счёта: {target!r}")
+
+        before = self.profile()
+        if before.account == target:
+            return before
+
+        log.warning(
+            "тип счёта на площадке «%s», конфиг требует «%s» — переключаю "
+            "(hash %s)",
+            before.account, target,
+            mask_hash(self.credentials.user_hash if self.credentials else None),
+        )
+        raw = self._toggle_account_mode()
+        if "error" in (raw or "").lower():
+            raise PlatformError(
+                code="toggle_refused",
+                message="площадка отклонила переключение счёта — "
+                        "вероятно, есть незакрытые сделки",
+                raw=raw,
+            )
+
+        after = self.profile()
+        if after.account != target:
+            raise PlatformError(
+                code="toggle_failed",
+                message=(
+                    f"после переключения счёт «{after.account}», "
+                    f"ожидался «{target}» — торговля недопустима"
+                ),
+            )
+        log.info("тип счёта приведён к «%s»", target)
+        return after
 
     def check_trade(self, trade_id: int, investment: float) -> TradeResult:
         """Узнать итог сделки после экспирации.

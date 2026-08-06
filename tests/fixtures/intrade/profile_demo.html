@@ -1,0 +1,37 @@
+<!-- Фрагмент /profile (intrade35.bar): активен ДЕМО-счёт.
+     Восстановлен по разбору живой страницы 2026-08-06 (INTRADE_API_MAP.md
+     §3.1): checked="checked" на АКТИВНОМ варианте, onclick — на том, КУДА
+     переключит. Полного сохранённого дампа страницы пока нет — при первой
+     возможности заменить сохранённым /profile целиком. -->
+<div class="personal-settings">
+  <div class="setting-row">
+    <input id="personal-radio1" type="radio" name="account" onclick="user_real_trade();">
+    <label for="personal-radio1">Реальный счёт</label>
+    <input id="personal-radio2" type="radio" name="account" checked="checked">
+    <label for="personal-radio2">Демо счёт</label>
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio3" type="radio" name="tradetype" onclick="user_trade_type();">
+    <label for="personal-radio3">Classic</label>
+    <input id="personal-radio4" type="radio" name="tradetype" checked="checked">
+    <label for="personal-radio4">Sprint</label>
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio5" type="radio" name="design" checked="checked">
+    <input id="personal-radio6" type="radio" name="design" onclick="user_design_type();">
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio7" type="radio" name="theme" onclick="user_graph_theme();">
+    <input id="personal-radio8" type="radio" name="theme" checked="checked">
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio9" type="radio" name="currency" checked="checked">
+    <label for="personal-radio9">USD</label>
+    <input id="personal-radio10" type="radio" name="currency" onclick="user_currency_edit();">
+    <label for="personal-radio10">RUB</label>
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio13" type="radio" name="hotkey" onclick="user_status_hotkey();">
+    <input id="personal-radio14" type="radio" name="hotkey" checked="checked">
+  </div>
+</div>

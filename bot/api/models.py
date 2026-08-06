@@ -204,3 +204,27 @@ class PlatformError(Exception):
             Строка вида "error_time_18: крайнее время закрытия — 18:00 МСК".
         """
         return f"{self.code}: {self.message}"
+
+
+@dataclass(frozen=True)
+class AccountProfile:
+    """Состояние настроек аккаунта, прочитанное из /profile.
+
+    Единственный способ узнать тип счёта: API площадки — набор «голых»
+    тумблеров без параметра (см. INTRADE_API_MAP.md §3.1), и спросить
+    «какой счёт активен» больше негде. Сервер рендерит checked="checked"
+    на АКТИВНОМ варианте пары radio, а onclick вешает на противоположный.
+
+    Значения строго из закрытого набора; при любой неоднозначности разметки
+    парсер обязан поднять PlatformError, а не заполнять поле догадкой —
+    перепутанный режим счёта означает ставку реальными деньгами.
+
+    Attributes:
+        account:    "real" либо "demo" — тип активного счёта.
+        trade_type: "classic" либо "sprint" — тип сделок уровня аккаунта.
+        currency:   "usd" либо "rub" — валюта счёта.
+    """
+
+    account: Literal["real", "demo"]
+    trade_type: Literal["classic", "sprint"]
+    currency: Literal["usd", "rub"]

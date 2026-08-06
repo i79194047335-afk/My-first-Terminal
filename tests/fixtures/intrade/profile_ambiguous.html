@@ -1,0 +1,17 @@
+<!-- Фрагмент /profile с НЕОДНОЗНАЧНЫМ состоянием счёта: ни один radio пары
+     account не отмечен. Синтетический кейс поверх реальной разметки —
+     проверяет, что парсер отказывается угадывать. -->
+<div class="personal-settings">
+  <div class="setting-row">
+    <input id="personal-radio1" type="radio" name="account" onclick="user_real_trade();">
+    <input id="personal-radio2" type="radio" name="account" onclick="user_demo_trade();">
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio3" type="radio" name="tradetype" onclick="user_trade_type();">
+    <input id="personal-radio4" type="radio" name="tradetype" checked="checked">
+  </div>
+  <div class="setting-row">
+    <input id="personal-radio9" type="radio" name="currency" checked="checked">
+    <input id="personal-radio10" type="radio" name="currency" onclick="user_currency_edit();">
+  </div>
+</div>
