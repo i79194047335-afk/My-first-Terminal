@@ -436,7 +436,10 @@ class Panel:
             "quotes_fresh": self.quotes.fresh if self.quotes else None,
             "engine": self.engine.summary() if self.engine else None,
             "risk": self.risk.status() if self.risk else None,
-            "stats": self.journal.stats_today(),
+            # Статистика ТЕКУЩЕГО режима — та же, на которую смотрят
+            # ограничители. Показывать общую по всем режимам значило бы
+            # рисовать в панели одни цифры, а лимиты считать по другим.
+            "stats": self.journal.stats_today(mode=self.config.mode),
             "open_positions": open_positions,
             "trades": trades,
             "events": [

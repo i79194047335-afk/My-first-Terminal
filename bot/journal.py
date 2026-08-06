@@ -401,14 +401,19 @@ class Journal:
 
     # ── статистика и отчёты ────────────────────────────────────────────
 
-    def stats_today(self, now: Optional[float] = None) -> dict:
+    def stats_today(self, now: Optional[float] = None,
+                    mode: Optional[str] = None) -> dict:
         """Сводка за текущие сутки — для ограничителей и панели.
 
         Сутки считаются по UTC. Ограничитель max_trades_per_day опирается
         на это же определение, поэтому оно должно быть одно на весь проект.
 
         Args:
-            now: Момент отсчёта; None — сейчас.
+            now:  Момент отсчёта; None — сейчас.
+            mode: Считать только сделки этого режима ("demo", "dry", …).
+                  None — все. Ограничители обязаны передавать свой режим:
+                  иначе имитационные dry-сделки расходуют дневной лимит и
+                  просадку настоящего прогона (найдено на Слое 7).
 
         Returns:
             Словарь: trades, wins, losses, pnl, consecutive_losses.
@@ -416,17 +421,19 @@ class Journal:
         now = now or time.time()
         day_start = now - (now % 86400)
 
-        try:
-            cursor = self.conn.execute(
-                """SELECT COUNT(*) AS trades,
+        query = """SELECT COUNT(*) AS trades,
                           SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) AS wins,
                           SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
                           COALESCE(SUM(pnl), 0) AS pnl
                      FROM trades
-                    WHERE created_ts >= ?""",
-                (day_start,),
-            )
-            row = cursor.fetchone()
+                    WHERE created_ts >= ?"""
+        params: tuple = (day_start,)
+        if mode:
+            query += " AND mode = ?"
+            params += (mode,)
+
+        try:
+            row = self.conn.execute(query, params).fetchone()
         except sqlite3.Error as err:
             log.error("не собрать статистику за сутки: %s", err)
             return {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0,
@@ -437,26 +444,49 @@ class Journal:
             "wins": row["wins"] or 0,
             "losses": row["losses"] or 0,
             "pnl": row["pnl"] or 0.0,
-            "consecutive_losses": self.consecutive_losses(),
+            "consecutive_losses": self.consecutive_losses(now=now, mode=mode),
         }
 
-    def consecutive_losses(self) -> int:
-        """Сколько убытков подряд идёт прямо сейчас.
+    def consecutive_losses(self, now: Optional[float] = None,
+                           mode: Optional[str] = None) -> int:
+        """Сколько убытков подряд идёт прямо сейчас, в пределах суток.
 
         Считается по последним рассчитанным сделкам, от новых к старым, до
         первого не-убытка. Возврат (refund) серию НЕ продолжает и НЕ рвёт —
         он просто пропускается: ставка вернулась, ничего не произошло.
 
+        Две границы, обе появились после Слоя 7 (живой прогон остановился
+        из-за ВЧЕРАШНИХ dry-убытков):
+
+        1. Серия обрывается на границе суток UTC. Ограничитель называется
+           «стоп после N убытков подряд» и защищает от полосы неудач в
+           текущей сессии; вчерашние сделки к сегодняшней полосе отношения
+           не имеют, а сама остановка снимается только руками.
+        2. Серия считается в пределах ОДНОГО режима. Имитационная сделка
+           не должна останавливать реальный прогон и наоборот — это разные
+           потоки, у них даже цены разные (в dry исход моделируется).
+
+        Args:
+            now:  Момент отсчёта; None — сейчас.
+            mode: Считать только сделки этого режима; None — все.
+
         Returns:
             Длина текущей серии убытков.
         """
-        try:
-            cursor = self.conn.execute(
-                """SELECT result FROM trades
+        now = now or time.time()
+        day_start = now - (now % 86400)
+
+        query = """SELECT result FROM trades
                     WHERE result IS NOT NULL AND result != 'unknown'
-                    ORDER BY id DESC LIMIT 100"""
-            )
-            rows = cursor.fetchall()
+                      AND created_ts >= ?"""
+        params: tuple = (day_start,)
+        if mode:
+            query += " AND mode = ?"
+            params += (mode,)
+        query += " ORDER BY id DESC LIMIT 100"
+
+        try:
+            rows = self.conn.execute(query, params).fetchall()
         except sqlite3.Error as err:
             log.error("не посчитать серию убытков: %s", err)
             return 0

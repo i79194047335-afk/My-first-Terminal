@@ -107,7 +107,10 @@ class RiskManager:
             return (f"кулдаун: осталось "
                     f"{self.risk.cooldown_sec - since_last:.0f} с")
 
-        stats = self.journal.stats_today()
+        # Режим передаётся обязательно: лимиты текущего прогона не должны
+        # расходоваться сделками другого режима. Имитационные dry-сделки
+        # однажды остановили живой прогон по серии убытков (Слой 7).
+        stats = self.journal.stats_today(mode=self.config.mode)
 
         if stats["trades"] >= self.risk.max_trades_per_day:
             return (f"дневной лимит сделок исчерпан "
@@ -253,7 +256,7 @@ class RiskManager:
         Returns:
             Словарь с лимитами, расходом и причиной стопа.
         """
-        stats = self.journal.stats_today()
+        stats = self.journal.stats_today(mode=self.config.mode)
         since_last = time.time() - self.last_trade_ts if self.last_trade_ts else None
         cooldown_left = None
         if since_last is not None and since_last < self.risk.cooldown_sec:

@@ -206,6 +206,83 @@ def test_consecutive_losses():
         cleanup(path)
 
 
+def test_streak_resets_on_day_and_mode():
+    """Серия убытков не тянется со вчера и не смешивает режимы.
+
+    Найдено на Слое 7: живой прогон остановился по лимиту «3 убытка
+    подряд», хотя реальных убытков в тот день не было — счётчик тянул
+    ВЧЕРАШНИЕ имитационные dry-сделки. Оба изъяна проверяются здесь.
+    """
+    print("серия убытков: границы суток и режима")
+    journal, path = temp_journal()
+    try:
+        def add(result, mode="demo", days_ago=0):
+            """Добавить рассчитанную сделку, при желании — в прошлые сутки.
+
+            created_ts проставляется журналом, поэтому «вчерашнее» время
+            выставляется прямым UPDATE: так проверяется настоящий SQL-фильтр,
+            а не подставленный в вызов аргумент.
+
+            Args:
+                result:   Итог сделки.
+                mode:     Режим прогона.
+                days_ago: На сколько суток сдвинуть назад.
+
+            Returns:
+                Локальный id записи.
+            """
+            row_id = journal.open_trade(mode=mode, symbol="USD/JPY",
+                                        direction="call", investment=1,
+                                        expiry_minutes=1)
+            journal.settle_trade(row_id, result,
+                                 pnl=-1 if result == "loss" else 1)
+            if days_ago:
+                journal.conn.execute(
+                    "UPDATE trades SET created_ts = created_ts - ? WHERE id = ?",
+                    (days_ago * 86400, row_id))
+                journal.conn.commit()
+            return row_id
+
+        # Вчерашние убытки той же серии сегодня не считаются.
+        add("loss", days_ago=1)
+        add("loss", days_ago=1)
+        add("loss", days_ago=1)
+        check("вчерашние убытки не в серии", journal.consecutive_losses() == 0,
+              journal.consecutive_losses())
+        check("вчерашние не в дневной статистике",
+              journal.stats_today()["trades"] == 0,
+              journal.stats_today())
+
+        # Сегодняшний убыток начинает серию заново.
+        add("loss")
+        check("сегодняшний убыток считается", journal.consecutive_losses() == 1,
+              journal.consecutive_losses())
+
+        # Имитационные dry-сделки не должны останавливать демо-прогон.
+        add("loss", mode="dry")
+        add("loss", mode="dry")
+        check("dry-убытки не входят в серию demo",
+              journal.consecutive_losses(mode="demo") == 1,
+              journal.consecutive_losses(mode="demo"))
+        check("серия dry считается отдельно",
+              journal.consecutive_losses(mode="dry") == 2,
+              journal.consecutive_losses(mode="dry"))
+        check("без фильтра видно все режимы",
+              journal.consecutive_losses() == 3,
+              journal.consecutive_losses())
+
+        # Дневная статистика тоже режимная — лимит сделок и просадка.
+        demo_stats = journal.stats_today(mode="demo")
+        dry_stats = journal.stats_today(mode="dry")
+        check("demo: 1 сделка", demo_stats["trades"] == 1, demo_stats)
+        check("dry: 2 сделки", dry_stats["trades"] == 2, dry_stats)
+        check("demo: серия в сводке 1",
+              demo_stats["consecutive_losses"] == 1, demo_stats)
+    finally:
+        journal.close()
+        cleanup(path)
+
+
 def test_update_recomputes_latency():
     """Разрешение UNKNOWN: появился open_ts — пересчиталась задержка."""
     print("пересчёт задержки при разрешении UNKNOWN")
@@ -345,6 +422,7 @@ def main():
     """
     for test in (test_schema_and_insert, test_latency_computed,
                  test_settle_and_stats, test_consecutive_losses,
+                 test_streak_resets_on_day_and_mode,
                  test_update_recomputes_latency, test_events,
                  test_latency_report, test_kill_switch,
                  test_journal_survives_errors):
