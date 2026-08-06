@@ -306,14 +306,16 @@ def cmd_serve(cfg) -> int:
         return 0
 
 
-def cmd_latency(cfg) -> int:
+def cmd_latency(cfg, mode=None) -> int:
     """Показать отчёт по задержке открытия сделок.
 
     Главный практический результат Слоя 7: если задержка растёт на
     волатильности, минутная экспирация может оказаться неприменимой.
 
     Args:
-        cfg: BotConfig.
+        cfg:  BotConfig.
+        mode: Ограничить отчёт одним режимом ("demo"), иначе попадают и
+              имитационные сделки dry/shadow со смоделированной задержкой.
 
     Returns:
         Код возврата процесса.
@@ -322,7 +324,7 @@ def cmd_latency(cfg) -> int:
 
     journal = Journal(cfg.db_path)
     try:
-        report = journal.report_latency()
+        report = journal.report_latency(mode=mode)
     finally:
         journal.close()
 
@@ -367,6 +369,11 @@ def main() -> int:
         default=config_module.DEFAULT_CONFIG_PATH,
         help="путь к bot_config.json",
     )
+    parser.add_argument(
+        "--mode",
+        default=None,
+        help="для latency: режим сделок в отчёте (например, demo)",
+    )
     args = parser.parse_args()
 
     try:
@@ -383,6 +390,8 @@ def main() -> int:
 
     handlers = {"check": cmd_check, "quotes": cmd_quotes, "clock": cmd_clock,
                 "serve": cmd_serve, "latency": cmd_latency}
+    if args.command == "latency":
+        return cmd_latency(cfg, mode=args.mode)
     return handlers[args.command](cfg)
 
 

@@ -471,7 +471,7 @@ class Journal:
                 break
         return streak
 
-    def report_latency(self) -> dict:
+    def report_latency(self, mode: Optional[str] = None) -> dict:
         """Отчёт по задержке открытия — главный результат Слоя 7.
 
         Задержка площадки при разведке составила 2910 и 3559 мс, тогда как
@@ -480,15 +480,24 @@ class Journal:
         неприменимой — отчёт существует, чтобы увидеть это на данных, а не
         на ощущениях.
 
+        Args:
+            mode: Ограничить отчёт одним режимом ("demo", "dry", ...).
+                  Без фильтра имитационные сделки (dry/shadow) разбавляют
+                  замер: их задержка смоделирована, а не измерена.
+
         Returns:
             Словарь: count, median_ms, p90_ms, min_ms, max_ms, by_hour.
             При отсутствии данных count равен нулю.
         """
+        query = ("SELECT latency_ms, open_ts FROM trades "
+                 "WHERE latency_ms IS NOT NULL")
+        params: tuple = ()
+        if mode:
+            query += " AND mode = ?"
+            params = (mode,)
+        query += " ORDER BY latency_ms"
         try:
-            cursor = self.conn.execute(
-                """SELECT latency_ms, open_ts FROM trades
-                    WHERE latency_ms IS NOT NULL ORDER BY latency_ms"""
-            )
+            cursor = self.conn.execute(query, params)
             rows = cursor.fetchall()
         except sqlite3.Error as err:
             log.error("не построить отчёт по задержке: %s", err)
