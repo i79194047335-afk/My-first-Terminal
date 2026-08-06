@@ -14,6 +14,8 @@ pytest в проекте нет — файл запускается напрям
 import os
 import sys
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot.api.client import IntradeClient
@@ -241,6 +243,74 @@ def test_active_trades_endpoint():
     check("передаёт last", captured.get("data", {}).get("last") == "0")
 
 
+def test_profile_auth_cookies():
+    """/profile авторизуется куками user_id/user_hash — бот обязан их слать.
+
+    Регрессия 2026-08-06: profile() ходил на GET /profile БЕЗ кук, площадка
+    отвечала JS-редиректом на главную, и живая проверка счёта была
+    невозможна: тест на фикстурах проходил, а на боевом профиле движок
+    каждый раз останавливал торговлю «не прочитать /profile».
+
+    Проверяется САМ механизм авторизации: куки должны попасть в заголовок
+    Cookie запроса к торговому домену и НЕ попасть в запросы к
+    котировочному домену (user_hash — ключ от аккаунта).
+    """
+    print("profile: куки авторизации")
+
+    html = load("profile_demo.html")
+
+    class FakeResponse:
+        """Минимальный ответ, нужный profile(): текст + raise_for_status."""
+
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            """Ничего не делать — запрос «успешен»."""
+            return None
+
+    captured = {}
+
+    client = IntradeClient(
+        base_url="https://intrade35.bar",
+        quotes_url="https://intrade.bar/price_now",
+        credentials=Credentials(user_id=30169, user_hash="b" * 32),
+    )
+
+    def fake_get(url, timeout=None, **kwargs):
+        """Записать Cookie-заголовок, который ушёл бы в запрос, и ответить."""
+        captured["url"] = url
+        prepared = requests.PreparedRequest()
+        prepared.prepare(
+            method="GET", url=url, cookies=client.session.cookies)
+        captured["cookie_header"] = prepared.headers.get("Cookie", "")
+        return FakeResponse(html)
+
+    client.session.get = fake_get
+
+    # Торговый домен: куки ушли, профиль разобран.
+    prof = client.profile()
+    check("profile читает /profile", captured["url"].endswith("/profile"),
+          captured["url"])
+    cookie = captured["cookie_header"]
+    check("кука user_id ушла на /profile", "user_id=30169" in cookie, cookie)
+    check("кука user_hash ушла на /profile", f"user_hash={'b' * 32}" in cookie)
+    check("профиль разобран (demo)", prof.account == "demo")
+
+    # Котировочный домен: user_hash уходить не должен.
+    prepared = requests.PreparedRequest()
+    prepared.prepare(method="GET", url="https://intrade.bar/price_now",
+                     cookies=client.session.cookies)
+    quotes_cookie = prepared.headers.get("Cookie", "")
+    check("хеш НЕ уходит на котировочный домен",
+          "user_hash=" not in quotes_cookie, quotes_cookie)
+
+    # Куки не мешают обычному пути полей формы.
+    fields = client._auth_fields()
+    check("поля формы на месте", fields.get("user_id") == "30169"
+          and fields.get("user_hash") == "b" * 32)
+
+
 def main():
     """Прогнать все тесты и вернуть код возврата.
 
@@ -248,7 +318,7 @@ def main():
         0 — всё прошло, 1 — есть провалы.
     """
     for test in (test_parse_profile, test_ensure_protocol,
-                 test_active_trades_endpoint):
+                 test_active_trades_endpoint, test_profile_auth_cookies):
         test()
         print()
 

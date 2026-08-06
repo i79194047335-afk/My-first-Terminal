@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -96,8 +97,35 @@ class IntradeClient:
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
+        self._set_auth_cookies()
 
     # ── вспомогательное ────────────────────────────────────────────────
+
+    def _set_auth_cookies(self) -> None:
+        """Положить user_id/user_hash в куки сессии — их требует /profile.
+
+        Почти все вызовы авторизуются полями формы (_auth_fields), но
+        /profile — HTML-страница и открывается ТОЛЬКО по кукам. Проверено
+        живьём (2026-08-06): без них площадка отвечает JS-редиректом на
+        главную, и проверка счёта перед ставкой невозможна — движок
+        останавливает любую торговлю («не прочитать /profile»).
+
+        Домен ограничен торговым хостом: на котировочный домен (intrade.bar)
+        user_hash уходить не должен — это ключ от аккаунта.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        if not self.credentials:
+            return
+        domain = urlparse(self.base_url).hostname
+        self.session.cookies.set(
+            "user_id", str(self.credentials.user_id), domain=domain)
+        self.session.cookies.set(
+            "user_hash", self.credentials.user_hash, domain=domain)
 
     def _auth_fields(self) -> dict:
         """Собрать поля авторизации для формы.
@@ -113,6 +141,10 @@ class IntradeClient:
                 code="no_credentials",
                 message="не заданы user_id/user_hash — сначала авторизация",
             )
+        # Куки тоже синхронизируем здесь: учётные данные могут быть заданы
+        # после конструирования (документированный путь), а /profile идёт
+        # в обход _auth_fields. Вызов идемпотентен.
+        self._set_auth_cookies()
         return {
             "user_id": str(self.credentials.user_id),
             "user_hash": self.credentials.user_hash,
