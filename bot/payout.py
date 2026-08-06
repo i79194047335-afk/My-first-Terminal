@@ -41,7 +41,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone  # noqa: F401 — timezone нужен is_broker_down
 
 # Часовой пояс Москвы. Площадка живёт по нему: и «крайнее время 18:00»,
 # и ночные ограничения, и окно у начала часа заданы в МСК.
@@ -67,6 +67,18 @@ HOUR_EDGE_MINUTES = 3
 # Окно пониженной выплаты действует с 17:00 до 09:00 МСК следующего дня.
 HOUR_EDGE_FROM_HOUR = 17
 HOUR_EDGE_TO_HOUR = 9
+
+# ОКНО ПРОСТОЯ БРОКЕРА: 21:00–23:00 UTC ежедневно (со слов владельца,
+# 2026-08-06). Торговли в это время нет вовсе — это не «низкая выплата»,
+# а закрытая площадка. Задано в UTC, а не в МСК: у брокера сутки считаются
+# по UTC, и пересчёт через московское время добавил бы лишний повод для
+# ошибки на переводе часов.
+#
+# Практическое следствие для замера задержки (Слой 7): выборка не должна
+# упираться в эту границу. Прогон, начатый в 20:50 UTC, оборвётся на
+# половине, и часть сделок вернёт ошибку вместо результата.
+BROKER_DOWN_FROM_UTC = 21
+BROKER_DOWN_TO_UTC = 23
 
 
 def breakeven_winrate(percent: float) -> float:
@@ -158,6 +170,48 @@ def minutes_until_hour_edge(moment: datetime = None) -> float:
     # Окно начинается за HOUR_EDGE_MINUTES до начала следующего часа.
     minutes_to_hour = 60 - msk.minute - msk.second / 60.0
     return max(0.0, minutes_to_hour - HOUR_EDGE_MINUTES)
+
+
+def is_broker_down(moment: datetime = None) -> bool:
+    """Идёт ли ежедневное окно простоя брокера (21:00–23:00 UTC).
+
+    В это время площадка не торгует вовсе. Отличается от окна пониженной
+    выплаты принципиально: там сделку взять можно, но невыгодно, здесь —
+    нельзя вообще.
+
+    Args:
+        moment: Момент времени (aware datetime). По умолчанию — сейчас.
+
+    Returns:
+        True, если торговля сейчас недоступна.
+    """
+    if moment is None:
+        moment = datetime.now(timezone.utc)
+    utc = moment.astimezone(timezone.utc)
+    return BROKER_DOWN_FROM_UTC <= utc.hour < BROKER_DOWN_TO_UTC
+
+
+def minutes_until_broker_down(moment: datetime = None) -> float:
+    """Сколько минут осталось до окна простоя брокера.
+
+    Нужно перед долгим прогоном: серию из 20+ сделок нет смысла начинать
+    за полчаса до закрытия площадки — она оборвётся на середине.
+
+    Args:
+        moment: Момент времени (aware datetime). По умолчанию — сейчас.
+
+    Returns:
+        Минуты до начала окна; 0.0, если окно уже идёт.
+    """
+    if moment is None:
+        moment = datetime.now(timezone.utc)
+    utc = moment.astimezone(timezone.utc)
+
+    if is_broker_down(utc):
+        return 0.0
+
+    hours_left = (BROKER_DOWN_FROM_UTC - utc.hour) % 24
+    return hours_left * 60 - utc.minute - utc.second / 60.0
 
 
 def describe(percent: float, moment: datetime = None) -> str:

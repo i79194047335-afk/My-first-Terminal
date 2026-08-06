@@ -145,6 +145,12 @@ def cmd_check(cfg) -> int:
     # Окно у начала часа: выплата падает до 60%, безубыточный винрейт
     # прыгает с 54.9% до 62.5%. Показываем всегда, а не только при входе.
     now_msk = datetime.now(payout.MSK)
+    if payout.is_broker_down():
+        print("⛔ БРОКЕР НЕ РАБОТАЕТ (21:00–23:00 UTC) — сделки не принимаются")
+    elif payout.minutes_until_broker_down() < 60:
+        print(f"⚠ до простоя брокера {payout.minutes_until_broker_down():.0f} мин "
+              f"— долгий прогон начинать поздно")
+
     if payout.is_hour_edge():
         print(f"время МСК {now_msk:%H:%M} — ОКНО У НАЧАЛА ЧАСА, выплата урезана")
     else:

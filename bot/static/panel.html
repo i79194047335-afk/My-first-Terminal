@@ -245,7 +245,13 @@ function renderBanners(s) {
     // Окно у начала часа: выплата падает 82% → 60%, безубыточный винрейт
     // прыгает 54.9% → 62.5%. Подтверждено живым замером 2026-08-05.
     const edge = document.getElementById("edgeBanner");
-    if (s.hour_edge) {
+    // Простой брокера важнее окна выплаты: там торговать невыгодно,
+    // здесь — невозможно вовсе, площадка закрыта.
+    if (s.broker_down) {
+        edge.textContent = "⛔ БРОКЕР НЕ РАБОТАЕТ (21:00–23:00 UTC) — " +
+                           "сделки не принимаются";
+        edge.classList.add("show");
+    } else if (s.hour_edge) {
         edge.textContent = "⚠ ОКНО У НАЧАЛА ЧАСА — выплата урезана до 60%, " +
                            "безубыточный винрейт 62.5%. Входы заблокированы.";
         edge.classList.add("show");
@@ -372,7 +378,8 @@ function renderEvents(events) {
 function renderButtons(s) {
     // Кнопки входа гаснут, когда вход запрещён: нажимать бессмысленно,
     // и лучше видеть это до нажатия, чем получать отказ после.
-    const blocked = s.kill_switch || (s.risk && s.risk.halted) || s.hour_edge;
+    const blocked = s.kill_switch || (s.risk && s.risk.halted) ||
+                    s.hour_edge || s.broker_down;
     document.getElementById("btnCall").disabled = blocked;
     document.getElementById("btnPut").disabled = blocked;
     document.getElementById("btnResume").disabled =

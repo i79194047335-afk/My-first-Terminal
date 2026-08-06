@@ -367,6 +367,8 @@ class Panel:
                                  if payout_percent else None),
             "hour_edge": payout.is_hour_edge(),
             "minutes_to_hour_edge": round(payout.minutes_until_hour_edge(), 1),
+            "broker_down": payout.is_broker_down(),
+            "minutes_to_broker_down": round(payout.minutes_until_broker_down(), 1),
             "kill_switch": kill_switch_active(self.config.stop_file),
             "symbols": self.config.symbol_whitelist,
             "default_investment": self.config.default_investment,

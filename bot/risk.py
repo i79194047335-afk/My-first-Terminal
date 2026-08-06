@@ -80,6 +80,11 @@ class RiskManager:
         if kill_switch_active(self.config.stop_file):
             return "kill-switch взведён"
 
+        # Окно простоя брокера: площадка закрыта, ставку принять некому.
+        # Проверяется раньше выплаты — это не «невыгодно», а «невозможно».
+        if payout.is_broker_down():
+            return "брокер не работает (21:00–23:00 UTC)"
+
         # Окно пониженной выплаты. Проверяется до сетевых вызовов: незачем
         # спрашивать процент, если входить всё равно нельзя.
         if payout.is_hour_edge():
@@ -259,6 +264,8 @@ class RiskManager:
             "kill_switch": kill_switch_active(self.config.stop_file),
             "hour_edge": payout.is_hour_edge(),
             "minutes_to_hour_edge": round(payout.minutes_until_hour_edge(), 1),
+            "broker_down": payout.is_broker_down(),
+            "minutes_to_broker_down": round(payout.minutes_until_broker_down(), 1),
             "trades_today": stats["trades"],
             "max_trades_per_day": self.risk.max_trades_per_day,
             "consecutive_losses": stats["consecutive_losses"],

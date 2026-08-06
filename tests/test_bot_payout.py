@@ -156,6 +156,46 @@ def test_minutes_until():
     check("23:00 → 0", minutes_until_hour_edge(msk(23, 0)) == 0.0)
 
 
+def test_broker_downtime():
+    """Ежедневное окно простоя брокера: 21:00–23:00 UTC."""
+    print("окно простоя брокера")
+    from datetime import timezone as tz
+
+    from bot.payout import is_broker_down, minutes_until_broker_down
+
+    def utc(hour, minute=0):
+        """Собрать момент в UTC.
+
+        Args:
+            hour:   Час UTC.
+            minute: Минута.
+
+        Returns:
+            datetime с зоной UTC.
+        """
+        return datetime(2026, 8, 6, hour, minute, tzinfo=tz.utc)
+
+    check("20:59 — работает", is_broker_down(utc(20, 59)) is False)
+    check("21:00 — простой", is_broker_down(utc(21, 0)) is True)
+    check("22:30 — простой", is_broker_down(utc(22, 30)) is True)
+    check("22:59 — простой", is_broker_down(utc(22, 59)) is True)
+    check("23:00 — снова работает", is_broker_down(utc(23, 0)) is False)
+    check("13:00 — работает", is_broker_down(utc(13, 0)) is False)
+    check("03:00 — работает", is_broker_down(utc(3, 0)) is False)
+
+    # Сколько осталось до закрытия — нужно, чтобы не начинать долгий прогон
+    # за полчаса до простоя.
+    check("в 20:00 остался час", abs(minutes_until_broker_down(utc(20, 0)) - 60) < 0.1,
+          minutes_until_broker_down(utc(20, 0)))
+    check("в 20:30 осталось 30 мин",
+          abs(minutes_until_broker_down(utc(20, 30)) - 30) < 0.1,
+          minutes_until_broker_down(utc(20, 30)))
+    check("внутри окна — 0", minutes_until_broker_down(utc(22, 0)) == 0.0)
+    check("в 13:00 остаётся 8 часов",
+          abs(minutes_until_broker_down(utc(13, 0)) - 480) < 0.1,
+          minutes_until_broker_down(utc(13, 0)))
+
+
 def test_describe():
     """Человеческое описание выплаты."""
     print("описание для панели")
@@ -178,7 +218,7 @@ def main():
     for test in (test_breakeven, test_expected_percent, test_large_stake_threshold,
                  test_hour_edge_boundaries,
                  test_hour_edge_midnight, test_hour_edge_daytime,
-                 test_minutes_until, test_describe):
+                 test_minutes_until, test_broker_downtime, test_describe):
         test()
         print()
 
