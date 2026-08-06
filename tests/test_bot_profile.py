@@ -74,9 +74,14 @@ def test_parse_profile():
 
     # Ключевая ловушка разметки: onclick стоит на ПРОТИВОПОЛОЖНОМ варианте.
     # Прочитав onclick вместо checked, парсер определил бы режим наоборот.
+    # Разметка настоящая (HAR 2026-08-06): у input НЕТ атрибута name,
+    # только id + checked/onclick.
     check("демо-фикстура содержит onclick у РЕАЛА (ловушка на месте)",
-          'personal-radio1" type="radio" name="account" onclick'
+          'id="personal-radio1" type="radio"  onclick="user_real_trade();"'
           in load("profile_demo.html"))
+    check("реал-фикстура содержит onclick у ДЕМО (ловушка на месте)",
+          'id="personal-radio2" type="radio"  onclick="user_demo_trade();"'
+          in load("profile_real.html"))
 
     try:
         parse_profile(load("profile_ambiguous.html"))

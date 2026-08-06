@@ -1,37 +1,697 @@
-<!-- Фрагмент /profile (intrade35.bar): активен ДЕМО-счёт.
-     Восстановлен по разбору живой страницы 2026-08-06 (INTRADE_API_MAP.md
-     §3.1): checked="checked" на АКТИВНОМ варианте, onclick — на том, КУДА
-     переключит. Полного сохранённого дампа страницы пока нет — при первой
-     возможности заменить сохранённым /profile целиком. -->
-<div class="personal-settings">
-  <div class="setting-row">
-    <input id="personal-radio1" type="radio" name="account" onclick="user_real_trade();">
-    <label for="personal-radio1">Реальный счёт</label>
-    <input id="personal-radio2" type="radio" name="account" checked="checked">
-    <label for="personal-radio2">Демо счёт</label>
-  </div>
-  <div class="setting-row">
-    <input id="personal-radio3" type="radio" name="tradetype" onclick="user_trade_type();">
-    <label for="personal-radio3">Classic</label>
-    <input id="personal-radio4" type="radio" name="tradetype" checked="checked">
-    <label for="personal-radio4">Sprint</label>
-  </div>
-  <div class="setting-row">
-    <input id="personal-radio5" type="radio" name="design" checked="checked">
-    <input id="personal-radio6" type="radio" name="design" onclick="user_design_type();">
-  </div>
-  <div class="setting-row">
-    <input id="personal-radio7" type="radio" name="theme" onclick="user_graph_theme();">
-    <input id="personal-radio8" type="radio" name="theme" checked="checked">
-  </div>
-  <div class="setting-row">
-    <input id="personal-radio9" type="radio" name="currency" checked="checked">
-    <label for="personal-radio9">USD</label>
-    <input id="personal-radio10" type="radio" name="currency" onclick="user_currency_edit();">
-    <label for="personal-radio10">RUB</label>
-  </div>
-  <div class="setting-row">
-    <input id="personal-radio13" type="radio" name="hotkey" onclick="user_status_hotkey();">
-    <input id="personal-radio14" type="radio" name="hotkey" checked="checked">
-  </div>
-</div>
+<!-- Страница /profile в состоянии ДЕМО. Основа — РЕАЛЬНАЯ страница
+     из HAR 2026-08-06 (#148, реал); пара radio account перевёрнута
+     вручную (checked -> radio2, onclick -> radio1), потому что тело
+     демо-состояния HAR не сохранил (gzip, text отсутствует).
+     Остальная разметка настоящая. -->
+
+<!DOCTYPE html>
+<html lang="ru" >
+<head>
+	<meta charset="UTF-8">
+	
+	<link rel="stylesheet" type="text/css" href="/css_new/style.min.css?1786026405">
+	<link rel="stylesheet" type="text/css" href="/css_new/owl.carousel.min.css">
+	<link rel="stylesheet" type="text/css" href="/css_new/owl.theme.default.min.css?1">
+	<link rel="stylesheet" type="text/css" href="/css_new/datepicker.min.css">
+	
+	<script src="/js_new/jquery.js"></script>
+    	
+	<link rel="stylesheet" type="text/css" href="/css_new/style_other.css?1786026405">
+	
+	<title>Прозрачный брокер бинарных опционов</title>
+	
+	<meta name="yandex-verification" content="66907413640f8ac2" />
+	<meta name="mailru-verification" content="a56372e9cbe791d9" />
+	<meta name="keywords" content="" />
+	<meta name="description" content="" />
+	<meta name="interkassa-verification" content="6e9947b935b3c52fa3c001482d0300cf" />
+	<link rel="shortcut icon" href="/image/favicon.jpg" type="image/x-icon">
+	
+
+
+	<!-- Begin Talk-Me {literal} -->
+	<script type='text/javascript'>
+	  (function(d, w, m) {
+		window.supportAPIMethod = m;
+		var s = d.createElement('script');
+		s.type ='text/javascript'; s.id = 'supportScript'; s.charset = 'utf-8';
+		s.async = true;
+		var id = '2b26c2a62fbe75894d1de59238c928aa';
+		s.src = '//lcab.talk-me.ru/support/support.js?h='+id;
+		var sc = d.getElementsByTagName('script')[0];
+		w[m] = w[m] || function() { (w[m].q = w[m].q || []).push(arguments); };
+		if (sc) sc.parentNode.insertBefore(s, sc); 
+		else d.documentElement.firstChild.appendChild(s);
+	  })(document, window, 'TalkMe');
+	</script>
+	<!-- {/literal} End Talk-Me -->
+
+<!-- Yandex.Metrika counter -->
+<!-- /Yandex.Metrika counter -->
+</head>
+
+<div id="server_time_now" style="display: none;">1786026405</div>
+<div id="hidden_user_id" style="display:none;">11111</div>
+
+<body>
+
+<div class="profile  profile--white">
+    <div class="menu-profile">
+        <div class="main-logo">
+                            <a href="/">
+                    <img src="/img_new/main-logo-black.png" alt="Intrade Bar">
+                    <!--<img src="/img_new/no_war_full.png" alt="Intrade Bar - No War">-->
+                </a>
+            
+            <p class="main-logo__text">Прозрачный брокер <br> бинарных опционов</p>
+        </div>
+        <nav class="nav-profile">
+	<ul class="nav-profile__list">
+		<li style="margin-bottom: 13px;"
+            class="nav-profile__item nav-profile__item--active">
+			<a  title="Профиль">
+				<img src="/img_new/icon-menu1.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+        <li style="text-align: center;margin-bottom: 13px;" class="nav-profile__item ">
+            <a style="all: unset;cursor: pointer;" href="/zylo_airdrop" title="Zylo Airdrop">
+                <img class="" alt="Zylo Airdrop" src="/img/zylo-icon.png" style="width: 50px;">
+            </a>
+        </li>
+        		<li class="nav-profile__item ">
+			<a href="/pay" title="Пополнить счёт">
+				<img src="/img_new/icon-menu2.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+		<li class="nav-profile__item ">
+			<a href="/get" title="Вывод средств">
+				<img src="/img_new/icon-menu3.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+		<li class="nav-profile__item ">
+			<a href="/stat" title="Статистика">
+				<img src="/img_new/icon-menu4.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+		<li style="display: none;" class="nav-profile__item ">
+			<a href="/news_platform" title="Новости платформы">
+				<img src="/img_new/icon-menu5.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+		<li class="nav-profile__item ">
+			<a href="/profile_faq" title="FAQ">
+				<img src="/img_new/icon-menu6.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+		<li class="nav-profile__item ">
+			<a href="/quotes" title="Проверить котировки">
+				<img src="/img_new/icon-menu7.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+		<li class="nav-profile__item ">
+			<a href="/security" title="Безопасность">
+				<img src="/img_new/icon-menu8.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+		<li class="nav-profile__item ">
+			<a href="/partner" title="Партнерская программа">
+				<img src="/img_new/icon-menu9.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+		<li class="nav-profile__item ">
+			<a href="/edit" title="Настройки">
+				<img src="/img_new/icon-menu10.svg" class="nav-profile__icon" >
+			</a>
+		</li>
+                    <li style="text-align: center;"
+                class="nav-profile__item ">
+                <a style="all: unset; font-size: 18px; color: #868686; cursor: pointer;" href="/vpn" title="VPN">
+                                            <img class="vpn_icon" alt="vpn" src="/img/vpn/vpn_icon2.svg" style="width: 40px;">
+                                    </a>
+            </li>
+            <script>
+                $('.vpn_icon').mouseenter(function (){
+                    $(this).attr('src', '/img/vpn/vpn_icon2_active.svg');
+                });
+                $('.vpn_icon').mouseleave(function (){
+                    $(this).attr('src', '/img/vpn/vpn_icon2.svg');
+                });
+            </script>
+                    <li style="text-align: center;"
+                class="nav-profile__item ">
+                <a style="all: unset; font-size: 18px; color: #868686; cursor: pointer;"
+                   href="/tournament" title="Турнир">
+                                        <img class="tournament_icon" alt="Турнир" src="/img/cup-blue.png" style="width: 40px;">
+                                    </a>
+            </li>
+            <script>
+                $('.tournament_icon').mouseenter(function (){
+                    $(this).attr('src', '/img/cup-active.png');
+                });
+                $('.tournament_icon').mouseleave(function (){
+                    $(this).attr('src', '/img/cup-blue.png');
+                });
+                $('.vote-icon').mouseenter(function (){
+                    $(this).attr('src', '/img/vote2024/vote_icon_orange.png');
+                });
+                $('.vote-icon').mouseleave(function (){
+                    $(this).attr('src', '/img/vote2024/vote_icon_blue.png');
+                });
+            </script>
+        		<li class="nav-profile__item ">
+			<a href="/exit" class="profile_menu_exit">Выход</a>
+		</li>
+	</ul>
+</nav>
+
+<svg class="visually-hidden" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <symbol id="icon-menu1">
+		<path d="M39.87 79.25C18.29 79.25.68 61.453.68 39.625c0-10.542 4.03-20.464 11.41-27.967C19.469 4.155 29.329 0 39.809 0s20.339 4.155 27.718 11.596C74.907 19.099 79 29.021 79 39.563c0 10.542-4.03 20.463-11.41 27.967-7.379 7.627-17.239 11.72-27.718 11.72zm0-75.653c-9.55 0-18.479 3.782-25.238 10.604C7.935 21.02 4.214 30.075 4.214 39.624c0 19.843 16 36.028 35.594 36.028v1.798-1.798c9.55 0 18.48-3.782 25.239-10.604 6.697-6.82 10.418-15.813 10.418-25.424 0-9.612-3.721-18.665-10.48-25.486C58.288 7.379 49.358 3.597 39.87 3.597z" />
+		<path d="M10.598 39.687c0-7.875 3.038-15.255 8.495-20.836 5.52-5.643 12.898-8.681 20.712-8.681 7.813 0 15.13 3.1 20.65 8.681l-2.543 2.543c-4.837-4.899-11.286-7.627-18.107-7.627-6.883 0-13.333 2.728-18.17 7.627-4.836 4.899-7.503 11.41-7.503 18.355l-3.534-.062z" />
+		<path d="M39.866 49.05c-6.76 0-12.278-5.58-12.278-12.402 0-6.82 5.519-12.402 12.278-12.402 6.76 0 12.278 5.581 12.278 12.402 0 6.883-5.519 12.402-12.278 12.402zm0-21.207c-4.837 0-8.744 3.968-8.744 8.867 0 4.9 3.907 8.868 8.744 8.868s8.743-3.969 8.743-8.868c0-4.899-3.906-8.867-8.743-8.867z" />
+		<path d="M39.866 69.141c-7.317 0-14.263-2.79-19.657-7.875l-.559-.558v-1.612c0-6.822 5.52-12.403 12.279-12.403h15.75c6.76 0 12.278 5.581 12.278 12.403v1.612l-.558.558c-5.27 5.085-12.216 7.875-19.533 7.875zm-16.619-9.984c4.589 4.155 10.48 6.388 16.619 6.388 6.139 0 12.03-2.295 16.619-6.388v-.061c0-4.9-3.907-8.868-8.744-8.868h-15.75c-4.837 0-8.744 3.969-8.744 8.867v.063z" />
+	</symbol>
+    <symbol id="icon-menu10">
+		<path d="M45.016 79.374h-12.96l-.806-10.17a30.73 30.73 0 01-8.247-3.659l-7.442 6.326-9.115-9.24 6.51-7.752c-1.487-2.666-2.604-5.518-3.224-8.495L.06 45.578V32.494l10.045-.869c.807-2.976 1.985-5.767 3.659-8.371L7.5 15.751l9.116-9.24 7.689 6.573a31.375 31.375 0 018.371-3.286L33.482 0H46.32l.806 10.17a30.733 30.733 0 018.247 3.658l7.441-6.387 9.116 9.24-6.511 7.751a32.181 32.181 0 013.286 8.496l9.674.806v13.084l-10.046.868c-.806 2.977-2.046 5.767-3.658 8.372l6.263 7.503-9.116 9.24-7.689-6.573a31.377 31.377 0 01-8.371 3.286l-.745 9.86zm-10.666-2.48h8.372l.744-9.364.93-.186c3.287-.62 6.387-1.86 9.24-3.597l.744-.496 7.317 6.263 5.953-6.015-6.015-7.193.496-.744a28.976 28.976 0 004.031-9.178l.186-.868 9.55-.806v-8.496l-9.302-.806-.186-.93a27.721 27.721 0 00-3.596-9.364l-.435-.744 6.202-7.379-5.954-6.015-7.13 6.077-.807-.558a27.739 27.739 0 00-9.053-4.093l-.869-.186-.806-9.612h-8.371l-.744 9.364-.93.186c-3.287.62-6.388 1.86-9.24 3.597l-.744.496-7.317-6.263-5.954 6.015 6.015 7.193-.496.744a28.974 28.974 0 00-4.03 9.178l-.186.868-9.55.806v8.495l9.302.807.186.93a27.723 27.723 0 003.596 9.363l.434.745-6.2 7.379 5.952 6.015 7.132-6.077.806.558a27.739 27.739 0 009.053 4.093l.868.186.806 9.611z" />
+		<path d="M20.027 39.687h-2.48c0-12.092 9.736-21.89 21.642-21.89v2.48c-10.542 0-19.162 8.682-19.162 19.41z" />
+		<path d="M39.188 52.895c-7.194 0-13.085-5.953-13.085-13.208s5.83-13.208 13.085-13.208c7.193 0 13.084 5.953 13.084 13.208 0 7.317-5.891 13.208-13.084 13.208zm0-23.936c-5.83 0-10.604 4.837-10.604 10.728 0 5.89 4.775 10.728 10.604 10.728 5.829 0 10.604-4.837 10.604-10.728s-4.775-10.728-10.604-10.728z" />
+	</symbol>
+    <symbol id="icon-menu2">
+		<path d="M28.153 66.972H0V8.93h78.382v22.572h-2.419V11.348H2.418v53.205h25.735v2.419z" />
+		<path d="M78.382 11.348H0V0h78.444v11.348h-.062zM2.418 8.93h73.545V2.418H2.418V8.93zM28.458 37.454h-22.2V15.068h22.2v22.386zM8.676 35.036h17.301v-17.55h-17.3v17.55z" />
+		<path d="M26.405 15.411L6.635 35.367l1.762 1.746 19.77-19.956-1.762-1.746z" />
+		<path d="M8.356 15.414L6.594 17.16l19.77 19.956 1.762-1.746-19.77-19.956zM10.73 49.919l-1.55-1.55 6.2-6.264 6.202 6.264-1.612 1.55-4.59-4.651-4.65 4.65z" />
+		<path d="M41.617 58.787H20.72c-3.597 0-6.573-2.977-6.573-6.635v-7.504h2.17v7.504c0 2.418 1.922 4.402 4.34 4.402h20.898v2.233h.062z" />
+		<path d="M30.7 69.391V39.688c0-1.86 1.488-3.41 3.348-3.41h40.927c1.86 0 3.349 1.55 3.349 3.41v15.999H75.78v-16a.848.848 0 00-.868-.867H33.986a.848.848 0 00-.868.868V69.39h-2.419z" />
+		<path d="M32.742 68.833h-1.488V39.626a2.845 2.845 0 012.852-2.853h40.928c1.55 0 2.852 1.303 2.852 2.853v15.44h-1.488v-15.44c0-.744-.62-1.426-1.364-1.426H34.106c-.744 0-1.364.62-1.364 1.426v29.207z" />
+		<path d="M34.108 74.91c-1.86 0-3.348-1.55-3.348-3.41V42.23h2.542v.559c0 .496.372.868.868.868h40.927c1.86 0 3.349 1.55 3.349 3.41v9.426h-2.542v-9.426a.848.848 0 00-.869-.868H34.108c-.31 0-.558-.062-.868-.124V71.5c0 .497.372.869.868.869h40.927a.848.848 0 00.869-.868v-8.248h2.542V71.5c0 1.86-1.488 3.411-3.349 3.411H34.108z" />
+		<path d="M77.886 55.935v-8.867a2.845 2.845 0 00-2.852-2.853H34.106c-.744 0-1.364-.62-1.364-1.426h-1.488V71.5a2.845 2.845 0 002.852 2.853h40.928c1.55 0 2.852-1.303 2.852-2.853v-7.69h-1.488v7.69c0 .744-.62 1.426-1.364 1.426H34.106c-.744 0-1.364-.62-1.364-1.426V45.27c.434.247.868.372 1.364.372h40.928c.744 0 1.364.62 1.364 1.426v8.867h1.488z" />
+		<path d="M68.592 64.368v-9.612h10.294v9.612H68.592zm7.813-2.543v-4.527h-5.27v4.527h5.27z" />
+		<path d="M78.386 63.81h-9.24v-8.558h9.24v8.557zm-7.751-1.427h6.325v-5.58h-6.325v5.58z" />
+	</symbol>
+    <symbol id="icon-menu3">
+		<path d="M28.153 66.972H0V8.93h78.382v22.634h-2.419V11.41H2.418v53.143h25.735v2.419z" />
+		<path d="M78.382 11.41H0V0h78.444v11.41h-.062zM2.418 8.93h73.545V2.418H2.418V8.93zM28.458 37.454h-22.2V15.068h22.2v22.386zM8.676 35.036h17.301V17.549h-17.3v17.487z" />
+		<path d="M26.395 15.417L6.625 35.373l1.762 1.746 19.77-19.956-1.762-1.746z" />
+		<path d="M8.34 15.418l-1.762 1.746 19.77 19.956 1.763-1.746L8.34 15.418zM30.7 70.073V40.37c0-1.86 1.488-3.411 3.348-3.411h40.927c1.86 0 3.349 1.55 3.349 3.41v16H75.78v-16a.848.848 0 00-.868-.868H33.986a.848.848 0 00-.868.869v29.703h-2.419z" />
+		<path d="M32.742 69.515h-1.488V40.308a2.845 2.845 0 012.852-2.853h40.928c1.55 0 2.852 1.302 2.852 2.853v15.44h-1.488v-15.44c0-.745-.62-1.427-1.364-1.427H34.106c-.744 0-1.364.62-1.364 1.427v29.207z" />
+		<path d="M34.108 75.592c-1.86 0-3.348-1.55-3.348-3.41v-29.27h2.542v.558c0 .496.372.868.868.868h40.927c1.86 0 3.349 1.55 3.349 3.41v9.427h-2.542v-9.426a.848.848 0 00-.869-.868H34.108c-.31 0-.558-.062-.868-.124V72.18c0 .496.372.868.868.868h40.927a.848.848 0 00.869-.868v-8.247h2.542v8.247c0 1.86-1.488 3.41-3.349 3.41H34.108z" />
+		<path d="M77.886 56.617v-8.868a2.845 2.845 0 00-2.852-2.852H34.106c-.744 0-1.364-.62-1.364-1.426h-1.488v28.71a2.845 2.845 0 002.852 2.853h40.928c1.55 0 2.852-1.302 2.852-2.852v-7.69h-1.488v7.69c0 .744-.62 1.426-1.364 1.426H34.106c-.744 0-1.364-.62-1.364-1.426v-26.23c.434.247.868.371 1.364.371h40.928c.744 0 1.364.62 1.364 1.426v8.868h1.488z" />
+		<path d="M68.592 65.05v-9.612h10.294v9.611H68.592zm7.813-2.481v-4.527h-5.27v4.527h5.27z" />
+		<path d="M78.386 64.554h-9.24v-8.558h9.24v8.558zm-7.751-1.489h6.325v-5.58h-6.325v5.58zM62.071 26.79l1.55 1.55-6.139 6.262-6.2-6.263 1.55-1.55 4.65 4.713 4.59-4.713z" />
+		<path d="M31.254 17.922H52.15c3.597 0 6.574 2.976 6.574 6.635v7.503h-2.17v-7.503c0-2.418-1.923-4.403-4.341-4.403H31.316v-2.232h-.062z" />
+	</symbol>
+    <symbol id="icon-menu4">
+		<path d="M54.2 70.073l-7.75-11.038 1.24-.868c4.03-2.852 7.007-7.007 8.37-11.72l2.977.868c-1.426 4.9-4.34 9.24-8.309 12.465l4.217 5.953c.124-.062.248-.186.31-.248 5.27-4.217 8.93-9.488 10.728-15.69l2.976.869c-1.984 6.883-5.953 12.712-11.782 17.301-.558.434-1.116.868-1.736 1.302l-1.24.806zM7.319 61.95l-.869-1.24C2.11 54.57-.06 47.44.001 39.936v-.992-.62c0-.186 0-.31.062-.496v-.124c.062-.434.062-.806.124-1.24l1.55.061-1.55-.186v-.186c1.427-11.968 9.116-22.572 20.03-27.656l.186-.062c.248-.125.496-.187.682-.31l.186-.063a34.245 34.245 0 018.62-2.418h.062c.434-.062.806-.124 1.24-.124h.186c.124 0 .31-.062.434-.062.186 0 .372-.062.62-.062h.372c.31 0 .62-.062.93-.062h1.861c.868 0 1.55.682 1.55 1.55s-.682 1.55-1.489 1.55H33.922c-.31 0-.558 0-.868.063h-.372c-.186 0-.31 0-.496.062-.124 0-.248 0-.31.062h-.186c-.372.062-.744.062-1.116.124h-.062a28.234 28.234 0 00-7.814 2.232l-.186.062c-.186.062-.434.186-.62.248l-.124.062c-9.984 4.65-16.99 14.325-18.293 25.3l-1.55-.062 1.55.186v.124c-.062.373-.062.745-.124 1.117l-.062.558V39.998C3.226 46.323 4.9 52.4 8.31 57.671l5.953-4.217c-2.48-4.03-3.72-8.62-3.659-13.332.186-13.704 11.472-24.618 25.177-24.432.868 0 1.55.744 1.55 1.55 0 .868-.744 1.488-1.55 1.55-11.969-.186-21.828 9.426-22.014 21.394a21.685 21.685 0 003.968 12.836l.869 1.24-11.286 7.69z" />
+		<path d="M35.223 75.592h-.496c-.434 0-.868 0-1.302-.062l-.682-.062c-.496 0-.93-.062-1.427-.124h-.185c-9.426-.992-17.55-5.519-23.44-13.022a11.636 11.636 0 01-1.117-1.488l-1.24-1.24 11.286-7.938.868 1.24c3.969 5.643 10.542 9.116 17.425 9.178h.31c4.527 0 8.806-1.364 12.526-3.969l1.24-.868 6.264 8.868h.806l.31 1.116c.248.806-.124 1.302-.682 1.798 0 0-.062 0-.062.062l-.558.372c-.062.062-.186.124-.248.186l-.62.434c-5.706 3.66-12.217 5.52-18.976 5.52zm-2.232-3.162h.558c.372 0 .806.062 1.178.062h.496c6.14 0 12.03-1.736 17.177-5.023l-4.217-5.953c-3.906 2.418-8.371 3.659-13.022 3.659h-.372c-7.38-.124-14.386-3.535-18.975-9.302L9.86 60.09c.062.062.124.186.186.248 5.395 6.82 12.774 10.914 21.331 11.844h.186c.435.062.869.062 1.303.124l.124.124zM73.41 53.825L34.281 41.113V0h1.55c4.403 0 8.186.62 12.34 1.984C58.342 5.271 66.59 12.34 71.489 21.89c4.837 9.55 5.705 20.34 2.418 30.51l-.496 1.425zM37.382 38.881l33.982 11.038c2.48-8.93 1.55-18.355-2.667-26.665-4.465-8.806-12.092-15.317-21.456-18.355-3.41-1.116-6.449-1.674-9.86-1.798v35.78z" />
+		<path d="M57.973 25.24l-2.17-2.232 11.41-11.41h11.162v3.1h-9.86L57.973 25.24zM78.445 4.838h-6.76v3.1h6.76v-3.1z" />
+	</symbol>
+    <symbol id="icon-menu5">
+		<path d="M50.287 11.385l-9.054-7.751c-1.116-.93-2.976-.93-4.092 0l-8.558 7.255-1.612-1.86 8.557-7.256C37.513.1 40.8.1 42.783 1.773l9.054 7.752-1.55 1.86zM77.141 77.612h-75.9c-.683 0-1.241-.558-1.241-1.24V32.716c0-.248.062-.558.186-.744.124-.186.248-.31.372-.372l7.69-6.573 1.612 1.86-7.38 6.325v41.982h73.483V33.212l-7.503-6.387 1.612-1.86 7.876 6.697c.186.124.372.372.434.62.062.186.062.372.062.558v43.594a1.288 1.288 0 01-1.303 1.178z" />
+		<path d="M70.197 34.95h-2.48V11.694H10.295V34.95h-2.48V9.215h62.382v25.734z" />
+		<path d="M46.321 32.592h-32.06v2.48h32.06v-2.48zM46.321 40.53h-32.06v2.48h32.06v-2.48zM46.322 48.467H20.836v2.48h25.486v-2.48zM63.252 32.592h-12.65v2.48h12.65v-2.48zM58.911 40.53h-8.31v2.48h8.31v-2.48zM44.28 18.579v6.2H16.745v-6.2H44.28zm2.418-2.419h-32.37v11.038h32.37V16.16zM60.771 18.579v6.2H53.02v-6.2h7.751zm2.419-2.419H50.602v11.038H63.19V16.16z" />
+		<path d="M51.342 56.654H27.033c-.31 0-.558-.125-.806-.249L.307 35.198l1.55-1.923 25.61 20.96h23.44l25.673-20.96 1.55 1.923-26.044 21.207c-.186.186-.434.248-.744.248z" />
+		<path d="M4.274 76.744l-1.612-1.86 8.434-7.193 6.387-5.457c.744-.62 1.736-1.489 2.728-2.357l6.325-5.395 1.612 1.86-6.325 5.396c-.992.868-1.984 1.674-2.728 2.356l-6.387 5.457-8.434 7.193zM51.865 54.47l-1.615 1.882L74.768 77.39l1.615-1.882-24.518-21.039z" />
+	</symbol>
+    <symbol id="icon-menu6">
+		<path d="M7.69 77.513V65.916H0V32.06h45.206v33.858H19.47L7.69 77.513zM2.417 63.436h7.69v8.185l8.31-8.185h24.245V34.477H2.356v28.959h.062z" />
+		<path d="M34.414 43.344h-23.75v2.48h23.75v-2.48zM34.414 51.53h-23.75v2.48h23.75v-2.48zM51.162 55.562v-2.48c5.643 0 10.976-1.923 15.44-5.52l.497-.372 4.279 1.178-1.117-4.34.373-.496c3.534-4.527 5.394-9.984 5.394-15.751 0-6.76-2.604-13.146-7.255-17.921C64.06 5.085 57.86 2.418 51.224 2.418c-13.704 0-24.804 11.348-24.804 25.363h-2.48C23.94 12.464 36.155 0 51.162 0c7.255 0 14.139 2.914 19.286 8.123 5.146 5.271 7.999 12.217 7.999 19.658 0 6.139-1.922 11.906-5.52 16.805l1.923 7.317-7.131-1.922c-4.837 3.658-10.542 5.58-16.557 5.58z" />
+		<path d="M34.039 27.781h-2.48c0-6.139 2.728-11.844 7.44-15.627l1.551 1.923c-4.093 3.348-6.511 8.31-6.511 13.704zM56.743 31.626l-1.55-1.86 4.03-3.349c1.675-1.116 2.543-2.232 2.543-3.348v-3.783c0-2.418-1.922-4.34-4.217-4.34h-4.403c-2.356 0-4.216 1.984-4.216 4.34v1.798h-2.48v-1.798c0-3.783 2.976-6.821 6.696-6.821h4.403c3.659 0 6.697 3.038 6.697 6.821v3.783c0 1.984-1.178 3.782-3.596 5.333l-3.907 3.224z" />
+		<path d="M53.703 39.13h-2.48v-3.784c0-1.984 1.178-3.782 3.596-5.332l3.845-3.225 1.55 1.86-4.03 3.349c-1.675 1.116-2.543 2.232-2.543 3.348.062-.061.062 3.783.062 3.783zM53.703 42.727h-2.48v4.34h2.48v-4.34z" />
+	</symbol>
+    <symbol id="icon-menu7">
+		<path d="M78.382 11.41H0V0h78.444v11.41h-.062zM2.418 8.93h73.545V2.418H2.418V8.93zM78.382 57.732H48.37v-2.418h27.595V24.37l-5.83 6.636-4.464-2.853-7.565 7.69-1.736-1.737 8.991-9.115 4.279 2.79 8.743-9.922v39.873zM29.827 57.732H0v-19.41l8.185 5.21 13.209-8.682 1.364 2.046-14.573 9.55-5.767-3.659v12.526h27.41v2.419z" />
+		<path d="M39.317 53.454c-5.147 0-9.983-1.984-13.58-5.643-7.503-7.565-7.503-19.843 0-27.409 3.597-3.658 8.433-5.643 13.58-5.705 5.147 0 9.984 1.985 13.643 5.643 3.596 3.659 5.643 8.496 5.643 13.705 0 5.146-1.985 10.045-5.643 13.704-3.659 3.659-8.496 5.705-13.643 5.705zm0-36.276c-4.527 0-8.681 1.798-11.844 4.96-6.511 6.574-6.511 17.364 0 23.937 3.163 3.162 7.38 4.96 11.844 4.96v1.24-1.24c4.465 0 8.682-1.798 11.782-4.96 3.163-3.225 4.9-7.442 4.9-11.968 0-4.527-1.737-8.806-4.9-11.968-3.1-3.225-7.317-4.961-11.782-4.961z" />
+		<path d="M39.316 48.678c-3.845 0-7.504-1.488-10.232-4.278-2.729-2.729-4.217-6.388-4.217-10.294 0-3.907 1.488-7.504 4.217-10.294 2.728-2.79 6.387-4.279 10.232-4.279 3.844 0 7.503 1.488 10.231 4.279 2.729 2.728 4.217 6.387 4.217 10.294 0 3.844-1.488 7.503-4.217 10.294-2.728 2.728-6.387 4.278-10.231 4.278zm0-26.726c-3.225 0-6.201 1.24-8.496 3.596-2.232 2.295-3.534 5.333-3.534 8.558 0 3.224 1.24 6.263 3.534 8.557 2.295 2.295 5.271 3.535 8.496 3.535v1.24-1.24c3.224 0 6.2-1.24 8.495-3.597 2.233-2.294 3.535-5.333 3.535-8.557 0-3.225-1.24-6.263-3.535-8.558-2.294-2.232-5.333-3.534-8.495-3.534zM44.027 77.45h-9.425V59.84h9.425v17.61zm-7.007-2.418h4.527V62.32H37.02v12.712zM37.021 59.717h-2.48v-4.713h9.488v4.713h-2.48v-2.233H37.02v2.233z" />
+		<path d="M40.805 51.531h-2.48v3.845h2.48V51.53zM34.975 42.168l-9.053-3.287.868-2.294 7.503 2.728L44.96 27.781l8.248 5.271-1.365 2.047-6.449-4.155-10.418 11.224zM2.48 9.426H0v26.478h2.48V9.426zM78.445 9.426h-2.48v5.58h2.48v-5.58z" />
+	</symbol>
+    <symbol id="icon-menu8">
+		<path d="M39.19 87.125l-2.79-.806C20.774 81.792 0 72.677 0 45.702V10.418l11.472 1.736c2.79.434 5.953.372 9.116-.248 4.836-.868 9.177-2.852 11.658-5.209L39.19 0l6.945 6.697c2.48 2.357 6.821 4.341 11.658 5.21 3.163.557 6.325.681 9.116.247l11.472-1.736v35.284c0 26.975-20.774 36.09-36.4 40.617l-2.791.806zM2.729 13.58v32.122c0 25.176 19.658 33.734 34.478 38.013l2.047.558 2.046-.558c14.82-4.28 34.478-12.837 34.478-38.013V13.58l-8.31 1.303c-3.1.496-6.572.372-10.045-.248-5.333-.993-10.232-3.225-13.084-5.954l-5.023-4.898-5.023 4.899c-2.853 2.728-7.751 4.96-13.084 5.952-3.473.62-6.945.745-10.046.249L2.728 13.58z" />
+		<path d="M39.19 79.683l-.745-.186c-27.657-7.999-31.191-22.2-31.191-33.733V18.85l3.1.496c3.597.558 7.628.434 11.597-.248 6.325-1.178 11.905-3.783 15.44-7.193l1.86-1.799 1.86 1.799c3.535 3.41 9.116 6.015 15.442 7.193 3.968.744 7.999.806 11.596.248l3.1-.496v26.913c0 21.89-16.68 29.517-31.191 33.733l-.869.186zM9.981 22.013v23.75c0 10.542 3.349 23.627 29.207 31.13 13.58-3.907 29.208-11.038 29.208-31.13v-23.75c-3.907.559-8.186.496-12.403-.31-6.759-1.24-12.898-4.092-16.805-7.875-3.906 3.72-9.983 6.573-16.805 7.875-4.216.745-8.495.869-12.402.31z" />
+		<path d="M39.191 63.87c-10.108 0-18.355-8.123-18.355-18.107 0-9.983 8.247-18.107 18.355-18.107s18.355 8.124 18.355 18.107c0 9.984-8.247 18.108-18.355 18.108zm0-33.547c-8.62 0-15.627 6.883-15.627 15.378 0 8.496 7.008 15.38 15.627 15.38 8.62 0 15.627-6.884 15.627-15.38 0-8.495-7.007-15.378-15.627-15.378z" />
+		<path d="M40.745 47.75l-4.712-1.799c-1.923-1.178-2.295-2.542-2.295-3.41v-1.985a4.287 4.287 0 014.279-4.279h2.356a4.287 4.287 0 014.28 4.28v.93h-2.73v-.93c0-.87-.681-1.551-1.55-1.551h-2.356c-.868 0-1.55.682-1.55 1.55v1.984c0 .248.372.683.93 1.055l4.34 1.612-.992 2.542z" />
+		<path d="M40.373 55.19h-2.356a4.287 4.287 0 01-4.279-4.278v-.93h2.729v.93c0 .868.682 1.55 1.55 1.55h2.356c.869 0 1.55-.682 1.55-1.55v-1.984c0-.248-.31-.62-.992-1.117l-4.154-1.55.992-2.542 4.527 1.736c1.922 1.24 2.356 2.543 2.356 3.473v1.984a4.287 4.287 0 01-4.279 4.279zM40.742 33.734h-2.728v4.341h2.728v-4.34z" />
+		<path d="M40.742 53.145h-2.728v4.34h2.728v-4.34zM40.74 12.154h-2.728v17.053h2.728V12.154zM40.74 62.383h-2.728v15.255h2.728V62.383z" />
+	</symbol>
+    <symbol id="icon-menu9">
+		<path d="M69.076 49.732l-2.604-.496c.124-.806.248-1.674.31-2.48l2.604.248c0 .93-.124 1.86-.31 2.728zm-2.17-5.457c0-.868-.062-1.674-.124-2.542l2.604-.248c.062.93.124 1.86.124 2.728l-2.604.062zm-.496-5.022c-.186-.807-.372-1.675-.62-2.419l2.542-.744c.248.868.496 1.798.682 2.666l-2.604.497zm-1.426-4.775c-.31-.806-.683-1.55-1.055-2.295l2.357-1.178a18.58 18.58 0 011.116 2.543l-2.418.93zm-2.295-4.527c-.434-.682-.93-1.426-1.426-2.046l2.108-1.613c.558.744 1.116 1.489 1.613 2.233l-2.295 1.426zm-3.1-3.969c-.558-.62-1.179-1.178-1.799-1.736l1.736-1.984c.683.62 1.365 1.24 1.985 1.922l-1.922 1.798zm-3.721-3.348c-.682-.496-1.364-.992-2.108-1.427l1.364-2.232c.806.496 1.55.992 2.294 1.55l-1.55 2.109zm-4.279-2.605c-.744-.372-1.55-.682-2.294-.992l.93-2.48c.868.31 1.736.682 2.542 1.116l-1.178 2.356zm-4.713-1.798a16.034 16.034 0 00-2.48-.558l.496-2.605c.93.186 1.798.372 2.666.62l-.682 2.543zm-4.96-.868a33.257 33.257 0 00-2.543-.124v-2.667c.93 0 1.86.062 2.729.124l-.186 2.667zM11.963 56.863a31.178 31.178 0 01-1.054-2.542l2.48-.869c.248.807.62 1.55.93 2.357l-2.356 1.054zm-1.86-5.209a19.33 19.33 0 01-.559-2.728l2.605-.373c.124.807.31 1.675.496 2.481l-2.543.62zm-.807-5.457c-.062-.558-.062-1.178-.062-1.736v-.992l2.667.062v.93c0 .558 0 1.054.062 1.612l-2.667.124zm2.79-5.147l-2.604-.31c.124-.93.248-1.798.496-2.728l2.605.558c-.248.806-.372 1.612-.496 2.48zM39.374 74.35h-.992l.062-2.666c.868 0 1.736 0 2.542-.062l.186 2.605c-.558.123-1.116.123-1.798.123zm-3.72-.185a41.566 41.566 0 01-2.73-.435l.559-2.604c.806.186 1.674.31 2.48.434l-.31 2.605zm-5.396-1.179c-.868-.248-1.736-.62-2.604-.93l.992-2.418c.744.31 1.55.62 2.356.868l-.744 2.48zm-5.085-2.108a27.965 27.965 0 01-2.294-1.364l1.426-2.233c.682.434 1.364.868 2.108 1.24l-1.24 2.357z" />
+		<path d="M20.588 40.803C9.24 40.803 0 31.626 0 20.402S9.24 0 20.588 0s20.587 9.178 20.587 20.402c-.062 11.285-9.301 20.401-20.587 20.401zm0-38.137c-9.86 0-17.922 7.938-17.922 17.736 0 9.797 8.062 17.735 17.922 17.735 9.86 0 17.92-7.938 17.92-17.735 0-9.736-8.06-17.736-17.92-17.736z" />
+		<path d="M20.589 25.177c-3.597 0-6.573-2.915-6.573-6.512 0-3.596 2.914-6.51 6.573-6.51 3.596 0 6.573 2.914 6.573 6.51-.062 3.597-2.977 6.512-6.573 6.512zm0-10.356c-2.17 0-3.907 1.736-3.907 3.844 0 2.109 1.736 3.845 3.907 3.845 2.17 0 3.906-1.736 3.906-3.845-.062-2.108-1.798-3.844-3.906-3.844z" />
+		<path d="M20.585 34.975c-3.72 0-7.317-1.426-10.046-3.969l-.434-.372v-.992c0-3.597 2.915-6.511 6.574-6.511h7.813c3.597 0 6.573 2.914 6.573 6.511v.992l-.434.372c-2.79 2.543-6.325 3.969-10.046 3.969zm-7.875-5.52c2.17 1.861 4.96 2.854 7.813 2.854 2.853 0 5.643-.993 7.814-2.853-.062-2.046-1.799-3.659-3.907-3.659h-7.813a3.885 3.885 0 00-3.907 3.659zM58.854 84.52c-10.79 0-19.534-8.682-19.534-19.41 0-10.665 8.744-19.409 19.534-19.409s19.533 8.682 19.533 19.41c0 10.727-8.743 19.409-19.533 19.409zm0-36.09c-9.302 0-16.93 7.503-16.93 16.743 0 9.24 7.566 16.742 16.93 16.742 9.301 0 16.929-7.503 16.929-16.742 0-9.24-7.566-16.743-16.93-16.743z" />
+		<path d="M58.852 70.01c-3.659 0-6.635-2.977-6.635-6.574 0-3.658 2.976-6.573 6.635-6.573s6.635 2.977 6.635 6.573c0 3.597-2.976 6.574-6.635 6.574zm0-10.542a3.956 3.956 0 00-3.969 3.968c0 2.17 1.799 3.97 3.969 3.97a3.956 3.956 0 003.969-3.97c.062-2.232-1.737-3.968-3.969-3.968z" />
+		<path d="M69.455 80.613H66.79v-6.077c0-2.17-1.799-3.969-3.969-3.969h-8a3.956 3.956 0 00-3.968 3.969v6.077h-2.666v-6.077c0-3.659 2.976-6.573 6.635-6.573h8c3.658 0 6.634 2.976 6.634 6.573v6.077zM30.137 44.4h-2.666v10.418h2.666V44.4z" />
+		<path d="M34.042 48.307H23.5v2.666h10.542v-2.666zM71.928 3.846h-2.666v12.092h2.666V3.846z" />
+		<path d="M76.646 8.559H64.492v2.666h12.154V8.56zM18.479 73.11c-5.271 0-9.612-4.279-9.612-9.488 0-5.27 4.279-9.487 9.612-9.487 5.27 0 9.611 4.279 9.611 9.487 0 5.21-4.278 9.488-9.611 9.488zm0-16.37c-3.845 0-6.945 3.1-6.945 6.882 0 3.783 3.1 6.884 6.945 6.884s6.945-3.1 6.945-6.884c.062-3.844-3.1-6.883-6.945-6.883z" />
+	</symbol>
+</svg>
+<script>
+$(function(){
+    jQuery('.nav-profile__icon').each(function(){
+        var $img = jQuery(this);
+        var imgID = $img.attr('id');
+        var imgClass = $img.attr('class');
+        var imgURL = $img.attr('src');
+    
+        jQuery.get(imgURL, function(data) {
+            // Get the SVG tag, ignore the rest
+            var $svg = jQuery(data).find('svg');
+    
+            // Add replaced image's ID to the new SVG
+            if(typeof imgID !== 'undefined') {
+                $svg = $svg.attr('id', imgID);
+            }
+            // Add replaced image's classes to the new SVG
+            if(typeof imgClass !== 'undefined') {
+                $svg = $svg.attr('class', imgClass+' replaced-svg');
+            }
+    
+            // Remove any invalid XML tags as per http://validator.w3.org
+            $svg = $svg.removeAttr('xmlns:a');
+            
+            // Check if the viewport is set, else we gonna set it if we can.
+            if(!$svg.attr('viewBox') && $svg.attr('height') && $svg.attr('width')) {
+                $svg.attr('viewBox', '0 0 ' + $svg.attr('height') + ' ' + $svg.attr('width'))
+            }
+    
+            // Replace image with new SVG
+            $img.replaceWith($svg);
+    
+        }, 'xml');
+    
+    });
+});
+</script>    </div>	
+<div class="personal-area">
+    <div class="personal-area__wrapper">
+        <div class="personal-data">
+            <div class="personal-data__img" style="margin-top:50px;">
+                <img src="/img/users/avatar_null.jpg" alt="">
+            </div>
+            <b style="display: block; margin-top: 10px; font-size: 20px;">
+                [ 11111 ]
+            </b>
+            <b style="margin-top: 5px;" class="personal-data__name">
+                Иван Травин            </b>
+            <p class="personal-data__budget">$ <span>11,56</span></p>
+                            <style>
+                    .btn-mobile-profile {
+                        display: flex;
+                        font-size: 35px;
+                        color: white;
+                        background: #3cb7b4;
+                        padding: 7px 0;
+                        text-decoration: none;
+                        -webkit-transition: background-color .3s;
+                        transition: background-color .3s;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .btn-mobile-profile:hover {
+                        background: #364248;
+                    }
+                    .btn-mobile-profile img {
+                        height: 49px;
+                        width: auto;
+                        margin-right: 10px;
+                    }
+                    .btn-mobile-profile:hover img {
+                        animation: shake 2s;
+                        animation-iteration-count: infinite;
+                    }
+                    @keyframes shake {
+                        0% { transform: translate(1px, 1px) rotate(0deg); }
+                        10% { transform: translate(-1px, -2px) rotate(-4deg); }
+                        20% { transform: translate(-3px, 0px) rotate(4deg); }
+                        30% { transform: translate(3px, 2px) rotate(0deg); }
+                        40% { transform: translate(1px, -1px) rotate(4deg); }
+                        50% { transform: translate(-1px, 2px) rotate(-4deg); }
+                        60% { transform: translate(-3px, 1px) rotate(0deg); }
+                        70% { transform: translate(3px, 1px) rotate(-4deg); }
+                        80% { transform: translate(-1px, -1px) rotate(4deg); }
+                        90% { transform: translate(1px, 2px) rotate(0deg); }
+                        100% { transform: translate(1px, -2px) rotate(-4deg); }
+                    }
+                </style>
+                <br>
+                <div style="margin-top: 20px;">
+                    <a class="btn-mobile-profile" href="/app/mobile/profile">
+                        <img src="/img/btn-mobile-profile-home-white.svg?1"/>
+                        Мобильная версия
+                    </a>
+                </div>
+            		</div>
+        <div class="welcome">
+			<div class="welcome__wrapper">
+				<div class="welcome__text">
+					<p>
+                        <a href="/tournament"
+                        style="all: unset; cursor: pointer;">
+                            Таблица рейтинга
+                            <br>
+                            <b style="font-size: 28px;">
+                                Ваш рейтинг: —                            </b>
+                        </a>
+                    </p>
+				</div>
+				<div class="welcome__img">
+					<img src="/img_new/welcome.jpg" alt="">
+				</div>
+			</div>
+			<a class="welcome__btn" href="/">Торговая платформа</a>
+		</div>
+	</div>
+	<div class="personal-area__wrapper">
+        <div class="personal-settings" action="">
+			<div class="personal-settings__list">
+				<div class="personal-settings__item">
+					<p class="personal-settings__name">Счет</p>
+					<div class="personal-settings__value">
+						<div class="radio">
+							<input id="personal-radio1" type="radio"  onclick="user_real_trade();">
+							<label for="personal-radio1">Реал</label>
+						</div>
+						<div class="radio">
+							<input id="personal-radio2" type="radio" checked="checked">
+							<label for="personal-radio2">Демо</label>
+						</div>
+					</div>
+				</div>
+				<div class="personal-settings__item">
+					<p class="personal-settings__name">Торговля</p>
+					<div class="personal-settings__value">
+						<div class="radio">
+							<input id="personal-radio3" type="radio"  onclick="trade_type();">
+							<label for="personal-radio3">Classic</label>
+						</div>
+						<div class="radio">
+							<input id="personal-radio4" type="radio" checked="checked">
+							<label for="personal-radio4">Sprint</label>
+						</div>
+					</div>
+				</div>
+				<div class="personal-settings__item">
+					<p class="personal-settings__name">Дизайн <span class="pop-up-setting__help ">i</span></p>
+					<div class="personal-settings__value">
+						<div class="radio">
+							<input id="personal-radio5" type="radio" checked="checked">
+							<label for="personal-radio5">Новый</label>
+						</div>
+						<div class="radio">
+							<input id="personal-radio6" type="radio"  onclick="design_type();">
+							<label for="personal-radio6">Старый</label>
+						</div>
+					</div>
+				</div>
+				<p class="pop-up-setting__text">
+				1) В новом дизайне график строится на основе котировок FXCM.<br>
+				2) На старом дизайне график-виджет от Trading View, а котировки FXCM. В случае если вы выбираете этот вариант, мы снимаем с себя ответственность за соответствие котировок и графика. Вернули этот вариант по просьбе некоторых клиентов.
+				</p>
+				<div class="personal-settings__item">
+					<p class="personal-settings__name">Коэф. Мартина <span class="pop-up-setting__help pop-up-setting__help3">i</span></p>
+					<div class="personal-settings__value">
+						<form class="" action="/profile" method="post">
+							<div class="field-profile coef_martina_div">
+								<input type="number" class="coef_martina" min="1" max="20" step="0.01" name="coef_martina" value="3" required>
+							</div>
+							<button class="btn  btn--orange coef_martina_btn" type="submit">Сохранить</button>
+						</form>
+					</div>
+				</div>
+				<p class="pop-up-setting__text pop-up-setting__text3">При переключении на торговой платформе ваша следующая ставка будет умножаться на тот коэффициент, который вы установите. По умолчанию у всех этот коэффициент равен 1</p>
+				<div class="personal-settings__item">
+					<p class="personal-settings__name">График тема</p>
+					<div class="personal-settings__value">
+						<div class="radio">
+							<input id="personal-radio7" type="radio" checked="checked">
+							<label for="personal-radio7">Светлая</label>
+						</div>
+						<div class="radio">
+							<input id="personal-radio8" type="radio"  onclick="graph_theme();">
+							<label for="personal-radio8">Темная</label>
+						</div>
+					</div>
+				</div>
+				<div class="personal-settings__item">
+					<p class="personal-settings__name">Валюта</p>
+					<div class="personal-settings__value">
+						<div class="radio">
+							<input id="personal-radio9" type="radio" checked="checked">
+							<label for="personal-radio9">USD</label>
+						</div>
+						<div class="radio">
+							<input id="personal-radio10" type="radio"  onclick="user_currency();">
+							<label for="personal-radio10">RUB</label>
+						</div>
+					</div>
+				</div>
+				<div class="personal-settings__item">
+					<p class="personal-settings__name">Торговля в 1 клик</p>
+					<div class="personal-settings__value">
+						<div class="radio">
+							<input id="personal-radio11" type="radio" name="one_click_trade" value="1">
+							<label for="personal-radio11">Вкл</label>
+						</div>
+						<div class="radio">
+							<input id="personal-radio12" type="radio" name="one_click_trade" value="0">
+							<label for="personal-radio12">Выкл</label>
+						</div>
+					</div>
+				</div>
+				<div class="personal-settings__item">
+					<p class="personal-settings__name">Горячие клавиши <span class="pop-up-setting__help pop-up-setting__help2">i</span></p>
+					<div class="personal-settings__value">
+						<div class="radio">
+							<input id="personal-radio13" type="radio"  onclick="status_hotkey();">
+							<label for="personal-radio13">Вкл</label>
+						</div>
+						<div class="radio">
+							<input id="personal-radio14" type="radio" checked="checked">
+							<label for="personal-radio14">Выкл</label>
+						</div>
+					</div>
+				</div>
+				<p class="pop-up-setting__text pop-up-setting__text2">
+					SHIFT + (&#8593; или &#8595;) = открытие позиции<br>
+					SHIFT + (&#8592; или &#8594;) = изменение суммы ставки<br>
+					CTRL + (&#8592; или &#8594;) = изменение экспирации
+				</p>
+			</div>
+
+<script>
+function getCookie(name) {
+  var matches = document.cookie.match(new RegExp(
+    "(?:^|; )" + name.replace(/([\.$?*|{}\(\)\[\]\\\/\+^])/g, '\\$1') + "=([^;]*)"
+  ));
+  return matches ? decodeURIComponent(matches[1]) : undefined;
+}
+$(document).ready(function() {
+	var cookie_one_trade = getCookie('one_trade');
+	if (cookie_one_trade != 0 && cookie_one_trade != 1) {
+		var cookie_one_trade = 1;
+		document.cookie = "one_trade="+cookie_one_trade;
+	}
+	$("#personal-radio11").change(function() {
+		if ($("#personal-radio11").prop('checked') == true) {
+			var cookie_one_trade = 1;
+		} else {
+			var cookie_one_trade = 0;
+		}
+		document.cookie = "one_trade="+cookie_one_trade + "; path=/;  max-age=25920000";
+	});
+	$("#personal-radio12").change(function() {
+		if ($("#personal-radio12").prop('checked') == true) {
+			var cookie_one_trade = 0;
+		} else {
+			var cookie_one_trade = 1;
+		}
+		document.cookie = "one_trade="+cookie_one_trade + "; path=/;  max-age=25920000";
+	});
+	
+	var cookie_one_trade = parseInt(getCookie('one_trade'));
+	if (cookie_one_trade == 1) {
+		$("#personal-radio11").attr('checked','checked');
+	} else {
+		$("#personal-radio12").attr('checked','checked');
+	}
+});
+</script>
+<script>
+	function user_demo_trade() {
+		var user_id = "11111";
+		var user_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		$.ajax({
+			type: "POST",
+			url:'//intrade35.bar/user_real_trade.php',
+			data:({
+				user_id: user_id,
+				user_hash: user_hash
+			}),
+			success: function(data) {
+				if (data == 'error') {
+					alert('Ошибка. У вас есть незакрытые сделки. Дождитесь окончания экспирации');
+					location.reload(true);
+				} else {
+                    document.cookie = "option_name=; path=/;  max-age=25920000";
+					location.reload(true);
+				}
+			}
+		});
+	}
+	function user_currency() {
+		var user_id = "11111";
+		var user_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		$.ajax({
+			type: "POST",
+			url:'//intrade35.bar/user_currency_edit.php',
+			data:({
+				user_id: user_id,
+				user_hash: user_hash
+			}),
+			success: function(data) {
+				if (data == 'error') {
+					alert('Ошибка. У вас есть незакрытые сделки. Дождитесь окончания экспирации');
+					location.reload(true);
+				} else {
+					location.reload(true);
+				}
+			}
+		});
+	}
+	
+	function graph_theme() {
+		var user_id = "11111";
+		var user_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		$.ajax({
+			type: "POST",
+			url:'//intrade35.bar/user_graph_theme.php',
+			data:({
+				user_id: user_id,
+				user_hash: user_hash
+			}),
+			success: function(data) {
+				location.reload(true);
+			}
+		});
+	}
+	
+	function trade_type() {
+		var user_id = "11111";
+		var user_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		$.ajax({
+			type: "POST",
+			url:'//intrade35.bar/user_trade_type.php',
+			data:({
+				user_id: user_id,
+				user_hash: user_hash
+			}),
+			success: function(data) {
+				location.reload(true);
+			}
+		});
+	}
+	
+	function design_type() {
+		var user_id = "11111";
+		var user_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		$.ajax({
+			type: "POST",
+			url:'//intrade35.bar/user_design_type.php',
+			data:({
+				user_id: user_id,
+				user_hash: user_hash
+			}),
+			success: function(data) {
+				location.reload(true);
+			}
+		});
+	}
+	
+	function status_hotkey() {
+		var user_id = "11111";
+		var user_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		$.ajax({
+			type: "POST",
+			url:'//intrade35.bar/user_status_hotkey.php',
+			data:({
+				user_id: user_id,
+				user_hash: user_hash
+			}),
+			success: function(data) {
+				location.reload(true);
+			}
+		});
+	}
+	
+	
+	
+	$( "input" ).on( "click", function() {
+		if($('.checkbox').is(":checked")){
+			var bg_id = $(this).val();
+			var user_id = "11111";
+			var user_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+			$.ajax({
+				type: "POST",
+				url:'//intrade35.bar/bg_update.php',
+				data:({
+					user_id: user_id,
+					user_hash: user_hash,
+					bg_id: bg_id
+				}),
+				success: function(data) {
+					location.reload(true);
+				}
+			});
+		}
+	});
+</script>
+			<div class="personal-contacts">
+				<b class="personal-contacts__title">Контактная информация</b>
+				<div class="personal-contacts__wrapper">
+                    <p class="personal-contacts__name">E-mail </p>
+					<p class="personal-contacts__email">support@intrade.bar</p>
+                    <p class="personal-contacts__name" style="margin-top: 10px;">Новости в телеграм</p>
+                    <p class="personal-contacts__email"><a href="https://t.me/intradebar_official" target="_blank" style="color: white;">@intradebar_official</a></p>
+				</div>
+			</div>
+			
+					</div>
+		
+		<div class="personal-area__video">
+	<b class="personal-area__video-title">Пояснительное видео</b>
+	<div class="personal-area__video-content">
+                    <iframe src="https://vk.com/video_ext.php?oid=-130612327&id=456239124&hash=06a5b8ed941166e8" frameborder="0" allow="autoplay; encrypted-media; fullscreen; picture-in-picture"></iframe>
+        	</div>
+    <style>
+        .app_block {
+            margin-top: 32px;
+            color: black;
+        }
+        .app_block img {
+            width: 14rem;
+            border-radius: 7px;
+        }
+        .app_block img:hover {
+            box-shadow: 0 0 12px 0px #ff9e00;
+            transition-duration: 0.5s ;
+        }
+    </style>
+    <div class="app_block" style="margin-top: 32px;">
+        <a href="https://fs.site-chat.me/2026/01/05/45284a79d6dfec52a6e602500f70ca01/intrade.bar-v2.1%20%281%29.apk" target="_blank">
+            <img src="/img/app_btn-min.jpg">
+        </a>
+        <p>Скачайте приложение для android</p>
+        <p>
+            На телефонах Samsung чаще всего можно наблюдать 2 проблемы: белый экран и "неизвестный инструмент" (красная точка) вместо графика.
+            <br><br>Есть решение обеих проблем, если их так можно назвать.
+            <br><br>Проблема "Белый экран" Решение: Настройки телефона -&gt; Приложения -&gt; intrade.bar -&gt; Память -&gt; "Очистить кэш" и "Очистить данные"
+            <br><br>Проблема "неизвестный инструмент (красная точка) Решение: Настройки телефона -&gt; Общие настройки -&gt; Дата и время -&gt; *Автоопредление времени* - ВКЛ
+        </p>
+    </div>
+</div>	</div>
+</div></div>
+	
+	<script src="/js_new/owl.carousel.min.js"></script>
+	<script src="/js_new/owl-items.js?1"></script>
+	<script src="/js_new/main.js?3"></script>
+</body>
+</html>
