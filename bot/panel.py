@@ -9,7 +9,9 @@
   * отдаёт bot/static/panel.html по HTTP;
   * держит WebSocket и раз в секунду шлёт состояние (режим, баланс, выплата,
     открытые сделки, сводка ограничителей, лента последних сделок);
-  * принимает команды: ручной вход Call/Put, STOP, снятие стопа.
+  * принимает команды: ручной вход Call/Put, STOP, снятие стопа,
+    приведение счёта площадки к ДЕМО (только в безопасную сторону, см.
+    _ensure_demo).
 
 Почему состояние шлётся целиком, а не дельтами: панель одна, зрителей мало,
 объём мизерный. Дельты здесь — сложность без выгоды, а полный срез
@@ -39,6 +41,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Response
 
 from bot import payout
+from bot.api.models import PlatformError
 from bot.journal import engage_kill_switch, kill_switch_active, release_kill_switch
 from core.logfmt import setup as _log_setup
 
@@ -83,12 +86,18 @@ class Panel:
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
-        # Баланс и выплата кэшируются: дёргать площадку на каждый кадр
-        # панели незачем, рейт-лимиты неизвестны.
+        # Баланс, выплата и профиль счёта кэшируются: дёргать площадку на
+        # каждый кадр панели незачем, рейт-лимиты неизвестны.
         self._balance = None
         self._balance_ts = 0.0
         self._payout = None
         self._payout_ts = 0.0
+        self._profile = None
+        self._profile_ts = 0.0
+
+        # Сериализует приведение счёта: тумблер инвертирует, и два
+        # параллельных вызова могли бы переключить счёт туда-обратно.
+        self._ensure_lock = asyncio.Lock()
 
     # ── жизненный цикл ─────────────────────────────────────────────────
 
@@ -251,6 +260,9 @@ class Panel:
         elif command in ("call", "put"):
             await self._manual_trade(websocket, command, message)
 
+        elif command == "ensure_demo":
+            await self._ensure_demo(websocket)
+
         else:
             await self._reply(websocket, "error", f"неизвестная команда {command!r}")
 
@@ -293,6 +305,53 @@ class Panel:
 
         await self._reply(websocket, "ok",
                           f"сигнал {direction.upper()} {symbol} отправлен")
+
+    async def _ensure_demo(self, websocket) -> None:
+        """Привести счёт площадки к ДЕМО — команда «демо» в панели.
+
+        Единственное легальное направление переключения счёта из интерфейса
+        бота. Тумблер /user_real_trade.php не имеет параметра и только
+        ИНВЕРТИРУЕТ счёт (карта API §3.1): кнопка «на реал» означала бы
+        риск перевести торговлю на живые деньги, поэтому её здесь нет
+        вовсе. Приведение идёт строго через ensure_account_mode — прочитать
+        /profile, сравнить, дёрнуть только при расхождении, перечитать.
+
+        Args:
+            websocket: Соединение, откуда пришла команда.
+
+        Returns:
+            None.
+        """
+        if not self.client or not self.config.touches_platform:
+            # В dry/shadow бот к площадке не ходит вовсе — и счёт на
+            # площадке приводит владелец в кабинете, а не кнопка панели.
+            await self._reply(
+                websocket, "error",
+                "в режиме dry/shadow бот к площадке не ходит — счёт "
+                "приводится владельцем в кабинете")
+            return
+
+        async with self._ensure_lock:
+            loop = asyncio.get_running_loop()
+            try:
+                profile = await loop.run_in_executor(
+                    None, lambda: self.client.ensure_account_mode("demo"))
+            except PlatformError as err:
+                self.journal.event(
+                    "risk", f"счёт: приведение к demo не удалось: {err}")
+                await self._reply(websocket, "error",
+                                  f"не привести счёт к demo: {err}")
+                return
+
+            # Сбросить кэш профиля: следующий кадр покажет актуальное
+            # состояние, а не старое «реал».
+            self._profile = None
+            self._profile_ts = 0.0
+            self.journal.event(
+                "info",
+                f"счёт площадки приведён к demo (валюта {profile.currency})")
+            await self._reply(websocket, "ok",
+                              f"счёт приведён к demo: {profile.account}")
 
     async def _reply(self, websocket, status: str, message: str) -> None:
         """Ответить панели на команду.
@@ -361,6 +420,8 @@ class Panel:
             "ts": now,
             "mode": self.config.mode,
             "account": self.config.account,
+            "touches_platform": self.config.touches_platform,
+            "profile": await self._cached_profile(),
             "balance": await self._cached_balance(),
             "payout_percent": payout_percent,
             "payout_breakeven": (payout.breakeven_winrate(payout_percent)
@@ -384,6 +445,36 @@ class Panel:
             ],
         }
         return state
+
+    async def _cached_profile(self) -> Optional[dict]:
+        """Состояние счёта на площадке с кэшем на 10 секунд.
+
+        Только чтение /profile — тумблер не дёргается. Это последний рубеж
+        перед кнопкой Call: если на площадке активен реал, панель должна
+        показать его сразу и красным, а не по косвенным признакам.
+
+        Returns:
+            Словарь с account/trade_type/currency либо None.
+        """
+        if not self.client or not self.config.touches_platform:
+            return None
+        if self._profile and (time.time() - self._profile_ts) < 10:
+            return self._profile
+
+        loop = asyncio.get_running_loop()
+        try:
+            profile = await loop.run_in_executor(None, self.client.profile)
+        except Exception as err:
+            log.warning("панель: не прочитать профиль счёта (%s)", err)
+            return self._profile
+
+        self._profile = {
+            "account": profile.account,
+            "trade_type": profile.trade_type,
+            "currency": profile.currency,
+        }
+        self._profile_ts = time.time()
+        return self._profile
 
     async def _cached_balance(self) -> Optional[dict]:
         """Баланс с кэшем на 10 секунд.

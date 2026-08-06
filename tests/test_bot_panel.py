@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import websockets
 
+from bot.api.models import AccountProfile, Balance, PlatformError
 from bot.config import BotConfig, RiskConfig
 from bot.journal import Journal, kill_switch_active, release_kill_switch
 from bot.panel import Panel
@@ -85,11 +86,12 @@ class FakeQuotes:
         return 157.666
 
 
-def make_panel(mode="dry"):
+def make_panel(mode="dry", client=None):
     """Собрать панель на свободном порту.
 
     Args:
-        mode: Режим бота.
+        mode:   Режим бота.
+        client: Заглушка клиента площадки (для demo/live).
 
     Returns:
         Кортеж (Panel, Journal, ManualSource, RiskManager, порт, пути).
@@ -110,8 +112,68 @@ def make_panel(mode="dry"):
     manual = ManualSource(default_symbol="USD/JPY")
     risk = RiskManager(config, journal)
     panel = Panel(config=config, journal=journal, risk=risk,
-                  manual_source=manual, quotes=FakeQuotes())
+                  manual_source=manual, quotes=FakeQuotes(), client=client)
     return panel, journal, manual, risk, port, (handle.name, stop_path)
+
+
+class FakeClient:
+    """Заглушка клиента площадки для панели.
+
+    Считает вызовы ensure_account_mode и умеет отказывать по заказу.
+    """
+
+    def __init__(self, profile=None, ensure_error=None):
+        """Создать заглушку.
+
+        Args:
+            profile:      AccountProfile, отдаваемый profile().
+            ensure_error: PlatformError, поднимаемый ensure_account_mode.
+        """
+        self.profile_state = profile or AccountProfile(
+            account="real", trade_type="sprint", currency="usd")
+        self.ensure_error = ensure_error
+        self.ensure_calls = []
+
+    def profile(self):
+        """Вернуть состояние счёта.
+
+        Returns:
+            AccountProfile.
+        """
+        return self.profile_state
+
+    def ensure_account_mode(self, target):
+        """Записать цель и вернуть/поднять заданное.
+
+        Args:
+            target: Желаемый тип счёта.
+
+        Returns:
+            AccountProfile.
+
+        Raises:
+            PlatformError: Если настроено.
+        """
+        self.ensure_calls.append(target)
+        if self.ensure_error:
+            raise self.ensure_error
+        return self.profile_state
+
+    def balance(self):
+        """Вернуть демо-баланс.
+
+        Returns:
+            Balance.
+        """
+        return Balance(amount=9363.20, currency="$", raw="9 363,20 $")
+
+    def payout_percent(self, *args, **kwargs):
+        """Вернуть процент выплаты.
+
+        Returns:
+            Процент.
+        """
+        return 82
 
 
 def cleanup(paths):
@@ -169,6 +231,7 @@ def test_http_serves_page():
         check("тип содержимого", "text/html" in text)
         check("есть кнопка CALL", "CALL" in text)
         check("есть кнопка STOP", "STOP" in text)
+        check("есть кнопка счёт-демо", "счёт → демо" in text)
     finally:
         journal.close()
         cleanup(paths)
@@ -389,6 +452,205 @@ def test_listens_locally_only():
         cleanup(paths)
 
 
+def test_profile_in_snapshot():
+    """Состояние счёта площадки приходит в кадре панели."""
+    print("состояние счёта в кадре")
+    client = FakeClient(profile=AccountProfile(
+        account="real", trade_type="sprint", currency="usd"))
+    panel, journal, manual, risk, port, paths = make_panel(
+        mode="demo", client=client)
+
+    async def scenario():
+        """Подключиться и получить первый срез.
+
+        Returns:
+            Разобранное состояние.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                for _ in range(10):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "state":
+                        return message
+        finally:
+            await panel.stop()
+
+    state = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("профиль в кадре", state["profile"] is not None, state)
+        check("тип счёта настоящий",
+              state["profile"]["account"] == "real",
+              state["profile"])
+        check("валюта настоящая",
+              state["profile"]["currency"] == "usd", state["profile"])
+        check("touches_platform передан",
+              state["touches_platform"] is True, state["touches_platform"])
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_ensure_demo_success():
+    """Команда «демо» приводит счёт к демо через ensure_account_mode."""
+    print("кнопка «счёт → демо»")
+    client = FakeClient(profile=AccountProfile(
+        account="real", trade_type="sprint", currency="usd"))
+    panel, journal, manual, risk, port, paths = make_panel(
+        mode="demo", client=client)
+
+    async def scenario():
+        """Нажать «демо» и забрать ответ.
+
+        Returns:
+            Ответ панели.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)  # первый срез
+                await ws.send(json.dumps({"cmd": "ensure_demo"}))
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        return message
+        finally:
+            await panel.stop()
+
+    reply = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("ответ ok", reply and reply["status"] == "ok", reply)
+        check("вызов именно demo",
+              client.ensure_calls == ["demo"], client.ensure_calls)
+        check("НЕ существует вызова real",
+              "real" not in client.ensure_calls)
+        info = [e["message"] for e in journal.recent_events(kind="info")]
+        check("приведение записано в журнал",
+              any("demo" in m and "счёт" in m for m in info), info)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_ensure_demo_error():
+    """Отказ площадки при переключении — внятная ошибка, не тихий успех."""
+    print("кнопка «демо» при отказе площадки")
+    client = FakeClient(
+        profile=AccountProfile(account="real", trade_type="sprint",
+                               currency="usd"),
+        ensure_error=PlatformError(code="toggle_refused",
+                                   message="есть незакрытые сделки"),
+    )
+    panel, journal, manual, risk, port, paths = make_panel(
+        mode="demo", client=client)
+
+    async def scenario():
+        """Нажать «демо» и забрать ответ.
+
+        Returns:
+            Ответ панели.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)
+                await ws.send(json.dumps({"cmd": "ensure_demo"}))
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        return message
+        finally:
+            await panel.stop()
+
+    reply = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("ответ error", reply and reply["status"] == "error", reply)
+        check("причина названа",
+              "не привести" in (reply or {}).get("message", ""), reply)
+        risks = [e["message"] for e in journal.recent_events(kind="risk")]
+        check("отказ записан в журнал",
+              any("счёт" in m for m in risks), risks)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_no_to_real_command():
+    """Пути «переключить на реал» в панели НЕТ — неизвестная команда."""
+    print("нет команды «на реал»")
+    client = FakeClient(profile=AccountProfile(
+        account="demo", trade_type="sprint", currency="usd"))
+    panel, journal, manual, risk, port, paths = make_panel(
+        mode="demo", client=client)
+
+    async def scenario():
+        """Послать ensure_real.
+
+        Returns:
+            Ответ панели.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)
+                await ws.send(json.dumps({"cmd": "ensure_real"}))
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        return message
+        finally:
+            await panel.stop()
+
+    reply = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("ответ error", reply and reply["status"] == "error", reply)
+        check("команда не узнана",
+              "неизвестная" in (reply or {}).get("message", ""), reply)
+        check("клиент НЕ вызывался",
+              client.ensure_calls == [], client.ensure_calls)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_ensure_demo_blocked_in_dry():
+    """В dry панель к площадке не ходит: «демо» без клиента не работает."""
+    print("«демо» в режиме dry")
+    panel, journal, manual, risk, port, paths = make_panel(mode="dry")
+
+    async def scenario():
+        """Нажать «демо» без клиента.
+
+        Returns:
+            Ответ панели.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)
+                await ws.send(json.dumps({"cmd": "ensure_demo"}))
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        return message
+        finally:
+            await panel.stop()
+
+    reply = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("ответ error", reply and reply["status"] == "error", reply)
+        check("причина — режим не ходит к площадке",
+              "не ходит" in (reply or {}).get("message", ""), reply)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
 def main():
     """Прогнать все тесты и вернуть код возврата.
 
@@ -397,7 +659,10 @@ def main():
     """
     for test in (test_http_serves_page, test_http_404, test_websocket_state,
                  test_manual_button_fires_signal, test_stop_and_resume,
-                 test_unknown_command, test_listens_locally_only):
+                 test_unknown_command, test_listens_locally_only,
+                 test_profile_in_snapshot, test_ensure_demo_success,
+                 test_ensure_demo_error, test_no_to_real_command,
+                 test_ensure_demo_blocked_in_dry):
         test()
         print()
 

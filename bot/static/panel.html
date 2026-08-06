@@ -42,6 +42,8 @@
     .metric .label { font-size:11px; color:var(--muted); text-transform:uppercase;
                      letter-spacing:.03em; }
     .metric .value { font-size:18px; font-weight:600; font-variant-numeric:tabular-nums; }
+    #platformAccount.acc-demo { color:var(--up); }
+    #platformAccount.acc-real { color:var(--down); font-weight:700; }
 
     #conn { margin-left:auto; display:flex; align-items:center; gap:6px;
             font-size:12px; color:var(--muted); }
@@ -127,6 +129,10 @@
                 <span class="value" id="breakeven">—</span>
             </div>
             <div class="metric">
+                <span class="label">Счёт площадки</span>
+                <span class="value" id="platformAccount" title="">—</span>
+            </div>
+            <div class="metric">
                 <span class="label">P&amp;L за сутки</span>
                 <span class="value" id="pnl">—</span>
             </div>
@@ -143,6 +149,9 @@
             <input id="amount" type="number" min="1" step="1" value="1" title="ставка">
             <button id="btnCall" class="big">▲ CALL</button>
             <button id="btnPut" class="big">▼ PUT</button>
+            <button id="btnEnsureDemo" title="Привести счёт площадки к демо.
+Строго в безопасную сторону: тумблер у площадки без параметра и только
+инвертирует счёт, кнопки «на реал» в боте нет.">⟲ счёт → демо</button>
             <button id="btnStop">■ STOP</button>
             <button id="btnResume">снять стоп</button>
         </div>
@@ -198,7 +207,14 @@ function connect() {
         let msg;
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
         if (msg.type === "state") { state = msg; render(msg); }
-        else if (msg.type === "reply") { toast(msg.message, msg.status); }
+        else if (msg.type === "reply") {
+            toast(msg.message, msg.status);
+            // Ответ на «счёт → демо»: снять защиту от двойного нажатия.
+            // Следующий кадр состояния сам переставит disabled по факту.
+            const btn = document.getElementById("btnEnsureDemo");
+            btn.dataset.busy = "0";
+            btn.disabled = false;
+        }
     };
 }
 
@@ -239,6 +255,7 @@ function render(s) {
     renderTrades(s.trades || []);
     renderEvents(s.events || []);
     renderButtons(s);
+    renderAccount(s);
 }
 
 function renderBanners(s) {
@@ -272,6 +289,27 @@ function renderBanners(s) {
     } else {
         stop.classList.remove("show");
     }
+}
+
+function renderAccount(s) {
+    const el = document.getElementById("platformAccount");
+    const prof = s.profile;
+    if (!prof) {
+        el.textContent = "—";
+        el.className = "value";
+        el.title = "нет данных о счёте площадки";
+    } else {
+        const isReal = prof.account === "real";
+        el.textContent = isReal ? "РЕАЛ" : "демо";
+        el.className = "value " + (isReal ? "acc-real" : "acc-demo");
+        el.title = `${prof.account} · ${prof.trade_type} · ${prof.currency}`;
+    }
+
+    // Кнопка активна, только когда есть профиль и он НЕ демо. В dry/shadow
+    // профиля нет вовсе — бот к площадке не ходит.
+    const btn = document.getElementById("btnEnsureDemo");
+    const busy = btn.dataset.busy === "1";
+    btn.disabled = busy || !prof || prof.account === "demo" || !s.touches_platform;
 }
 
 function renderSymbols(s) {
@@ -408,6 +446,21 @@ document.getElementById("btnStop").onclick = () => {
 };
 document.getElementById("btnResume").onclick = () => {
     if (confirm("Снять стоп и разрешить входы?")) send({cmd: "resume"});
+};
+document.getElementById("btnEnsureDemo").onclick = () => {
+    const btn = document.getElementById("btnEnsureDemo");
+    if (btn.disabled) return;
+    // Строго в безопасную сторону. Подтверждение всё же нужно: действие
+    // меняет счёт на площадке, а площадка может вернуть «error» при
+    // незакрытых сделках.
+    if (!confirm("Привести счёт площадки к ДЕМО?\n\n"
+                 + "Демо — виртуальные средства. Реальный счёт бот не трогает; "
+                 + "кнопки «на реал» в панели нет намеренно.")) return;
+    // Защита от двойного нажатия: тумблер инвертирует счёт, второй клик
+    // посреди переключения вернул бы его обратно. Ответ разблокирует.
+    btn.dataset.busy = "1";
+    btn.disabled = true;
+    send({cmd: "ensure_demo"});
 };
 
 function toast(message, status) {
