@@ -86,12 +86,13 @@ class FakeQuotes:
         return 157.666
 
 
-def make_panel(mode="dry", client=None):
+def make_panel(mode="dry", client=None, token=None):
     """Собрать панель на свободном порту.
 
     Args:
         mode:   Режим бота.
         client: Заглушка клиента площадки (для demo/live).
+        token:  Токен авторизации панели; None — без пароля.
 
     Returns:
         Кортеж (Panel, Journal, ManualSource, RiskManager, порт, пути).
@@ -107,6 +108,7 @@ def make_panel(mode="dry", client=None):
         mode=mode, symbol_whitelist=["USD/JPY", "EUR/USD"],
         default_investment=1, panel_port=port, stop_file=stop_path,
         db_path=handle.name, risk=RiskConfig(allowed_hours=[]),
+        panel_token=token,
     )
 
     manual = ManualSource(default_symbol="USD/JPY")
@@ -775,6 +777,148 @@ def test_ensure_demo_blocked_in_dry():
         cleanup(paths)
 
 
+def _auth_wrong_token(panel, journal, port, paths):
+    """Прогнать сценарий неверного токена.
+
+    Args:
+        panel:   Панель.
+        journal: Журнал.
+        port:    Порт панели.
+        paths:   Пути для очистки.
+
+    Returns:
+        None.
+    """
+
+    async def scenario():
+        """Послать неверный токен и собрать всё, что придёт.
+
+        Returns:
+            Список сообщений клиента до закрытия.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.send(json.dumps({"cmd": "auth", "token": "не тот"}))
+                messages = []
+                for _ in range(5):
+                    try:
+                        messages.append(json.loads(
+                            await asyncio.wait_for(ws.recv(), timeout=10)))
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                        break
+                return messages
+        finally:
+            await panel.stop()
+
+    messages = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        replies = [m for m in messages if m.get("type") == "reply"]
+        check("есть ответ error", replies and replies[0]["status"] == "error",
+              messages)
+        check("причина — неверный токен",
+              "неверный токен" in replies[0].get("message", ""), replies)
+        check("соединение закрыто после отказа", len(messages) < 5, messages)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_auth_wrong_token_rejected():
+    """Неверный токен не пускает: отказ и закрытие соединения."""
+    print("неверный токен отклонён")
+    panel, journal, manual, risk, port, paths = make_panel(token="секрет")
+    _auth_wrong_token(panel, journal, port, paths)
+
+
+def test_auth_no_leak_without_token():
+    """Без авторизации панель молчит: ни состояния, ни команд."""
+    print("до авторизации — тишина")
+    panel, journal, manual, risk, port, paths = make_panel(token="секрет")
+    stop_path = paths[1]
+
+    async def scenario():
+        """Подключиться, постучаться и убедиться, что ничего не утекло.
+
+        Returns:
+            (что пришло само, что ответили на команду, взведён ли стоп).
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                leaked = []
+                try:
+                    leaked.append(json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=0.7)))
+                except asyncio.TimeoutError:
+                    pass  # тишина до авторизации — это правильно
+
+                await ws.send(json.dumps({"cmd": "stop"}))
+                replies = []
+                for _ in range(5):
+                    try:
+                        replies.append(json.loads(
+                            await asyncio.wait_for(ws.recv(), timeout=10)))
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                        break
+                return leaked, replies, kill_switch_active(stop_path)
+        finally:
+            await panel.stop()
+
+    leaked, replies, stopped = asyncio.run(
+        asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("до авторизации состояние НЕ утекло", leaked == [], leaked)
+        errors = [m for m in replies if m.get("type") == "reply"
+                  and m.get("status") == "error"]
+        check("команда получила отказ", bool(errors), replies)
+        check("причина — неверный токен",
+              errors and "неверный токен" in errors[0].get("message", ""),
+              errors)
+        check("kill-switch НЕ взведён", stopped is False, stopped)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_auth_correct_token_gets_state():
+    """Правильный токен открывает доступ: состояние и команды."""
+    print("правильный токен пускает")
+    panel, journal, manual, risk, port, paths = make_panel(token="секрет")
+    stop_path = paths[1]
+
+    async def scenario():
+        """Авторизоваться, получить срез и выполнить команду.
+
+        Returns:
+            Кортеж (первое сообщение, ответ на stop, взведён ли стоп).
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.send(json.dumps({"cmd": "auth", "token": "секрет"}))
+                first = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                await ws.send(json.dumps({"cmd": "stop"}))
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        return first, message, kill_switch_active(stop_path)
+        finally:
+            await panel.stop()
+
+    first, reply, stopped = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("после auth сразу состояние", first.get("type") == "state", first)
+        check("в состоянии есть режим", "mode" in first, first)
+        check("команда выполнилась", reply and reply["status"] == "ok", reply)
+        check("kill-switch взведён", stopped is True, stopped)
+    finally:
+        release_kill_switch(stop_path)
+        journal.close()
+        cleanup(paths)
+
+
 def main():
     """Прогнать все тесты и вернуть код возврата.
 
@@ -788,7 +932,10 @@ def main():
                  test_ensure_demo_error, test_no_to_real_command,
                  test_set_account_two_way, test_set_account_bad_target,
                  test_set_account_blocked_in_dry,
-                 test_ensure_demo_blocked_in_dry):
+                 test_ensure_demo_blocked_in_dry,
+                 test_auth_wrong_token_rejected,
+                 test_auth_no_leak_without_token,
+                 test_auth_correct_token_gets_state):
         test()
         print()
 

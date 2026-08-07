@@ -23,8 +23,10 @@
 
     ssh -L 8788:127.0.0.1:8788 root@<vps>
 
-Открывать её наружу без пароля нельзя: любой, кто найдёт порт, сможет
-нажать Call.
+Наружу порт открывается ТОЛЬКО вместе с токеном (config.panel_token, из
+окружения INTRADE_PANEL_TOKEN): соединение принимается после {cmd: "auth",
+token: ...} в первые AUTH_TIMEOUT секунд, до этого ни состояния, ни команд.
+config.validate() не даст поднять публичный panel_host без токена вовсе.
 """
 
 from __future__ import annotations
@@ -52,6 +54,10 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # Период рассылки состояния. Секунда — как опрос котировок: чаще смысла нет,
 # реже таймер до экспирации начнёт дёргаться.
 BROADCAST_INTERVAL = 1.0
+
+# Окно на авторизацию (panel_token). Короткое, чтобы на публичном порту не
+# копились висящие бездельники: не успел представиться — соединение закрыто.
+AUTH_TIMEOUT = 10.0
 
 
 class Panel:
@@ -124,16 +130,25 @@ class Panel:
                      self.config.panel_port, self.config.panel_port,
                      self.config.panel_port)
         else:
-            # Панель умеет открывать сделки. Наружу — только осознанно и
-            # ненадолго: пароля у неё нет, кнопка Call доступна любому,
-            # кто нашёл порт. В режимах demo/live это уже опасно.
-            log.warning("ПАНЕЛЬ ОТКРЫТА НАРУЖУ (%s:%d) БЕЗ ПАРОЛЯ — "
-                        "кнопки Call/Put доступны всем, кто знает адрес. "
-                        "Режим сейчас: %s",
-                        host, self.config.panel_port, self.config.mode)
+            # Панель умеет открывать сделки. Наружу — только осознанно:
+            # validate() требует panel_token для не-localhost хоста, так что
+            # пароль здесь есть всегда; ветка «без пароля» — на всякий случай,
+            # если кто-то собрал Panel в обход validate().
+            token = getattr(self.config, "panel_token", None)
+            if token:
+                log.warning("ПАНЕЛЬ ОТКРЫТА НАРУЖУ (%s:%d) — доступ по токену "
+                            "panel_token. Call/Put видит только тот, у кого "
+                            "есть токен. Режим сейчас: %s",
+                            host, self.config.panel_port, self.config.mode)
+            else:
+                log.warning("ПАНЕЛЬ ОТКРЫТА НАРУЖУ (%s:%d) БЕЗ ПАРОЛЯ — "
+                            "кнопки Call/Put доступны всем, кто знает адрес. "
+                            "Режим сейчас: %s",
+                            host, self.config.panel_port, self.config.mode)
             if self.config.touches_platform:
-                log.warning("ВНИМАНИЕ: режим %s тратит реальные средства "
-                            "счёта, а панель открыта без защиты",
+                log.warning("ВНИМАНИЕ: режим %s тратит средства счёта. "
+                            "Токен держит доступ к панели, но сам счёт "
+                            "защищает только балансовый рубеж",
                             self.config.mode)
 
     async def stop(self) -> None:
@@ -206,17 +221,53 @@ class Panel:
     async def _handle_client(self, websocket) -> None:
         """Обслужить одно подключение браузера.
 
+        Токен-авторизация (panel_token): при заданном токене первое
+        сообщение обязано быть {cmd: "auth", token: ...} — в пределах
+        AUTH_TIMEOUT, иначе соединение закрывается. До авторизации клиент
+        НЕ попадает в self.clients: состояние ему не рассылается, команды
+        не исполняются. Без токена поведение прежнее — доступ без пароля
+        (штатно для localhost).
+
         Args:
             websocket: Соединение.
 
         Returns:
             None.
         """
-        self.clients.add(websocket)
-        log.info("панель: клиент подключился (всего %d)", len(self.clients))
+        token = getattr(self.config, "panel_token", None)
+        authed = not bool(token)
+
+        if authed:
+            self.clients.add(websocket)
+            log.info("панель: клиент подключился (всего %d)", len(self.clients))
+
         try:
-            # Сразу шлём состояние, чтобы страница не ждала общего тика.
-            await websocket.send(json.dumps(await self.snapshot()))
+            if authed:
+                # Сразу шлём состояние, чтобы страница не ждала общего тика.
+                await websocket.send(json.dumps(await self.snapshot()))
+            else:
+                # Ждём авторизацию. Окно ограничено, чтобы не копить
+                # бездельников на порту.
+                try:
+                    raw = await asyncio.wait_for(websocket.recv(), AUTH_TIMEOUT)
+                except asyncio.TimeoutError:
+                    await self._reply(websocket, "error", "время на авторизацию истекло")
+                    return
+                except ConnectionClosed:
+                    return
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    return
+                if msg.get("cmd") != "auth" or msg.get("token") != token:
+                    await self._reply(websocket, "error", "неверный токен")
+                    log.warning("панель: отклонён вход с неверным токеном")
+                    return
+                authed = True
+                self.clients.add(websocket)
+                log.info("панель: клиент авторизован (всего %d)", len(self.clients))
+                await websocket.send(json.dumps(await self.snapshot()))
+
             async for raw in websocket:
                 await self._handle_command(websocket, raw)
         except ConnectionClosed:

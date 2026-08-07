@@ -52,6 +52,12 @@ DEFAULTS = {
     # осознанный выбор, который стоит делать только в режиме dry.
     "panel_host": "127.0.0.1",
     "panel_port": 8788,
+    # Токен панели. Пока пусто — панель без пароля (только localhost).
+    # При заданном токене панель принимает соединение только после
+    # {cmd: "auth", token: ...} в первые AUTH_TIMEOUT секунд; состояние
+    # и команды до авторизации не отдаются. Токен — секрет, жить должен
+    # в .env (INTRADE_PANEL_TOKEN), а не в bot_config.json.
+    "panel_token": None,
     "db_path": "bot_journal.db",
     "stop_file": "bot/STOP",
 
@@ -116,9 +122,12 @@ class BotConfig:
         sources:                Имена включённых источников сигналов.
         risk:                   Пороги ограничителей.
         panel_host:             Адрес панели. 127.0.0.1 — только локально
-                                (умолчание); 0.0.0.0 — открыть наружу, БЕЗ
-                                пароля, кнопки Call/Put доступны всем.
+                                (умолчание); 0.0.0.0 — открыть наружу.
+                                Наружу панель пускается ТОЛЬКО вместе с
+                                panel_token, иначе Call/Put доступны всем.
         panel_port:             Порт панели наблюдения.
+        panel_token:            Секрет для авторизации панели; None — без
+                                пароля (локально). Обычно из .env.
         db_path:                Файл журнала (НЕ market.db).
         stop_file:              Путь kill-switch: есть файл — входы запрещены.
     """
@@ -137,6 +146,7 @@ class BotConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     panel_host: str = "127.0.0.1"
     panel_port: int = 8788
+    panel_token: Optional[str] = None
     min_balance_for_demo: float = 1000.0
     db_path: str = "bot_journal.db"
     stop_file: str = "bot/STOP"
@@ -259,6 +269,10 @@ def load(path: str = DEFAULT_CONFIG_PATH, env_path: str = ".env") -> BotConfig:
         risk=risk,
         panel_host=str(data.get("panel_host") or DEFAULTS["panel_host"]),
         panel_port=int(data.get("panel_port", 8788)),
+        # Токен — секрет: окружение и .env важнее конфига. Пустая строка
+        # из окружения (случайно) НЕ должна отключать токен из конфига.
+        panel_token=(from_env("INTRADE_PANEL_TOKEN")
+                     or data.get("panel_token") or None),
         min_balance_for_demo=float(data.get("min_balance_for_demo",
                                             DEFAULTS["min_balance_for_demo"])),
         db_path=str(data.get("db_path") or "bot_journal.db"),
@@ -307,3 +321,15 @@ def validate(config: BotConfig) -> None:
                 "Для live оставьте panel_host = 127.0.0.1 и ходите "
                 "через ssh-туннель"
             )
+
+    # Панель наружу (не localhost) и без токена — открытая дверь к Call/Put.
+    # Токен — единственный замок: без него состояние и команды получает любой,
+    # кто достучался до порта. Действует во всех режимах, включая demo.
+    if config.panel_host not in ("127.0.0.1", "localhost", "::1") \
+            and not config.panel_token:
+        raise ValueError(
+            f"панель на {config.panel_host} без panel_token запрещена: "
+            "у панели нет пароля, кнопка Call доступна всем. "
+            "Задайте INTRADE_PANEL_TOKEN (в .env) или оставьте "
+            "panel_host = 127.0.0.1 и ходите через ssh-туннель"
+        )
