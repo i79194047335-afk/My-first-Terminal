@@ -334,6 +334,88 @@
         to   { background: transparent; }
     }
     #tapeEmpty { padding: 14px 10px; color: var(--muted); line-height: 1.5; }
+    /* Интрейд-панель (бот intrade.bar): горизонтальная выдвижная полоса
+       снизу графика. Высота — как у подвального осциллятора по умолчанию
+       (~20%, indicators.js _applyDefaultStretch). Умеет открывать сделки,
+       поэтому живёт только за явной кнопкой в тулбаре и закрывает своё WS,
+       когда спрятана. */
+    #intradePanel {
+        position: absolute; left: 0; right: 0; bottom: 0; height: 20%;
+        background: var(--panel); border-top: 1px solid var(--btn-border);
+        color: var(--text); font-size: 11px; z-index: 2000;
+        box-sizing: border-box; display: none; flex-direction: column;
+    }
+    #intradePanel.on { display: flex; }
+    #intradePanel .it-head {
+        display: flex; align-items: center; gap: 12px;
+        padding: 5px 10px; border-bottom: 1px solid var(--divider, var(--btn-border));
+        flex: 0 0 auto;
+    }
+    #intradePanel .it-head b { font-size: 12px; }
+    #intradePanel .it-bal { font-variant-numeric: tabular-nums; font-weight: 600; }
+    #intradePanel .it-acc-box {
+        display: inline-flex; border: 1px solid var(--btn-border); border-radius: 4px;
+        overflow: hidden;
+    }
+    #intradePanel .it-acc-btn {
+        border: 0; background: var(--btn); color: var(--muted);
+        padding: 2px 9px; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    #intradePanel .it-acc-btn.on { color: var(--text); background: var(--accent-soft); }
+    #intradePanel .it-acc-btn.on.demo { color: #26a69a; background: rgba(38,166,154,0.14); }
+    #intradePanel .it-acc-btn.on.real { color: #ef5350; background: rgba(239,83,80,0.14); }
+    #intradePanel .it-conn { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+    #intradePanel .it-dot { width: 7px; height: 7px; border-radius: 50%; background: #ef5350; }
+    #intradePanel .it-dot.on { background: #26a69a; }
+    #intradePanel .it-actions {
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        padding: 6px 10px; border-bottom: 1px solid var(--divider, var(--btn-border));
+        flex: 0 0 auto;
+    }
+    #intradePanel .it-sym {
+        border: 1px solid var(--btn-border); background: var(--btn); color: var(--text);
+        padding: 4px 8px; border-radius: 4px; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    #intradePanel .it-sym.on {
+        background: var(--accent-soft); border-color: var(--accent, var(--btn-border)); color: var(--text);
+    }
+    #intradePanel .it-stake { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+    #intradePanel .it-stake input {
+        width: 56px; font: inherit; background: var(--btn); color: var(--text);
+        border: 1px solid var(--btn-border); border-radius: 4px; padding: 3px 6px;
+    }
+    #intradePanel .it-call, #intradePanel .it-put {
+        font: inherit; font-weight: 700; font-size: 13px; border-radius: 5px;
+        padding: 5px 18px; cursor: pointer; border: 1px solid;
+    }
+    #intradePanel .it-call { background: rgba(38,166,154,0.14); color: #26a69a; border-color: #26a69a; }
+    #intradePanel .it-put  { background: rgba(239,83,80,0.14); color: #ef5350; border-color: #ef5350; }
+    #intradePanel .it-call:disabled, #intradePanel .it-put:disabled { opacity: .4; cursor: not-allowed; }
+    #intradePanel .it-trades { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+    #intradePanel .it-tabs { display: flex; gap: 4px; padding: 4px 10px 0; }
+    #intradePanel .it-tab {
+        border: 1px solid var(--btn-border); background: var(--btn); color: var(--muted);
+        padding: 2px 10px; border-radius: 4px 4px 0 0; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    #intradePanel .it-tab.on { background: var(--accent-soft); color: var(--text); border-color: var(--accent, var(--btn-border)); }
+    #intradePanel .it-rows { overflow-y: auto; flex: 1 1 auto; padding: 0 10px 4px; }
+    #intradePanel .it-row {
+        display: grid; grid-template-columns: 62px 74px 34px 44px 1fr 54px;
+        gap: 6px; padding: 2px 0; align-items: baseline;
+        border-bottom: 1px solid rgba(128,128,128,0.12);
+        font-variant-numeric: tabular-nums;
+    }
+    #intradePanel .it-row span.mut { color: var(--muted); }
+    #intradePanel .it-row .win { color: #26a69a; font-weight: 600; }
+    #intradePanel .it-row .loss { color: #ef5350; font-weight: 600; }
+    #intradePanel .it-empty { color: var(--muted); padding: 8px 0; text-align: center; }
+    #intradeToast {
+        position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%);
+        background: var(--panel); border: 1px solid var(--divider); border-radius: 5px;
+        padding: 6px 12px; display: none; font-weight: 600; z-index: 2001;
+    }
+    #intradeToast.err { border-color: #ef5350; color: #ef5350; }
+    #intradeToast.ok { border-color: #26a69a; color: #26a69a; }
     #briefContent { line-height: 1.6; }
     #briefContent h2 {
         font-size: 15px; color: #fff; margin: 0 0 10px 0;
@@ -696,6 +778,7 @@
             <button id="tapeBtn" class="tb-ic" onclick="toggleTape()" data-tip="Лента крупных сделок"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
             <button id="infoBtn" class="tb-ic" onclick="toggleInfo()" data-tip="Карточка инструмента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
+            <button id="intradeBtn" class="tb-txt" onclick="toggleIntrade()" data-tip="Интрейд — панель бота intrade.bar (баланс, счёт, сделки)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg> Интрейд</button>
         </div>
         <div class="chart-wrapper" id="wrapper2">
             <div id="signalPanel"></div>
@@ -716,6 +799,34 @@
                     <span id="tapeThreshold"></span>
                 </div>
                 <div id="tapeRows"></div>
+            </div>
+            <!-- Интрейд-панель (бот intrade.bar): баланс, переключение
+                 демо/реал, пары одним кликом, кнопки Вверх/Вниз, список
+                 сделок. Выдвигается кнопкой «Интрейд» в тулбаре. -->
+            <div id="intradePanel">
+                <div class="it-head">
+                    <b>Интрейд</b>
+                    <span class="it-acc-box">
+                        <button class="it-acc-btn demo" data-acc="demo" onclick="intradeSetAccount('demo')">ДЕМО</button>
+                        <button class="it-acc-btn real" data-acc="real" onclick="intradeSetAccount('real')">РЕАЛ</button>
+                    </span>
+                    <span class="it-bal">Баланс: <span id="itBalance">—</span></span>
+                    <span class="it-conn"><span class="it-dot" id="itDot"></span><span id="itConnText">нет связи</span></span>
+                </div>
+                <div class="it-actions">
+                    <span id="itSymbols"></span>
+                    <span class="it-stake">Ставка <input id="itAmount" type="number" min="1" step="1" value="1"></span>
+                    <button id="itCall" class="it-call" onclick="intradeFire('call')">▲ Вверх</button>
+                    <button id="itPut" class="it-put" onclick="intradeFire('put')">▼ Вниз</button>
+                </div>
+                <div class="it-trades">
+                    <div class="it-tabs">
+                        <button class="it-tab on" id="itTabOpen" onclick="intradeSetTab('open')">Открытые</button>
+                        <button class="it-tab" id="itTabClosed" onclick="intradeSetTab('closed')">Закрытые</button>
+                    </div>
+                    <div class="it-rows" id="itRows"></div>
+                </div>
+                <div id="intradeToast"></div>
             </div>
             <div class="chart" id="chart2"></div>
             <div class="tv-countdown" id="countdown2"></div>
@@ -787,6 +898,11 @@ const TF_MAP = {
 };
 // Адрес хаба; ?ws=ws://127.0.0.1:8767 — для локальной отладки против тест-хаба.
 const WS_URL = new URLSearchParams(location.search).get("ws") || "ws://89.107.10.204:8765";
+// Адрес панели бота intrade.bar; ?intrade=ws://127.0.0.1:8788 — локальная
+// отладка. Панель умеет ОТКРЫВАТЬ сделки и по умолчанию слушает 127.0.0.1,
+// поэтому наружу её пускают сознательно (panel_host в bot_config.json) или
+// ssh-туннелем. Данных intrade во фронте нет — их держит бот и шлёт срезом.
+const INTRADE_WS_URL = new URLSearchParams(location.search).get("intrade") || "ws://89.107.10.204:8788";
 // ── Шкала R: наша (тики) ↔ TradingView ──────────────────────────────────────
 //
 // Внутри и хабу рэндж-бар всегда задаётся в ПОИНТАХ (тиках, минимальный тик
@@ -3541,6 +3657,307 @@ function resetTape() {
     renderTapeHeader();
 }
 
+// ── Интрейд-панель (бот intrade.bar) ────────────────────────────────────
+// Отдельное WS-соединение к панели бота (:8788): она шлёт срез состояния
+// раз в секунду и принимает команды call/put/set_account. Креды intrade во
+// фронт не попадают — все HTTP-вызовы к площадке делает бот. Панель умеет
+// открывать сделки, поэтому держит соединение открытым только когда видна.
+let intradeVisible = false;
+let intradeWs = null;
+let intradeState = null;
+let intradeActiveSymbol = null;
+let intradeTab = "open";
+let _itAmountSet = false;
+
+/**
+ * Кнопка «Интрейд» в тулбаре: показать/спрятать панель.
+ * Состояние живёт в layout, как у ленты, и переживает F5.
+ * @returns {void}
+ */
+function toggleIntrade() {
+    intradeVisible = !intradeVisible;
+    layout.showIntrade = intradeVisible;
+    StorageLayer.autoSave(layout);
+    applyIntradeVisibility();
+}
+
+/**
+ * Применить видимость панели; при показе поднять WS, при скрытии закрыть.
+ * @returns {void}
+ */
+function applyIntradeVisibility() {
+    const panel = document.getElementById("intradePanel");
+    const btn = document.getElementById("intradeBtn");
+    if (!panel) return;
+    panel.classList.toggle("on", intradeVisible);
+    if (btn) btn.classList.toggle("on", intradeVisible);
+    if (intradeVisible) {
+        if (!intradeWs) intradeConnect();
+    } else if (intradeWs) {
+        try { intradeWs.close(); } catch (e) { /* уже закрыт */ }
+        intradeWs = null;
+    }
+}
+
+/**
+ * Поднять WS к панели бота. Без авторизации: панель отдаёт состояние всем,
+ * кто постучался, — порт по умолчанию 127.0.0.1, наружу не торчит.
+ * @returns {void}
+ */
+function intradeConnect() {
+    let ws;
+    try { ws = new WebSocket(INTRADE_WS_URL); }
+    catch (e) { setTimeout(intradeConnect, 3000); return; }
+    intradeWs = ws;
+    ws.onopen = () => intradeSetConn(true);
+    ws.onclose = () => {
+        intradeSetConn(false);
+        intradeWs = null;
+        setTimeout(() => { if (intradeVisible) intradeConnect(); }, 3000);
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) { /* nothing */ } };
+    ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.type === "state") {
+            intradeState = msg;
+            if (!intradeActiveSymbol && msg.symbols && msg.symbols.length) {
+                intradeActiveSymbol = layout.intradeSymbol || msg.symbols[0];
+            }
+            renderIntrade(msg);
+        } else if (msg.type === "reply") {
+            intradeToast(msg.message, msg.status === "error" ? "error" : "ok");
+        }
+    };
+}
+
+/**
+ * Индикатор связи в шапке панели.
+ * @param {boolean} on На связи или нет.
+ * @returns {void}
+ */
+function intradeSetConn(on) {
+    const dot = document.getElementById("itDot");
+    const txt = document.getElementById("itConnText");
+    if (dot) dot.classList.toggle("on", on);
+    if (txt) txt.textContent = on ? "на связи" : "нет связи";
+}
+
+/**
+ * Отправить команду в панель бота; при отсутствии связи — тост.
+ * @param {object} payload Команда.
+ * @returns {void}
+ */
+function intradeSend(payload) {
+    if (!intradeWs || intradeWs.readyState !== WebSocket.OPEN) {
+        intradeToast("нет связи с ботом", "error");
+        return;
+    }
+    intradeWs.send(JSON.stringify(payload));
+}
+
+/**
+ * Отрисовать срез состояния из панели бота.
+ * @param {object} s Состояние (snapshot панели).
+ * @returns {void}
+ */
+function renderIntrade(s) {
+    // Баланс площадки.
+    const bal = document.getElementById("itBalance");
+    if (bal) {
+        bal.textContent = (s.balance && s.balance.amount != null)
+            ? s.balance.amount.toFixed(2) + " " + (s.balance.currency || "")
+            : "—";
+    }
+
+    // Счёт площадки: подсветить активную кнопку ДЕМО/РЕАЛ.
+    const acc = (s.profile && s.profile.account) || null;
+    document.querySelectorAll(".it-acc-btn").forEach(btn => {
+        btn.classList.toggle("on", btn.dataset.acc === acc);
+    });
+
+    // Пары: активная — одним кликом. Кнопки строим один раз (по числу пар).
+    const box = document.getElementById("itSymbols");
+    if (box && box.dataset.rendered !== String((s.symbols || []).length)) {
+        box.dataset.rendered = String((s.symbols || []).length);
+        box.innerHTML = "";
+        (s.symbols || []).forEach(sym => {
+            const b = document.createElement("button");
+            b.className = "it-sym";
+            b.textContent = sym;
+            b.onclick = () => {
+                intradeActiveSymbol = sym;
+                layout.intradeSymbol = sym;
+                StorageLayer.autoSave(layout);
+                highlightIntradeSymbols();
+            };
+            box.appendChild(b);
+        });
+    }
+    highlightIntradeSymbols();
+
+    // Ставка по умолчанию — из конфига бота, один раз, не затирая ввод.
+    const amount = document.getElementById("itAmount");
+    if (amount && !_itAmountSet && s.default_investment != null) {
+        amount.value = s.default_investment;
+        _itAmountSet = true;
+    }
+
+    // Кнопки входа гаснут, когда вход запрещён: kill-switch, стоп риска,
+    // край часа, окно брокера, либо бот вообще не ходит к площадке.
+    const blocked = s.kill_switch
+        || (s.risk && s.risk.halted)
+        || s.hour_edge || s.broker_down || !s.touches_platform;
+    const call = document.getElementById("itCall");
+    const put = document.getElementById("itPut");
+    if (call) call.disabled = blocked;
+    if (put) put.disabled = blocked;
+
+    renderIntradeTrades(s);
+}
+
+/**
+ * Подсветить активную пару.
+ * @returns {void}
+ */
+function highlightIntradeSymbols() {
+    document.querySelectorAll(".it-sym").forEach(b => {
+        b.classList.toggle("on", b.textContent === intradeActiveSymbol);
+    });
+}
+
+/**
+ * Кнопки ▲ Вверх / ▼ Вниз: открыть сделку на активной паре.
+ * Реальные средства — только через confirm.
+ * @param {string} direction "call" или "put".
+ * @returns {void}
+ */
+function intradeFire(direction) {
+    if (!intradeState) return;
+    const amountEl = document.getElementById("itAmount");
+    const amount = parseFloat(amountEl ? amountEl.value : "") || null;
+    const onReal = intradeState.profile && intradeState.profile.account === "real";
+    if (intradeState.mode === "demo" || intradeState.mode === "live") {
+        const where = onReal ? "РЕАЛЬНЫЙ счёт площадки" : "демо-счёт площадки";
+        if (!confirm("Открыть сделку на " + where + "?\n\n" +
+                     direction.toUpperCase() + " " + intradeActiveSymbol +
+                     ", ставка " + (amount != null ? amount : "по умолчанию"))) return;
+    }
+    intradeSend({cmd: direction, symbol: intradeActiveSymbol, amount: amount});
+}
+
+/**
+ * Переключение счёта площадки демо⇄реал. Тумблер на площадке ИНВЕРТИРУЕТ
+ * счёт без параметра — бот читает состояние и переключает, только если оно
+ * отличается от целевого. Реал — через двойной confirm.
+ * @param {string} target "demo" или "real".
+ * @returns {void}
+ */
+function intradeSetAccount(target) {
+    if (!intradeState) return;
+    if (target === "real") {
+        if (!confirm("Переключить счёт площадки на РЕАЛ?\n\n" +
+                     "Тумблер инвертирует счёт без параметра — бот прочитает " +
+                     "состояние и переключит, только если сейчас демо. Риски на тебе.")) return;
+    } else if (!confirm("Переключить счёт площадки на демо?")) {
+        return;
+    }
+    intradeSend({cmd: "set_account", target: target});
+}
+
+/**
+ * Вкладки «Открытые»/«Закрытые».
+ * @param {string} tab "open" или "closed".
+ * @returns {void}
+ */
+function intradeSetTab(tab) {
+    intradeTab = tab;
+    const open = document.getElementById("itTabOpen");
+    const closed = document.getElementById("itTabClosed");
+    if (open) open.classList.toggle("on", tab === "open");
+    if (closed) closed.classList.toggle("on", tab === "closed");
+    if (intradeState) renderIntradeTrades(intradeState);
+}
+
+/**
+ * Список сделок активной вкладки. Перерисовывается раз в секунду вместе
+ * со срезом — строк мало (15 открытых / 30 закрытых), DOM-обновление дёшево.
+ * @param {object} s Срез состояния.
+ * @returns {void}
+ */
+function renderIntradeTrades(s) {
+    const box = document.getElementById("itRows");
+    if (!box) return;
+    // Перерисовываем, только если список реально изменился: срез приходит
+    // раз в секунду, и молотить DOM (сбивая прокрутку) не нужно.
+    // Секунды до экспирации — часть сигнатуры: в «Открытых» таймер тикает.
+    const list = intradeTab === "open" ? (s.open_positions || []) : (s.closed_trades || []);
+    const sig = intradeTab + "|" + list.map(p =>
+        (p.id || "") + ":" + (p.seconds_left != null ? Math.round(p.seconds_left) : "") +
+        ":" + (p.result || "") + ":" + (p.pnl != null ? p.pnl.toFixed(2) : "") + ":" + p.symbol
+    ).join(",");
+    if (sig === box.dataset.sig) return;
+    box.dataset.sig = sig;
+
+    if (intradeTab === "open") {
+        if (!list.length) {
+            box.innerHTML = '<div class="it-empty">нет открытых сделок</div>';
+            return;
+        }
+        box.innerHTML = list.map(p => {
+            const left = p.seconds_left != null
+                ? Math.max(0, Math.round(p.seconds_left)) + " с" : "—";
+            const dir = p.direction === "call"
+                ? '<span class="win">▲</span>' : '<span class="loss">▼</span>';
+            return '<div class="it-row">' +
+                '<span class="mut">' + p.symbol + '</span>' +
+                '<span>' + dir + '</span>' +
+                '<span>' + p.investment + '</span>' +
+                '<span>' + (p.entry_price != null ? p.entry_price : "—") + '</span>' +
+                '<span class="mut">' + left + '</span>' +
+                '<span></span></div>';
+        }).join("");
+    } else {
+        if (!list.length) {
+            box.innerHTML = '<div class="it-empty">закрытых сделок пока нет</div>';
+            return;
+        }
+        box.innerHTML = list.map(t => {
+            const time = new Date((t.created_ts || 0) * 1000)
+                .toLocaleTimeString("ru-RU", {hour: "2-digit", minute: "2-digit"});
+            const cls = t.result === "win" ? "win"
+                : t.result === "loss" ? "loss" : "mut";
+            const pnl = t.pnl != null
+                ? (t.pnl > 0 ? "+" : "") + t.pnl.toFixed(2) : "—";
+            const dir = t.direction === "call"
+                ? '<span class="win">▲</span>' : '<span class="loss">▼</span>';
+            return '<div class="it-row">' +
+                '<span class="mut">' + time + '</span>' +
+                '<span>' + t.symbol + '</span>' +
+                '<span>' + dir + '</span>' +
+                '<span>' + t.investment + '</span>' +
+                '<span class="' + cls + '">' + (t.result || "—") + '</span>' +
+                '<span class="' + cls + '">' + pnl + '</span></div>';
+        }).join("");
+    }
+}
+
+/**
+ * Всплывающее сообщение внутри панели.
+ * @param {string} message Текст.
+ * @param {string} status "ok" или "error".
+ * @returns {void}
+ */
+function intradeToast(message, status) {
+    const box = document.getElementById("intradeToast");
+    if (!box) return;
+    box.textContent = message;
+    box.className = status === "error" ? "err" : "ok";
+    box.style.display = "block";
+    clearTimeout(box._timer);
+    box._timer = setTimeout(() => { box.style.display = "none"; }, 3500);
+}
+
 // ── Карточка инструмента ──
 let tickerData  = {};      // provider → { symbol → поля сводки }
 let infoVisible = false;
@@ -5520,6 +5937,12 @@ function initialize() {
     tapeVisible = layout.showTape === true;
     applyTapeVisibility();
     resetTape();
+
+    // Интрейд-панель — состояние из сохранённого layout; WS поднимается,
+    // только если панель была видна при прошлой сессии.
+    intradeVisible = layout.showIntrade === true;
+    if (layout.intradeSymbol) intradeActiveSymbol = layout.intradeSymbol;
+    applyIntradeVisibility();
 
     // Symbol selector
     const symbolSelect = document.getElementById("symbolSelect");
