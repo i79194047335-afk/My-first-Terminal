@@ -1205,6 +1205,16 @@ function handleMessage(id, state, msg) {
     if (msg.type === "history") {
         if (!state.chart) createChartInternal(id, state.tfSeconds);
 
+        // Рисунки — СРАЗУ после создания графика, ДО restoreShockLogFromDrawings/
+        // syncShockMarkersFromLog ниже. Те дергают attachShockToPanes(), а он
+        // зовёт saveDrawings() для каждого события из журнала — если к этому
+        // моменту drawingEngine.drawings ещё пуст (свежесозданный chart), полная
+        // перезапись saveDrawings стирала линии/прямоугольники/фибо инструмента
+        // из layout НАВСЕГДА (переживало даже F5, т.к. saveDrawings сразу пишет
+        // в localStorage). Раньше вызов стоял в конце блока — здесь его слишком
+        // легко было обогнать.
+        StorageLayer.restoreDrawings(id, layout, panesState, drawings);
+
         // Сброс перекрестия перед самой подменой данных — на случай, если
         // курсор успел «залочить» точку, пока грузилась история (см. setTF).
         try { state.chart.clearCrosshairPosition(); } catch (e) {}
@@ -1260,8 +1270,6 @@ function handleMessage(id, state, msg) {
             // Крюки Росса — полный пересчёт по свежей истории.
             state.rossHooks?.setData(state.data);
         }
-
-        StorageLayer.restoreDrawings(id, layout, panesState, drawings);
 
         setTimeout(() => {
             state.chart.resize(els.chartDiv.clientWidth, els.chartDiv.clientHeight);
@@ -2345,8 +2353,16 @@ function switchSymbol(symbol) {
     [1, 2].forEach(paneId => {
         const st = panesState[paneId];
         if (!st) return;
-        drawings[paneId].forEach(obj => { if (obj.line) st.series.removePriceLine(obj.line); });
-        if (st.drawingEngine) { st.drawingEngine.drawings = []; st.drawingEngine.render(); }
+
+        // Рисунки нового символа поднимаем СРАЗУ из layout, не дожидаясь
+        // "history": st.series уже существует (график при смене пары не
+        // пересоздаётся), и раньше между сбросом старых рисунков и приходом
+        // истории оставалось пустое окно. В него мог попасть широковещательный
+        // "shocks"/"shock" (идут без requestId, см. BROADCAST_TYPES) — их
+        // обработчик видел пустой drawingEngine.drawings и сохранял его как
+        // есть, полной перезаписью стирая линии/прямоугольники/фибо инструмента
+        // из localStorage безвозвратно (переживало даже F5).
+        StorageLayer.restoreDrawings(paneId, layout, panesState, drawings);
 
         // Данные ПРЕДЫДУЩЕГО инструмента убираем сразу, не дожидаясь истории
         // нового. На обычных ТФ история приходит мгновенно и подменяет их, а
@@ -2366,7 +2382,6 @@ function switchSymbol(symbol) {
         // Крюки прошлого инструмента — по чужим ценам. Гасим до новой истории.
         if (st.rossHooks) st.rossHooks.setData([]);
     });
-    drawings[1] = []; drawings[2] = [];
 
     layout.symbol = symbol;
     StorageLayer.autoSave(layout);
