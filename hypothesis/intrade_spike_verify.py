@@ -61,6 +61,12 @@ def hit_rev(times, mids, events, delay, direction, split_by_day=False):
 
 def main():
     """Собрать события и напечатать верификацию."""
+    import argparse
+    parser = argparse.ArgumentParser(description='Верификация reversal-сигнала')
+    parser.add_argument('--no-solo', action='store_true',
+                        help='не проверять «соло» (EUR/USD спокойна)')
+    args = parser.parse_args()
+
     end = datetime(2026, 8, 6, tzinfo=timezone.utc)
     start = end - timedelta(days=61)
     dates = []
@@ -76,9 +82,10 @@ def main():
     uj_sigmas = bt.candle_sigmas(uj_candles, bt.TF)
     eu_sigmas = bt.candle_sigmas(eu_m1, 60)
     events, _ = bt.detect_events(uj_candles, uj_sigmas, eu_sigmas, uj_counts, dates,
-                                 use_sessions=False)
+                                 use_sessions=False, use_solo=not args.no_solo)
+    solo_txt = 'БЕЗ соло' if args.no_solo else 'с соло'
 
-    print('MAX_GAP = {}'.format(bt.MAX_GAP))
+    print('MAX_GAP = {}   ({})'.format(bt.MAX_GAP, solo_txt))
     print('\nСводка по полной стопке фильтров (все события >= 3σ):')
     for thr in (4.0, 6.0, 8.0):
         sel = [ev for ev in events if ev['sigma'] >= thr]

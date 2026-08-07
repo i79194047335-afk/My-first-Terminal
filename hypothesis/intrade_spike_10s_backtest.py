@@ -217,7 +217,7 @@ def in_europe(ts):
 
 
 def detect_events(uj_candles, uj_sigmas, eu_sigma_m1, counts, dates,
-                  use_sessions=True):
+                  use_sessions=True, use_solo=True):
     """Найти события «соло-всплеска» по условиям гипотезы.
 
     Европейская сессия (06:00–14:00 UTC) из расчётов исключается всегда.
@@ -230,6 +230,7 @@ def detect_events(uj_candles, uj_sigmas, eu_sigma_m1, counts, dates,
         counts: кол-во тиков по 10-сек бакету (для диагностики пустот).
         dates: список дней для метки дня.
         use_sessions: исключать ли окна сессий ±30м. False — без начала сессий.
+        use_solo: проверять ли «соло» (EUR/USD спокойна). False — без соло.
 
     Returns:
         Список dict-событий: time, direction, close_time, sigma, retr,
@@ -249,15 +250,17 @@ def detect_events(uj_candles, uj_sigmas, eu_sigma_m1, counts, dates,
             skipped['откат >10% / doji'] += 1
             continue
 
-        # соло: EUR/USD спокойна в ту же минуту
-        minute = int(t // 60) * 60
-        eu_sig = eu_sigma_m1.get(minute)
-        if eu_sig is None:
-            skipped['нет данных EUR/USD'] += 1
-            continue
-        if eu_sig >= LEADER_CALM:
-            skipped['ведущая шумная (не соло)'] += 1
-            continue
+        # соло (опционально): EUR/USD спокойна в ту же минуту
+        eu_sig = None
+        if use_solo:
+            minute = int(t // 60) * 60
+            eu_sig = eu_sigma_m1.get(minute)
+            if eu_sig is None:
+                skipped['нет данных EUR/USD'] += 1
+                continue
+            if eu_sig >= LEADER_CALM:
+                skipped['ведущая шумная (не соло)'] += 1
+                continue
 
         # без разгона: σ предыдущих 1-3 свечей не больше ACCEL_MAX
         accel_bad = False
@@ -306,6 +309,8 @@ def main():
     parser.add_argument('dates', nargs='*', help='[start YYYYMMDD] [end YYYYMMDD]')
     parser.add_argument('--no-sessions', action='store_true',
                         help='не исключать окна начал сессий ±30м')
+    parser.add_argument('--no-solo', action='store_true',
+                        help='не проверять «соло» (EUR/USD спокойна)')
     args = parser.parse_args()
 
     if args.dates:
@@ -347,17 +352,19 @@ def main():
 
     events, skipped = detect_events(
         uj_candles, uj_sigmas, eu_sigmas, uj_counts, dates,
-        use_sessions=not args.no_sessions)
+        use_sessions=not args.no_sessions,
+        use_solo=not args.no_solo)
 
-    print('\nКонфиг: соло(EUR/USD<{}σ) + откат<={:.0f}% + без разгона(σ<={:.0f})'
+    solo_txt = 'БЕЗ соло' if args.no_solo else 'соло(EUR/USD<{}σ)'.format(LEADER_CALM)
+    print('\nКонфиг: {} + откат<={:.0f}% + без разгона(σ<={:.0f})'
           ' + БЕЗ Европы {:.0f}:00–{:.0f}:00 UTC + сессии±30м: {}'
-          .format(LEADER_CALM, RETRACE_MAX * 100, ACCEL_MAX,
+          .format(solo_txt, RETRACE_MAX * 100, ACCEL_MAX,
                   EUROPE_START_UTC, EUROPE_END_UTC,
                   'ВЫКЛ' if args.no_sessions else 'вкл'))
 
     # ── калибровка: сетка порогов ──
     print('\n' + '=' * 96)
-    print('КАЛИБРОВКА: события (соло + откат<=10% + без разгона + без Европы)')
+    print('КАЛИБРОВКА: события ({} + откат<=10% + без разгона + без Европы)'.format(solo_txt))
     print('=' * 96)
     print('{:>6}  {:>7} {:>8} {:>10} {:>10} {:>8}'.format(
         'порог', 'событий', 'за 2 мес', 'за день', 'входов*', 'continuation'))
