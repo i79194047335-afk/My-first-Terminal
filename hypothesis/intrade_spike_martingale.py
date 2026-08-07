@@ -191,8 +191,14 @@ def main():
     uj_t, uj_p = bt.load_ticks('USDJPY', dates)
     uj_candles, uj_counts = bt.build_candles(uj_t, uj_p, bt.TF)
     uj_sigmas = bt.candle_sigmas(uj_candles, bt.TF)
-    # без соло EUR/USD не нужна — пустой dict, detect_events её не читает
-    eu_sigmas = {}
+    if args.no_solo:
+        # без соло EUR/USD не нужна — пустой dict, detect_events её не читает
+        eu_sigmas = {}
+    else:
+        eu_t, eu_p = bt.load_ticks('EURUSD', dates)
+        eu_m1, _ = bt.build_candles(eu_t, eu_p, 60)
+        eu_sigmas = bt.candle_sigmas(eu_m1, 60)
+        print('  EUR/USD M1 с окном: {}'.format(len(eu_sigmas)))
     events, _ = bt.detect_events(uj_candles, uj_sigmas, eu_sigmas, uj_counts, dates,
                                  use_sessions=not args.no_sessions,
                                  use_solo=not args.no_solo)
