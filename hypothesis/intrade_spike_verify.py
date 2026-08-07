@@ -75,7 +75,8 @@ def main():
     eu_m1, _ = bt.build_candles(eu_t, eu_p, 60)
     uj_sigmas = bt.candle_sigmas(uj_candles, bt.TF)
     eu_sigmas = bt.candle_sigmas(eu_m1, 60)
-    events, _ = bt.detect_events(uj_candles, uj_sigmas, eu_sigmas, uj_counts, dates)
+    events, _ = bt.detect_events(uj_candles, uj_sigmas, eu_sigmas, uj_counts, dates,
+                                 use_sessions=False)
 
     print('MAX_GAP = {}'.format(bt.MAX_GAP))
     print('\nСводка по полной стопке фильтров (все события >= 3σ):')

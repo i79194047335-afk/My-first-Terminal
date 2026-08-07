@@ -25,6 +25,7 @@
 
 Run: python3.10 hypothesis/intrade_spike_10s_backtest.py [YYYYMMDD YYYYMMDD]
 """
+import argparse
 import csv
 import os
 import statistics
@@ -50,6 +51,8 @@ DELAYS = [0, 1, 2]       # задержки исполнения, секунды
 PAYOUT = 0.82            # выплата intrade по UJ
 GRID = [3.0, 4.0, 5.0, 6.0, 8.0]  # сетка порогов сигмы для калибровки
 MAX_GAP = float(os.environ.get('MAX_GAP', '3.0'))  # свежесть тика для цены входа/расчёта, с
+EUROPE_START_UTC = 6    # европейская сессия ИСКЛЮЧАЕТСЯ из расчётов
+EUROPE_END_UTC = 14     # 06:00–14:00 UTC (решение владельца, 2026-08-07)
 
 # Торговый день FXCM заканчивается в 21:00 UTC; на intrade окно простоя
 # брокера 21:00–23:00 UTC. День (UTC), на который вешать события — по метке.
@@ -200,8 +203,25 @@ def price_at(times, mids, t):
     return float(mids[i]), float(t - times[i])
 
 
-def detect_events(uj_candles, uj_sigmas, eu_sigma_m1, counts, dates):
+def in_europe(ts):
+    """Попадает ли момент в европейскую сессию (06:00–14:00 UTC).
+
+    Args:
+        ts: unix-время.
+
+    Returns:
+        True, если час UTC лежит в [EUROPE_START_UTC, EUROPE_END_UTC).
+    """
+    h = datetime.fromtimestamp(ts, timezone.utc).hour
+    return EUROPE_START_UTC <= h < EUROPE_END_UTC
+
+
+def detect_events(uj_candles, uj_sigmas, eu_sigma_m1, counts, dates,
+                  use_sessions=True):
     """Найти события «соло-всплеска» по условиям гипотезы.
+
+    Европейская сессия (06:00–14:00 UTC) из расчётов исключается всегда.
+    Новостные окна не применяются (календарь не покрывает период).
 
     Args:
         uj_candles: 10-сек свечи USD/JPY.
@@ -209,10 +229,11 @@ def detect_events(uj_candles, uj_sigmas, eu_sigma_m1, counts, dates):
         eu_sigma_m1: dict {минута: z-score M1 EUR/USD}.
         counts: кол-во тиков по 10-сек бакету (для диагностики пустот).
         dates: список дней для метки дня.
+        use_sessions: исключать ли окна сессий ±30м. False — без начала сессий.
 
     Returns:
         Список dict-событий: time, direction, close_time, sigma, retr,
-        eu_sigma, day, excluded/пропуски учитываются счётчиками отдельно.
+        eu_sigma, day; пропуски — отдельно в счётчике.
     """
     times = sorted(uj_candles)
     events = []
@@ -254,8 +275,13 @@ def detect_events(uj_candles, uj_sigmas, eu_sigma_m1, counts, dates):
         if accel_bad:
             continue
 
-        if excluded_reason(t):
+        if use_sessions and excluded_reason(t):
             skipped['окно сессии ±30м'] += 1
+            continue
+
+        # европейская сессия исключена из расчётов
+        if in_europe(t):
+            skipped['европейская сессия 06-14 UTC'] += 1
             continue
 
         events.append({
@@ -271,10 +297,20 @@ def detect_events(uj_candles, uj_sigmas, eu_sigma_m1, counts, dates):
 
 
 def main():
-    """Собрать серию за период, пройти сетку порогов и отчитаться."""
-    args = sys.argv[1:]
-    if args:
-        start_d, end_d = args[0], args[1] if len(args) > 1 else args[0]
+    """Собрать серию за период, пройти сетку порогов и отчитаться.
+
+    Flags:
+        --no-sessions: не исключать окна начал сессий ±30 мин.
+    """
+    parser = argparse.ArgumentParser(description='Бэктест соло-всплеска UJ')
+    parser.add_argument('dates', nargs='*', help='[start YYYYMMDD] [end YYYYMMDD]')
+    parser.add_argument('--no-sessions', action='store_true',
+                        help='не исключать окна начал сессий ±30м')
+    args = parser.parse_args()
+
+    if args.dates:
+        start_d = args.dates[0]
+        end_d = args.dates[1] if len(args.dates) > 1 else args.dates[0]
     else:
         # Два месяца, последний полный день 2026-08-06.
         end = datetime(2026, 8, 6, tzinfo=timezone.utc)
@@ -309,11 +345,19 @@ def main():
     empty = sum(1 for i in range(1, len(times)) if times[i] - times[i - 1] == 2 * TF)
     print('  соседних 10-сек бакетов с пропуском одного: {}'.format(empty))
 
-    events, skipped = detect_events(uj_candles, uj_sigmas, eu_sigmas, uj_counts, dates)
+    events, skipped = detect_events(
+        uj_candles, uj_sigmas, eu_sigmas, uj_counts, dates,
+        use_sessions=not args.no_sessions)
+
+    print('\nКонфиг: соло(EUR/USD<{}σ) + откат<={:.0f}% + без разгона(σ<={:.0f})'
+          ' + БЕЗ Европы {:.0f}:00–{:.0f}:00 UTC + сессии±30м: {}'
+          .format(LEADER_CALM, RETRACE_MAX * 100, ACCEL_MAX,
+                  EUROPE_START_UTC, EUROPE_END_UTC,
+                  'ВЫКЛ' if args.no_sessions else 'вкл'))
 
     # ── калибровка: сетка порогов ──
     print('\n' + '=' * 96)
-    print('КАЛИБРОВКА: события (соло + откат<=10% + без разгона + вне сессий)')
+    print('КАЛИБРОВКА: события (соло + откат<=10% + без разгона + без Европы)')
     print('=' * 96)
     print('{:>6}  {:>7} {:>8} {:>10} {:>10} {:>8}'.format(
         'порог', 'событий', 'за 2 мес', 'за день', 'входов*', 'continuation'))
@@ -334,7 +378,7 @@ def main():
     print('\n' + '=' * 96)
     print('ОСНОВНОЙ ПРОГОН')
     print('=' * 96)
-    print('Пропущено по фильтрам (порог {}, соло, откат, разгон, сессии):'.format(min(GRID)))
+    print('Пропущено по фильтрам (порог {}, соло, откат, разгон, Европа, сессии):'.format(min(GRID)))
     for k, v in sorted(skipped.items(), key=lambda kv: -kv[1]):
         print('  {:<42} {}'.format(k, v))
 
