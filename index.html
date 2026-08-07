@@ -692,6 +692,7 @@
             <div class="tb-spacer"></div>
             <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
             <button id="signalLogBtn" class="tb-txt" onclick="toggleShockPanel()" data-tip="Сигналы — всплески"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
+            <button id="autoJumpBtn" class="tb-txt" onclick="toggleAutoJump()" data-tip="Автопереход: при сигнале — сам переключаться на его пару и свечу"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 015.5 5.5v0a5.5 5.5 0 01-5.5 5.5H11"/></svg> Авто</button>
             <button id="tapeBtn" class="tb-ic" onclick="toggleTape()" data-tip="Лента крупных сделок"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
             <button id="infoBtn" class="tb-ic" onclick="toggleInfo()" data-tip="Карточка инструмента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
@@ -922,9 +923,30 @@ function applyPriceFormat(id) {
     st.indicatorManager?.applyPriceFormat({ type: 'price', precision, minMove });
 }
 
+// Желаемый порядок начала списка. Хаб отдаёт инструменты в том порядке, в
+// каком их прислал ФИД (у FXCM это порядок брокера: AUD/USD оказывалась
+// последней), а форекс-пары нужны сверху и в предсказуемом виде. Символы,
+// которых здесь нет, идут следом, сохраняя порядок хаба.
+const SYMBOL_ORDER = ["fxcm:AUD/USD", "fxcm:EUR/USD", "fxcm:USD/CAD", "fxcm:USD/JPY"];
+
+/**
+ * Упорядочить символы: сначала SYMBOL_ORDER, затем остальные как есть.
+ *
+ * @param {string[]} symbols Полные символы вида "provider:symbol".
+ * @returns {string[]} Новый упорядоченный массив.
+ */
+function orderSymbols(symbols) {
+    const rank = new Map(SYMBOL_ORDER.map((sym, i) => [sym, i]));
+    // Стабильная сортировка: у незнакомых символов ранг одинаковый, и они
+    // сохраняют исходный порядок хаба (для крипты он осмысленный).
+    return symbols.slice().sort((a, b) =>
+        (rank.has(a) ? rank.get(a) : SYMBOL_ORDER.length) -
+        (rank.has(b) ? rank.get(b) : SYMBOL_ORDER.length));
+}
+
 // Перестраивает <option> селектора пар из списка, пришедшего в instruments.
 // HTML-разметка селектора остаётся как fallback до первого instruments (чтобы
-// он не был пустым при загрузке). Порядок опций сохраняем как пришёл от хаба.
+// он не был пустым при загрузке). Порядок — orderSymbols, не порядок хаба.
 function populateSymbolSelect(symbols) {
     const select = document.getElementById("symbolSelect");
     if (!select || !symbols || !symbols.length) return;
@@ -1215,7 +1237,7 @@ function handleMessage(id, state, msg) {
             // историю, сама подтягивает всё из журнала.
             syncShockMarkersFromLog();
             refreshShockMarkers();
-            renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
+            renderShockWindowBadge(activeShockWindow(currentSymbol));
             state.lastCandle = msg.data.at(-1);
 
             // Load or recompute indicators after first history
@@ -1338,7 +1360,7 @@ function handleMessage(id, state, msg) {
         // если открыто меню R, перерисуем его (там показывается R в TV-шкале).
         refreshOpenRMenus();
         // Селектор пар — из instruments, а не из захардкоженной HTML-разметки.
-        populateSymbolSelect(symbols);
+        populateSymbolSelect(orderSymbols(symbols));
         // Только теперь известно, у кого есть объём: до instruments набор пуст,
         // и серия не создалась бы даже на крипте.
         [1, 2].forEach(id => {
@@ -1387,7 +1409,7 @@ function handleMessage(id, state, msg) {
     if (msg.type === "shocks") {
         (msg.events || []).forEach(ev => {
             recordShock(ev);
-            shockWindowState.set(ev.symbol, ev.blocked || null);
+            rememberShockWindow(ev.symbol, ev.blocked || null);
             [1, 2].forEach(paneId => {
                 const st = panesState[paneId];
                 if (!st?.series) return;
@@ -1422,7 +1444,7 @@ function handleMessage(id, state, msg) {
         });
         refreshShockMarkers();
         renderShockPanel();
-        renderShockWindowBadge(shockWindowState.get(currentSymbol) || null);
+        renderShockWindowBadge(activeShockWindow(currentSymbol));
         return;
     }
 
@@ -3892,8 +3914,49 @@ function showAlertPopup(text) {
 // события, а не про направление.
 const SHOCK_MARKER_COLOR = "#1E88E5";
 
-// Активные окна тишины по инструментам: symbol -> {kind, label}.
+// Сколько бейдж окна тишины живёт, если конец окна неизвестен. Сессионные
+// окна приходят без until_ts (у них ±30 мин от фиксированного времени, и
+// хаб конец не считает), поэтому нужен собственный срок годности — иначе
+// бейдж висел бы до следующего сигнала, то есть часами.
+const SHOCK_BADGE_MAX_AGE = 30 * 60 * 1000;
+
+// Активные окна тишины по инструментам: symbol -> {kind, label, until_ts,
+// seen_ts}. seen_ts проставляем сами: у сессионных окон хаб не присылает
+// until_ts, и без отметки времени такое окно нельзя признать просроченным.
 const shockWindowState = new Map();
+
+/**
+ * Запомнить окно тишины инструмента, проставив время получения.
+ *
+ * @param {string} symbol Инструмент.
+ * @param {Object|null} blocked Окно из хаба или null.
+ */
+function rememberShockWindow(symbol, blocked) {
+    if (!blocked) { shockWindowState.delete(symbol); return; }
+    shockWindowState.set(symbol, Object.assign({}, blocked, {seen_ts: Date.now()}));
+}
+
+/**
+ * Взять окно тишины инструмента, ЕСЛИ оно ещё действует.
+ *
+ * Просроченное окно не просто не показывается — оно удаляется. Иначе любая
+ * перерисовка (приход истории, ответ get_shocks) доставала бы его снова и
+ * заново взводила бейдж: надпись «сигналы подавлены» висела бесконечно.
+ *
+ * @param {string} symbol Инструмент.
+ * @returns {Object|null} Действующее окно либо null.
+ */
+function activeShockWindow(symbol) {
+    const blocked = shockWindowState.get(symbol);
+    if (!blocked) return null;
+
+    const now = Date.now();
+    const expired = (typeof blocked.until_ts === "number")
+        ? blocked.until_ts * 1000 <= now
+        : (now - (blocked.seen_ts || 0)) >= SHOCK_BADGE_MAX_AGE;
+    if (expired) { shockWindowState.delete(symbol); return null; }
+    return blocked;
+}
 
 // Журнал всплесков для панели: живые события + ответ на get_shocks.
 // Живёт только в памяти вкладки; источник истины — хаб (окно суток).
@@ -4129,26 +4192,56 @@ function toggleShockPanel() {
 function gotoShock(idx) {
     const s = shockLog[idx];
     if (!s) return;
+    jumpToShock(s);
+}
 
+/**
+ * Прыгнуть на пару и свечу сигнала.
+ *
+ * Общий путь для клика по строке панели/попапу и для автоперехода
+ * (onShockEvent): разница только в том, кто вызывает.
+ *
+ * @param {Object} ev Событие всплеска.
+ */
+function jumpToShock(ev) {
     // Сравниваем БЕЗ префикса провайдера: хаб шлёт символ в wire-формате
     // клиента, и "fxcm:AUD/USD" против "AUD/USD" — тот же инструмент. Без
     // нормализации был бы лишний полный switchSymbol с перезагрузкой истории
     // вместо простого центрирования.
-    if (displaySymbol(s.symbol) !== displaySymbol(currentSymbol)) {
-        switchSymbol(s.symbol);
+    if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) {
+        switchSymbol(ev.symbol);
         // История нового инструмента приходит асинхронно — центрируем и
         // ставим маркер, когда бары действительно на графике, иначе
         // setVisibleRange отработает по пустой серии и ничего не сдвинет.
-        centerOnShockWhenReady(s, 12);
+        centerOnShockWhenReady(ev, 12);
     } else {
-        centerOnTime(s.time);
+        centerOnTime(ev.time);
         // Маркер мог не существовать: событие по ЧУЖОМУ инструменту при
         // получении отбрасывалось (панели показывают только currentSymbol),
         // и после переключения его никто не создавал — маркер появлялся лишь
         // со второго клика по строке.
-        attachShockToPanes(s);
+        attachShockToPanes(ev);
         refreshShockMarkers();
     }
+}
+
+/**
+ * Переключить автопереход по сигналу и сохранить в layout.
+ */
+function toggleAutoJump() {
+    layout.autoJump = !layout.autoJump;
+    StorageLayer.autoSave(layout);
+    syncAutoJumpBtn();
+}
+
+/**
+ * Отразить состояние автоперехода на кнопке (акцент = включён).
+ */
+function syncAutoJumpBtn() {
+    const btn = document.getElementById("autoJumpBtn");
+    if (!btn) return;
+    if (layout.autoJump) btn.classList.add("on");
+    else btn.classList.remove("on");
 }
 
 /**
@@ -4333,22 +4426,53 @@ function showShockPopup(ev) {
     popup._hideTimer = setTimeout(() => { popup.style.display = "none"; }, 20000);
 }
 
+// Таймер, гасящий бейдж, когда окно кончилось.
+let _shockBadgeTimer = null;
+
 /**
  * Обновить бейдж окна тишины для текущего инструмента.
  *
- * Показывает, что сигналы сейчас подавлены и по какой причине.
- * @param {Object|null} blocked Окно из хаба ({kind,label}) или null.
+ * Бейдж САМОГАСЯЩИЙСЯ. Он ставился по событию всплеска и снимался только
+ * следующим событием с blocked=null — а сигналов может не быть часами, и
+ * надпись «сигналы подавлены» висела уже после конца окна, вводя в
+ * заблуждение. Теперь окно снимается по времени: по until_ts, если хаб его
+ * прислал (новости), иначе через SHOCK_BADGE_MAX_AGE.
+ *
+ * @param {Object|null} blocked Окно из хаба ({kind,label,until_ts}) или null.
  */
 function renderShockWindowBadge(blocked) {
     const badge = document.getElementById("shockWindowBadge");
     if (!badge) return;
+
+    clearTimeout(_shockBadgeTimer);
+    _shockBadgeTimer = null;
+
     if (!blocked) { badge.style.display = "none"; return; }
+
+    // Окно с известным концом, который уже прошёл, показывать незачем.
+    const now = Date.now();
+    let msLeft = SHOCK_BADGE_MAX_AGE;
+    if (typeof blocked.until_ts === "number") {
+        msLeft = blocked.until_ts * 1000 - now;
+        if (msLeft <= 0) {
+            shockWindowState.delete(currentSymbol);
+            badge.style.display = "none";
+            return;
+        }
+    }
 
     const isNews = blocked.kind === "news";
     badge.textContent = (isNews ? "📰 новости: " : "🕐 сессия: ") + blocked.label +
                         " — сигналы подавлены";
     badge.style.background = isNews ? "#7a4b00" : "#3a3a3a";
     badge.style.display = "block";
+
+    // Гасим сами, не дожидаясь следующего сигнала. Состояние чистит
+    // activeShockWindow при первом же обращении после срока, поэтому здесь
+    // достаточно перерисовать: если окно истекло, оно вернёт null.
+    _shockBadgeTimer = setTimeout(() => {
+        renderShockWindowBadge(activeShockWindow(currentSymbol));
+    }, Math.min(msLeft, SHOCK_BADGE_MAX_AGE) + 50);
 }
 
 /**
@@ -4464,8 +4588,17 @@ function onShockEvent(ev) {
 
     recordShock(ev);
     renderShockPanel();
-    shockWindowState.set(ev.symbol, ev.blocked || null);
+    rememberShockWindow(ev.symbol, ev.blocked || null);
     if (ev.symbol === currentSymbol) renderShockWindowBadge(ev.blocked || null);
+
+    // Автопереход: когда включён и сигнал звучит (рывок вне окна тишины) —
+    // сразу переключаемся на его пару и свечу, чтобы успеть войти руками.
+    // Размазанные события и подавленные окном в журнале, но график не
+    // дёргают: их ~11 в сутки против ~5 звучащих, и каждый увод от текущей
+    // пары — потеря контекста. Выключено — поведение как раньше.
+    if (layout.autoJump && ev.audible) {
+        jumpToShock(ev);
+    }
 
     // Маркер ставим ТОЛЬКО на панели с этим инструментом: на чужом графике
     // время свечи чужое, маркер повис бы в случайной точке. Событие остаётся
@@ -5341,6 +5474,9 @@ function initialize() {
     // Sync btn initial state
     const syncBtn = document.getElementById("chartSyncBtn");
     if (syncBtn && syncEnabled) syncBtn.classList.add("on");
+
+    // Автопереход по сигналу — состояние из сохранённого layout.
+    syncAutoJumpBtn();
 
     // Лента — состояние из сохранённого layout.
     tapeVisible = layout.showTape === true;
