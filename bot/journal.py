@@ -344,6 +344,28 @@ class Journal:
             log.error("не прочитать последние сделки: %s", err)
             return []
 
+    def closed_trades(self, limit: int = 30) -> list:
+        """Последние закрытые сделки — для вкладки «Закрытые» в панели.
+
+        Открытые (result IS NULL) сюда не попадают: вкладка показывает
+        только сделки с известным итогом.
+
+        Args:
+            limit: Сколько записей вернуть.
+
+        Returns:
+            Список sqlite3.Row, новые первыми.
+        """
+        try:
+            cursor = self.conn.execute(
+                "SELECT * FROM trades WHERE result IS NOT NULL "
+                "ORDER BY id DESC LIMIT ?", (limit,)
+            )
+            return cursor.fetchall()
+        except sqlite3.Error as err:
+            log.error("не прочитать закрытые сделки: %s", err)
+            return []
+
     # ── события ────────────────────────────────────────────────────────
 
     def event(

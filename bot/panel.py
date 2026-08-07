@@ -263,6 +263,9 @@ class Panel:
         elif command == "ensure_demo":
             await self._ensure_demo(websocket)
 
+        elif command == "set_account":
+            await self._set_account(websocket, message)
+
         else:
             await self._reply(websocket, "error", f"неизвестная команда {command!r}")
 
@@ -353,6 +356,60 @@ class Panel:
             await self._reply(websocket, "ok",
                               f"счёт приведён к demo: {profile.account}")
 
+    async def _set_account(self, websocket, message: dict) -> None:
+        """Переключить тип счёта площадки в обе стороны (демо ⇄ реал).
+
+        Двусторонний аналог _ensure_demo: тумблер площадки без параметра и
+        только инвертирует счёт, поэтому целевое состояние передаётся явно
+        в target, а протокол строгий — прочитать /profile → сравнить →
+        переключить только при расхождении → перечитать и убедиться
+        (client.ensure_account_mode).
+
+        Сознательно опаснее «только в демо»: «на реал» означает живые
+        средства. Защит здесь нет — решение за владельцем, подтверждение
+        берёт фронт перед отправкой.
+
+        Args:
+            websocket: Соединение.
+            message:   Разобранное сообщение с полем target ("demo"/"real").
+
+        Returns:
+            None.
+        """
+        if not self.client or not self.config.touches_platform:
+            await self._reply(
+                websocket, "error",
+                "в режиме dry/shadow бот к площадке не ходит — счёт "
+                "переключается владельцем в кабинете")
+            return
+
+        target = message.get("target")
+        if target not in ("demo", "real"):
+            await self._reply(websocket, "error", "target: demo|real")
+            return
+
+        async with self._ensure_lock:
+            loop = asyncio.get_running_loop()
+            try:
+                profile = await loop.run_in_executor(
+                    None, lambda: self.client.ensure_account_mode(target))
+            except Exception as err:
+                self.journal.event(
+                    "risk", f"счёт: переключение на {target} не удалось: {err}")
+                await self._reply(websocket, "error",
+                                  f"не переключить счёт на {target}: {err}")
+                return
+
+            self._profile = None
+            self._profile_ts = 0.0
+            self.journal.event(
+                "info",
+                f"счёт площадки переключён на {target} "
+                f"(валюта {profile.currency})")
+            await self._reply(
+                websocket, "ok",
+                f"счёт: {profile.account} ({profile.trade_type})")
+
     async def _reply(self, websocket, status: str, message: str) -> None:
         """Ответить панели на команду.
 
@@ -413,6 +470,23 @@ class Panel:
             for row in self.journal.open_positions()
         ]
 
+        closed_trades = [
+            {
+                "id": row["id"],
+                "trade_id": row["trade_id"],
+                "symbol": row["symbol"],
+                "direction": row["direction"],
+                "investment": row["investment"],
+                "entry_price": row["entry_price"],
+                "result": row["result"],
+                "pnl": row["pnl"],
+                "source": row["source"],
+                "mode": row["mode"],
+                "created_ts": row["created_ts"],
+            }
+            for row in self.journal.closed_trades(limit=30)
+        ]
+
         payout_percent = await self._cached_payout()
 
         state = {
@@ -441,6 +515,7 @@ class Panel:
             # рисовать в панели одни цифры, а лимиты считать по другим.
             "stats": self.journal.stats_today(mode=self.config.mode),
             "open_positions": open_positions,
+            "closed_trades": closed_trades,
             "trades": trades,
             "events": [
                 {"ts": row["ts"], "kind": row["kind"], "message": row["message"]}

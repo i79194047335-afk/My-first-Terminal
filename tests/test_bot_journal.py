@@ -163,6 +163,49 @@ def test_settle_and_stats():
         cleanup(path)
 
 
+def test_closed_trades():
+    """closed_trades отдаёт только рассчитанные, новые первыми."""
+    print("закрытые сделки")
+    journal, path = temp_journal()
+    try:
+        one = journal.open_trade(mode="demo", symbol="USD/JPY",
+                                 direction="call", investment=2,
+                                 expiry_minutes=1)
+        two = journal.open_trade(mode="demo", symbol="EUR/USD",
+                                 direction="put", investment=2,
+                                 expiry_minutes=1)
+        three = journal.open_trade(mode="demo", symbol="AUD/USD",
+                                   direction="call", investment=1,
+                                   expiry_minutes=1)
+
+        # two рассчитана, one и three ещё открыты.
+        journal.settle_trade(two, "win", pnl=1.64, raw_settle="2;3.64;9363")
+
+        closed = journal.closed_trades()
+        check("только рассчитанная", len(closed) == 1, closed)
+        check("та самая сделка",
+              closed and closed[0]["id"] == two, closed)
+
+        journal.settle_trade(three, "loss", pnl=-1.0, raw_settle="2;0;9359")
+
+        closed = journal.closed_trades()
+        check("две закрытые", len(closed) == 2, closed)
+        check("новые первыми",
+              closed and closed[0]["id"] == three and closed[1]["id"] == two,
+              [r["id"] for r in closed])
+
+        closed_one = journal.closed_trades(limit=1)
+        check("лимит работает", len(closed_one) == 1 and
+              closed_one[0]["id"] == three, closed_one)
+
+        # Открытая не утекла ни в один из списков закрытых.
+        check("открытая не в закрытых",
+              all(r["id"] != one for r in closed), closed)
+    finally:
+        journal.close()
+        cleanup(path)
+
+
 def test_consecutive_losses():
     """Серия убытков считается верно; refund её не рвёт."""
     print("серия убытков подряд")
@@ -421,7 +464,8 @@ def main():
         0 — всё прошло, 1 — есть провалы.
     """
     for test in (test_schema_and_insert, test_latency_computed,
-                 test_settle_and_stats, test_consecutive_losses,
+                 test_settle_and_stats, test_closed_trades,
+                 test_consecutive_losses,
                  test_streak_resets_on_day_and_mode,
                  test_update_recomputes_latency, test_events,
                  test_latency_report, test_kill_switch,

@@ -617,6 +617,130 @@ def test_no_to_real_command():
         cleanup(paths)
 
 
+def test_set_account_two_way():
+    """Команда set_account переключает счёт в обе стороны через target.
+
+    Осознанное отличие от защитного «только в демо»: владелец взял риск
+    на себя, поэтому целевое состояние передаётся явно, а не выводится
+    из инверсии тумблера.
+    """
+    print("set_account: демо ⇄ реал")
+    client = FakeClient(profile=AccountProfile(
+        account="demo", trade_type="sprint", currency="usd"))
+    panel, journal, manual, risk, port, paths = make_panel(
+        mode="demo", client=client)
+
+    async def scenario():
+        """Послать set_account на реал и на демо.
+
+        Returns:
+            Список ответов панели.
+        """
+        await panel.start()
+        replies = []
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)
+                for target in ("real", "demo"):
+                    await ws.send(json.dumps({"cmd": "set_account",
+                                              "target": target}))
+                    for _ in range(8):
+                        message = json.loads(
+                            await asyncio.wait_for(ws.recv(), timeout=10))
+                        if message.get("type") == "reply":
+                            replies.append(message)
+                            break
+        finally:
+            await panel.stop()
+        return replies
+
+    replies = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("две реплики", len(replies) == 2, replies)
+        check("обе ok",
+              all(r and r["status"] == "ok" for r in replies), replies)
+        check("клиент звал и real, и demo",
+              client.ensure_calls == ["real", "demo"], client.ensure_calls)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_set_account_bad_target():
+    """set_account с незнакомым target не трогает площадку."""
+    print("set_account: незнакомый target")
+    client = FakeClient(profile=AccountProfile(
+        account="demo", trade_type="sprint", currency="usd"))
+    panel, journal, manual, risk, port, paths = make_panel(
+        mode="demo", client=client)
+
+    async def scenario():
+        """Послать set_account с битым target.
+
+        Returns:
+            Ответ панели.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)
+                await ws.send(json.dumps({"cmd": "set_account",
+                                          "target": "supersafe"}))
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        return message
+        finally:
+            await panel.stop()
+
+    reply = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("ответ error", reply and reply["status"] == "error", reply)
+        check("target в причине",
+              "target" in (reply or {}).get("message", ""), reply)
+        check("клиент НЕ вызывался",
+              client.ensure_calls == [], client.ensure_calls)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_set_account_blocked_in_dry():
+    """В dry set_account к площадке не ходит, как и «демо»."""
+    print("set_account в режиме dry")
+    panel, journal, manual, risk, port, paths = make_panel(mode="dry")
+
+    async def scenario():
+        """Нажать set_account без клиента.
+
+        Returns:
+            Ответ панели.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)
+                await ws.send(json.dumps({"cmd": "set_account",
+                                          "target": "real"}))
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        return message
+        finally:
+            await panel.stop()
+
+    reply = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("ответ error", reply and reply["status"] == "error", reply)
+        check("причина — режим не ходит к площадке",
+              "не ходит" in (reply or {}).get("message", ""), reply)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
 def test_ensure_demo_blocked_in_dry():
     """В dry панель к площадке не ходит: «демо» без клиента не работает."""
     print("«демо» в режиме dry")
@@ -662,6 +786,8 @@ def main():
                  test_unknown_command, test_listens_locally_only,
                  test_profile_in_snapshot, test_ensure_demo_success,
                  test_ensure_demo_error, test_no_to_real_command,
+                 test_set_account_two_way, test_set_account_bad_target,
+                 test_set_account_blocked_in_dry,
                  test_ensure_demo_blocked_in_dry):
         test()
         print()
