@@ -19,7 +19,8 @@ function loadLayout(DEFAULT_COLORS) {
         colors: { ...DEFAULT_COLORS },
         pane1: { tf: "M1" },
         pane2: { tf: "M1" },
-        drawings: {}
+        drawings: {},
+        autoJump: false
     };
 
    if (!layout.drawings) {
@@ -35,6 +36,9 @@ function loadLayout(DEFAULT_COLORS) {
     if (!layout.pane1) layout.pane1 = { tf: "M1" };
     if (!layout.pane2) layout.pane2 = { tf: "M1" };
     if (!layout.split) layout.split = "split";
+    // Автопереход по сигналу: по умолчанию выключен, чтобы случайный всплеск
+    // не уводил график, пока владелец смотрит другую пару.
+    if (layout.autoJump === undefined) layout.autoJump = false;
 
     return layout;
 }

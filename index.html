@@ -692,6 +692,7 @@
             <div class="tb-spacer"></div>
             <span id="connDot" class="conn-dot conn-live" data-tip="Связь с сервером"></span>
             <button id="signalLogBtn" class="tb-txt" onclick="toggleShockPanel()" data-tip="Сигналы — всплески"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg> Сигналы</button>
+            <button id="autoJumpBtn" class="tb-txt" onclick="toggleAutoJump()" data-tip="Автопереход: при сигнале — сам переключаться на его пару и свечу"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 015.5 5.5v0a5.5 5.5 0 01-5.5 5.5H11"/></svg> Авто</button>
             <button id="tapeBtn" class="tb-ic" onclick="toggleTape()" data-tip="Лента крупных сделок"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
             <button id="infoBtn" class="tb-ic" onclick="toggleInfo()" data-tip="Карточка инструмента"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
             <button id="briefBtn" class="tb-txt" onclick="toggleBriefing()" data-tip="Брифинг"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3h8l3 4v14H5V3z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg> Brief</button>
@@ -4129,26 +4130,56 @@ function toggleShockPanel() {
 function gotoShock(idx) {
     const s = shockLog[idx];
     if (!s) return;
+    jumpToShock(s);
+}
 
+/**
+ * Прыгнуть на пару и свечу сигнала.
+ *
+ * Общий путь для клика по строке панели/попапу и для автоперехода
+ * (onShockEvent): разница только в том, кто вызывает.
+ *
+ * @param {Object} ev Событие всплеска.
+ */
+function jumpToShock(ev) {
     // Сравниваем БЕЗ префикса провайдера: хаб шлёт символ в wire-формате
     // клиента, и "fxcm:AUD/USD" против "AUD/USD" — тот же инструмент. Без
     // нормализации был бы лишний полный switchSymbol с перезагрузкой истории
     // вместо простого центрирования.
-    if (displaySymbol(s.symbol) !== displaySymbol(currentSymbol)) {
-        switchSymbol(s.symbol);
+    if (displaySymbol(ev.symbol) !== displaySymbol(currentSymbol)) {
+        switchSymbol(ev.symbol);
         // История нового инструмента приходит асинхронно — центрируем и
         // ставим маркер, когда бары действительно на графике, иначе
         // setVisibleRange отработает по пустой серии и ничего не сдвинет.
-        centerOnShockWhenReady(s, 12);
+        centerOnShockWhenReady(ev, 12);
     } else {
-        centerOnTime(s.time);
+        centerOnTime(ev.time);
         // Маркер мог не существовать: событие по ЧУЖОМУ инструменту при
         // получении отбрасывалось (панели показывают только currentSymbol),
         // и после переключения его никто не создавал — маркер появлялся лишь
         // со второго клика по строке.
-        attachShockToPanes(s);
+        attachShockToPanes(ev);
         refreshShockMarkers();
     }
+}
+
+/**
+ * Переключить автопереход по сигналу и сохранить в layout.
+ */
+function toggleAutoJump() {
+    layout.autoJump = !layout.autoJump;
+    StorageLayer.autoSave(layout);
+    syncAutoJumpBtn();
+}
+
+/**
+ * Отразить состояние автоперехода на кнопке (акцент = включён).
+ */
+function syncAutoJumpBtn() {
+    const btn = document.getElementById("autoJumpBtn");
+    if (!btn) return;
+    if (layout.autoJump) btn.classList.add("on");
+    else btn.classList.remove("on");
 }
 
 /**
@@ -4466,6 +4497,15 @@ function onShockEvent(ev) {
     renderShockPanel();
     shockWindowState.set(ev.symbol, ev.blocked || null);
     if (ev.symbol === currentSymbol) renderShockWindowBadge(ev.blocked || null);
+
+    // Автопереход: когда включён и сигнал звучит (рывок вне окна тишины) —
+    // сразу переключаемся на его пару и свечу, чтобы успеть войти руками.
+    // Размазанные события и подавленные окном в журнале, но график не
+    // дёргают: их ~11 в сутки против ~5 звучащих, и каждый увод от текущей
+    // пары — потеря контекста. Выключено — поведение как раньше.
+    if (layout.autoJump && ev.audible) {
+        jumpToShock(ev);
+    }
 
     // Маркер ставим ТОЛЬКО на панели с этим инструментом: на чужом графике
     // время свечи чужое, маркер повис бы в случайной точке. Событие остаётся
@@ -5341,6 +5381,9 @@ function initialize() {
     // Sync btn initial state
     const syncBtn = document.getElementById("chartSyncBtn");
     if (syncBtn && syncEnabled) syncBtn.classList.add("on");
+
+    // Автопереход по сигналу — состояние из сохранённого layout.
+    syncAutoJumpBtn();
 
     // Лента — состояние из сохранённого layout.
     tapeVisible = layout.showTape === true;
