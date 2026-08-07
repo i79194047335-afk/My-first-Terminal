@@ -273,7 +273,7 @@ if (d.type === "alert") {
     type: "alert",
     price: d.price,
     id: d.id || null,
-	triggered: false,
+	triggered: d.triggered || false,
     line
 });
 

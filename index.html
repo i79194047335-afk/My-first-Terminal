@@ -1392,18 +1392,41 @@ function handleMessage(id, state, msg) {
         }
     }
 
-    if (msg.type === "alert" && msg.symbol === currentSymbol) {
+    // Ценовой алерт срабатывает по ЛЮБОЙ паре, не только по текущей. Хаб
+    // помечает его triggered один раз и навсегда (_check_alerts) и повторно
+    // это сообщение не пришлёт — фильтр по currentSymbol раньше означал, что
+    // сработавший на другой паре алерт терялся НАВСЕГДА: ни звука, ни
+    // попапа, ни отметки на линии даже после возврата на эту пару.
+    if (msg.type === "alert") {
         playAlertSound();
         showAlertPopup(displaySymbol(msg.symbol) + " @ " + msg.price);
-        panes.forEach(paneId => {
-            drawings[paneId].forEach(obj => {
-                if (obj.type === "alert" && obj.id === msg.id) {
-                    obj.triggered = true;
-                    obj.line.applyOptions({ color: "#ff0000", lineWidth: 2, title: "🔕" });
-                    StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
-                }
+
+        if (displaySymbol(msg.symbol) === displaySymbol(currentSymbol)) {
+            // Пара на экране — обновляем живую ценовую линию сразу.
+            panes.forEach(paneId => {
+                drawings[paneId].forEach(obj => {
+                    if (obj.type === "alert" && obj.id === msg.id) {
+                        obj.triggered = true;
+                        obj.line.applyOptions({ color: "#ff0000", lineWidth: 2, title: "🔕" });
+                        StorageLayer.saveDrawings(paneId, layout, panesState, drawings);
+                    }
+                });
             });
-        });
+        } else {
+            // Чужая пара сейчас не на графике — линию перерисовывать негде,
+            // но triggered нужно проставить прямо в layout.drawings[symbol]:
+            // иначе restoreDrawings() при возврате на эту пару снова покажет
+            // алерт активным (🔔), хотя хаб его уже отметил и не пришлёт.
+            const perPane = layout.drawings?.[msg.symbol];
+            if (perPane) {
+                [1, 2].forEach(paneId => {
+                    (perPane[paneId] || []).forEach(d => {
+                        if (d.type === "alert" && d.id === msg.id) d.triggered = true;
+                    });
+                });
+                StorageLayer.autoSave(layout);
+            }
+        }
     }
 
     // Всплеск приходит по ЛЮБОЙ паре, не только по текущей: уведомление даёт
