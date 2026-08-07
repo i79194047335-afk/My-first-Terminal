@@ -903,6 +903,10 @@ const WS_URL = new URLSearchParams(location.search).get("ws") || "ws://89.107.10
 // поэтому наружу её пускают сознательно (panel_host в bot_config.json) или
 // ssh-туннелем. Данных intrade во фронте нет — их держит бот и шлёт срезом.
 const INTRADE_WS_URL = new URLSearchParams(location.search).get("intrade") || "ws://89.107.10.204:8788";
+// Токен авторизации панели бота: ?intrade_token=<token> в URL или
+// localStorage.intrade_token. При заданном токене панель требует
+// {cmd:"auth", token} первым сообщением — без него связь закрывается.
+const INTRADE_TOKEN = new URLSearchParams(location.search).get("intrade_token") || localStorage.getItem("intrade_token") || "";
 // ── Шкала R: наша (тики) ↔ TradingView ──────────────────────────────────────
 //
 // Внутри и хабу рэндж-бар всегда задаётся в ПОИНТАХ (тиках, минимальный тик
@@ -3709,7 +3713,14 @@ function intradeConnect() {
     try { ws = new WebSocket(INTRADE_WS_URL); }
     catch (e) { setTimeout(intradeConnect, 3000); return; }
     intradeWs = ws;
-    ws.onopen = () => intradeSetConn(true);
+    ws.onopen = () => {
+        intradeSetConn(true);
+        // Панель с токеном ждёт авторизацию первым сообщением; без токена
+        // (локальный запуск) отправлять нечего.
+        if (INTRADE_TOKEN) {
+            intradeWs.send(JSON.stringify({cmd: "auth", token: INTRADE_TOKEN}));
+        }
+    };
     ws.onclose = () => {
         intradeSetConn(false);
         intradeWs = null;

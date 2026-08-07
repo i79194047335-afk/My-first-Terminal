@@ -30,15 +30,27 @@ CALENDAR_PATH = os.path.join(
 SESSION_WINDOW_MIN = 30
 NEWS_WINDOW_MIN = 15
 
-# UTC clock times that reshape liquidity. FXCM rolls its trading day at 21:00
-# UTC (see the H4/D1 grid note in CLAUDE.md), which is also the thinnest book.
+# UTC clock times that reshape liquidity: (hour, minute, label). Each is a
+# point event; the ±SESSION_WINDOW_MIN window is applied around it.
+#
+# Note: NY close (20:00) and a point-event rollover (21:00) used to sit here
+# too, but together their ±30-min windows blanketed 19:30–21:30 in silence.
+# The owner wants the broker-downtime block to start at 21:00 sharp, so the
+# rollover is now a RANGE (see SESSION_RANGES_UTC) and NY close is dropped.
 SESSION_EVENTS_UTC = [
-    (21, 0, "rollover / Sydney open"),
     (0, 0, "Tokyo open"),
     (7, 0, "London open"),
     (12, 30, "US data slot"),
     (13, 30, "NY open"),
-    (20, 0, "NY close"),
+]
+
+# Continuous silence windows: (start_hour, start_minute, end_hour, end_minute,
+# label), UTC, inclusive of start and exclusive of end. Unlike SESSION_EVENTS
+# these are exact spans, not a point ± a margin. The broker is down 21:00–23:00
+# UTC (see CLAUDE.md «Downtime window» / bot payout.is_broker_down): no ticks
+# arrive, so a shock there would be an artefact of the gap, not a real move.
+SESSION_RANGES_UTC = [
+    (21, 0, 23, 0, "broker downtime / rollover"),
 ]
 
 # Which currencies each tradable symbol is exposed to.
@@ -108,16 +120,31 @@ class NewsWindows(object):
             ts: Unix seconds, UTC.
 
         Returns:
-            Label of the session event, or None.
+            Tuple (label, until_ts): the window's label and the unix time it
+            ends (exact for ranges, ±SESSION_WINDOW_MIN edge for point events),
+            or (None, None) when no window is active.
         """
         dt = datetime.fromtimestamp(ts, timezone.utc)
+
+        # Continuous ranges: exact spans, checked minute-of-day. All current
+        # ranges live inside one UTC day (21:00–23:00), so no midnight wrap.
+        minute_of_day = dt.hour * 60 + dt.minute
+        for sh, sm, eh, em, label in SESSION_RANGES_UTC:
+            start = sh * 60 + sm
+            end = eh * 60 + em
+            if start <= minute_of_day < end:
+                end_dt = dt.replace(hour=eh, minute=em, second=0, microsecond=0)
+                return label, int(end_dt.timestamp())
+
+        # Point events: ±SESSION_WINDOW_MIN around a fixed clock time.
         for hh, mm, label in SESSION_EVENTS_UTC:
             event = dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
             # Check neighbouring days so windows spanning midnight still match.
             for shifted in (event - timedelta(days=1), event, event + timedelta(days=1)):
                 if abs((dt - shifted).total_seconds()) <= SESSION_WINDOW_MIN * 60:
-                    return label
-        return None
+                    until = shifted + timedelta(minutes=SESSION_WINDOW_MIN)
+                    return label, int(until.timestamp())
+        return None, None
 
     def news_window(self, ts, symbol):
         """Check whether a timestamp sits in a news window for this symbol.
@@ -169,12 +196,12 @@ class NewsWindows(object):
                 "minutes_to": news["minutes_to"],
             }
 
-        session = self.session_window(ts)
-        if session:
+        session_label, session_until = self.session_window(ts)
+        if session_label:
             return {
                 "kind": "session",
-                "label": session,
-                "until_ts": None,
+                "label": session_label,
+                "until_ts": session_until,
                 "minutes_to": None,
             }
         return None
