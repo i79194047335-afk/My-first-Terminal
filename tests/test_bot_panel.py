@@ -919,6 +919,67 @@ def test_auth_correct_token_gets_state():
         cleanup(paths)
 
 
+def test_set_symbol_switches_payout_source():
+    """set_symbol меняет пару, по которой считается процент выплаты."""
+    print("выбор пары в панели")
+    panel, journal, manual, risk, port, paths = make_panel()
+    panel.config.symbol_whitelist = ["AUD/USD", "BTC/USDT", "USD/JPY"]
+    panel.config.min_expiry_minutes = {"BTC/USDT": 5}
+
+    async def scenario():
+        """Выбрать BTC и посмотреть, что попало в срез.
+
+        Returns:
+            Кортеж (первый срез, срез после выбора, ответ на чужую пару).
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                first = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                await ws.send(json.dumps({"cmd": "set_symbol",
+                                          "symbol": "BTC/USDT"}))
+                after = None
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "state" \
+                            and message.get("active_symbol") == "BTC/USDT":
+                        after = message
+                        break
+                # Инструмент не из белого списка должен быть отвергнут.
+                await ws.send(json.dumps({"cmd": "set_symbol",
+                                          "symbol": "ЧУШЬ/XXX"}))
+                reply = None
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        reply = message
+                        break
+                return first, after, reply
+        finally:
+            await panel.stop()
+
+    first, after, reply = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("в срезе есть активная пара",
+              first.get("active_symbol") is not None, first.get("active_symbol"))
+        check("пара переключилась", after is not None
+              and after["active_symbol"] == "BTC/USDT",
+              after and after.get("active_symbol"))
+        check("экспирация BTC — 5 минут",
+              after and after.get("expiry_minutes") == 5,
+              after and after.get("expiry_minutes"))
+        check("порог выплаты в срезе",
+              after and after.get("min_payout_percent") is not None,
+              after and after.get("min_payout_percent"))
+        check("чужая пара отвергнута",
+              reply and reply["status"] == "error", reply)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
 class FakeEngine:
     """Заглушка движка: нужна только ради подписки on_outcome."""
 
@@ -1013,6 +1074,7 @@ def main():
                  test_auth_wrong_token_rejected,
                  test_auth_no_leak_without_token,
                  test_auth_correct_token_gets_state,
+                 test_set_symbol_switches_payout_source,
                  test_engine_outcome_reaches_browser,
                  test_engine_outcome_subscribed_on_construction):
         test()

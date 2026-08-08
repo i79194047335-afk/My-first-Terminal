@@ -36,7 +36,12 @@ DEFAULTS = {
     "user_hash": None,
     "default_investment": 1,
     "default_expiry_minutes": 1,
-    "symbol_whitelist": ["USD/JPY", "EUR/USD", "AUD/USD", "USD/CAD"],
+    "symbol_whitelist": ["AUD/USD", "BTC/USDT", "EUR/USD", "USD/CAD", "USD/JPY"],
+    # Минимальная экспирация по инструменту, когда площадка не принимает
+    # общую. BTC/USDT на 1 и 3 минутах отвечает error_time_btc и открывается
+    # только с 5 (проверено живьём 2026-08-08, id 224849601). Форекс в этом
+    # словаре не нужен — ему хватает default_expiry_minutes.
+    "min_expiry_minutes": {"BTC/USDT": 5},
     "sources": ["manual"],
     "risk": {
         "max_trades_per_day": 20,
@@ -119,6 +124,9 @@ class BotConfig:
         default_investment:     Ставка по умолчанию.
         default_expiry_minutes: Экспирация по умолчанию, минуты.
         symbol_whitelist:       Разрешённые инструменты (со слэшем).
+        min_expiry_minutes:     Минимальная экспирация по инструменту:
+                                {"BTC/USDT": 5}. Площадка отвергает более
+                                короткие (error_time_btc).
         sources:                Имена включённых источников сигналов.
         risk:                   Пороги ограничителей.
         panel_host:             Адрес панели. 127.0.0.1 — только локально
@@ -142,6 +150,8 @@ class BotConfig:
     default_investment: float = 1.0
     default_expiry_minutes: int = 1
     symbol_whitelist: list = field(default_factory=lambda: list(DEFAULTS["symbol_whitelist"]))
+    min_expiry_minutes: dict = field(
+        default_factory=lambda: dict(DEFAULTS["min_expiry_minutes"]))
     sources: list = field(default_factory=lambda: ["manual"])
     risk: RiskConfig = field(default_factory=RiskConfig)
     panel_host: str = "127.0.0.1"
@@ -150,6 +160,23 @@ class BotConfig:
     min_balance_for_demo: float = 1000.0
     db_path: str = "bot_journal.db"
     stop_file: str = "bot/STOP"
+
+    def expiry_for(self, symbol: str) -> int:
+        """Экспирация для инструмента с учётом минимума площадки.
+
+        У BTC/USDT минимальная экспирация 5 минут: на 1 и 3 площадка
+        отвечает error_time_btc (проверено живьём 2026-08-08). Общая
+        default_expiry_minutes для него не годится, поэтому берём большее
+        из общей и минимальной для инструмента.
+
+        Args:
+            symbol: Инструмент со слэшем, например "BTC/USDT".
+
+        Returns:
+            Экспирация в минутах.
+        """
+        minimal = self.min_expiry_minutes.get(symbol, 0)
+        return max(self.default_expiry_minutes, int(minimal or 0))
 
     @property
     def is_live(self) -> bool:
@@ -265,6 +292,8 @@ def load(path: str = DEFAULT_CONFIG_PATH, env_path: str = ".env") -> BotConfig:
         default_investment=float(data.get("default_investment", 1)),
         default_expiry_minutes=int(data.get("default_expiry_minutes", 1)),
         symbol_whitelist=list(data.get("symbol_whitelist") or []),
+        min_expiry_minutes=dict(data.get("min_expiry_minutes")
+                                or DEFAULTS["min_expiry_minutes"]),
         sources=list(data.get("sources") or ["manual"]),
         risk=risk,
         panel_host=str(data.get("panel_host") or DEFAULTS["panel_host"]),

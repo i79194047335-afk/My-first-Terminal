@@ -237,6 +237,42 @@ def test_touches_platform():
             os.unlink(path)
 
 
+def test_expiry_per_symbol():
+    """У BTC/USDT экспирация не меньше 5 минут, у форекса — общая.
+
+    Площадка отвергает BTC на 1 и 3 минутах (error_time_btc, проверено
+    живьём 2026-08-08); открывается только с 5.
+    """
+    print("экспирация по инструменту")
+    path = write_config({
+        "default_expiry_minutes": 1,
+        "symbol_whitelist": ["AUD/USD", "BTC/USDT", "USD/JPY"],
+        "min_expiry_minutes": {"BTC/USDT": 5},
+    })
+    try:
+        cfg = config_module.load(path, env_path="/nonexistent/.env")
+        check("форекс — общая экспирация", cfg.expiry_for("USD/JPY") == 1,
+              cfg.expiry_for("USD/JPY"))
+        check("BTC — 5 минут", cfg.expiry_for("BTC/USDT") == 5,
+              cfg.expiry_for("BTC/USDT"))
+        check("незнакомый инструмент — общая",
+              cfg.expiry_for("EUR/GBP") == 1, cfg.expiry_for("EUR/GBP"))
+    finally:
+        os.unlink(path)
+
+    # Общая экспирация больше минимальной — побеждает общая.
+    path = write_config({
+        "default_expiry_minutes": 15,
+        "min_expiry_minutes": {"BTC/USDT": 5},
+    })
+    try:
+        cfg = config_module.load(path, env_path="/nonexistent/.env")
+        check("минимум не урезает большую общую",
+              cfg.expiry_for("BTC/USDT") == 15, cfg.expiry_for("BTC/USDT"))
+    finally:
+        os.unlink(path)
+
+
 def main():
     """Прогнать все тесты и вернуть код возврата.
 
@@ -246,7 +282,7 @@ def main():
     for test in (test_defaults, test_unknown_mode_falls_back, test_live_blocked,
                  test_panel_host_defaults_safe, test_live_forbids_open_panel,
                  test_env_overrides, test_validation, test_unknown_risk_key_ignored,
-                 test_touches_platform):
+                 test_touches_platform, test_expiry_per_symbol):
         test()
         print()
 

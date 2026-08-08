@@ -93,6 +93,11 @@ class Panel:
         self.quotes = quotes
 
         self.clients: set = set()
+        # Пара, выбранная в панели: по ней считается показываемый процент
+        # выплаты. Панель ставит её командой set_symbol; до первой команды
+        # берём первую из белого списка.
+        self.active_symbol = (config.symbol_whitelist[0]
+                              if config.symbol_whitelist else "USD/JPY")
         self._server = None
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -322,6 +327,19 @@ class Panel:
         elif command in ("call", "put"):
             await self._manual_trade(websocket, command, message)
 
+        elif command == "set_symbol":
+            # Панель показывает процент выплаты по ВЫБРАННОЙ паре: он
+            # зависит и от инструмента, и от экспирации (у BTC она 5 минут).
+            symbol = message.get("symbol")
+            if symbol not in self.config.symbol_whitelist:
+                await self._reply(websocket, "error",
+                                  f"инструмент {symbol!r} не в белом списке")
+                return
+            if symbol != self.active_symbol:
+                self.active_symbol = symbol
+                self._payout = None        # кэш чужой пары больше не годится
+                self._payout_ts = 0.0
+
         elif command == "ensure_demo":
             await self._ensure_demo(websocket)
 
@@ -357,6 +375,10 @@ class Panel:
             signal = await self.manual_source.fire(
                 direction,
                 symbol=symbol,
+                # У BTC/USDT минимум 5 минут: на более коротких площадка
+                # отвечает error_time_btc. Экспирацию выбирает конфиг по
+                # инструменту, а не общее умолчание.
+                expiry_minutes=self.config.expiry_for(symbol),
                 amount=float(amount) if amount else None,
                 note="кнопка панели",
             )
@@ -612,6 +634,11 @@ class Panel:
             "minutes_to_broker_down": round(payout.minutes_until_broker_down(), 1),
             "kill_switch": kill_switch_active(self.config.stop_file),
             "symbols": self.config.symbol_whitelist,
+            "active_symbol": self.active_symbol,
+            # Экспирация выбранной пары: у BTC/USDT 5 минут против минуты у
+            # форекса, и панель обязана показывать, на какой срок войдёт.
+            "expiry_minutes": self.config.expiry_for(self.active_symbol),
+            "min_payout_percent": self.config.risk.min_payout_percent,
             "default_investment": self.config.default_investment,
             "quotes_fresh": self.quotes.fresh if self.quotes else None,
             "engine": self.engine.summary() if self.engine else None,
@@ -692,11 +719,13 @@ class Panel:
         Returns:
             Процент выплаты либо None.
         """
-        symbol = (self.config.symbol_whitelist[0]
-                  if self.config.symbol_whitelist else "USD/JPY")
+        # Процент считается по ВЫБРАННОЙ в панели паре и её экспирации:
+        # у BTC/USDT она 5 минут, и сетка выплат от неё зависит.
+        symbol = self.active_symbol
+        expiry = self.config.expiry_for(symbol)
 
         if not self.client or not self.config.touches_platform:
-            return payout.expected_percent(self.config.default_expiry_minutes,
+            return payout.expected_percent(expiry,
                                            self.config.default_investment)
 
         ttl = 5 if payout.is_hour_edge() else 20
@@ -709,7 +738,7 @@ class Panel:
                 None,
                 lambda: self.client.payout_percent(
                     symbol,
-                    expiry_minutes=self.config.default_expiry_minutes,
+                    expiry_minutes=expiry,
                     investment=self.config.default_investment,
                 ),
             )
