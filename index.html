@@ -377,6 +377,15 @@
     #intradePanel .it-acc-btn.on { color: var(--text); background: var(--accent-soft); }
     #intradePanel .it-acc-btn.on.demo { color: #26a69a; background: rgba(38,166,154,0.14); }
     #intradePanel .it-acc-btn.on.real { color: #ef5350; background: rgba(239,83,80,0.14); }
+    #intradePanel .it-payout { font-variant-numeric: tabular-nums; color: var(--muted); }
+    #intradePanel .it-payout b { color: var(--text); font-weight: 600; }
+    /* Выплата ниже порога отсекателя — сделка не пройдёт, и это видно сразу. */
+    #intradePanel .it-payout.low b { color: #ef5350; }
+    #intradePanel .it-confirm {
+        display: inline-flex; align-items: center; gap: 4px;
+        color: var(--muted); cursor: pointer; user-select: none;
+    }
+    #intradePanel .it-confirm input { margin: 0; cursor: pointer; }
     #intradePanel .it-conn { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
     #intradePanel .it-dot { width: 7px; height: 7px; border-radius: 50%; background: #ef5350; }
     #intradePanel .it-dot.on { background: #26a69a; }
@@ -859,6 +868,12 @@
                     <button class="it-acc-btn real" data-acc="real" onclick="intradeSetAccount('real')">РЕАЛ</button>
                 </span>
                 <span class="it-bal">Баланс: <span id="itBalance">—</span></span>
+                <!-- Текущая выплата площадки по выбранной паре. Красная,
+                     когда ниже порога отсекателя: сделка не пройдёт. -->
+                <span class="it-payout" id="itPayoutBox" data-tip="Выплата по выбранной паре; в скобках — безубыточный винрейт">Выплата: <span id="itPayout">—</span></span>
+                <label class="it-confirm" data-tip="Спрашивать подтверждение перед сделкой. На РЕАЛЬНОМ счёте спрашивается всегда.">
+                    <input type="checkbox" id="itConfirm" onchange="intradeSetConfirm(this.checked)"> подтверждать
+                </label>
                 <span class="it-conn"><span class="it-dot" id="itDot"></span><span id="itConnText">нет связи</span></span>
             </div>
             <div class="it-actions">
@@ -3743,6 +3758,10 @@ let intradeState = null;
 let intradeActiveSymbol = null;
 let intradeTab = "open";
 let _itAmountSet = false;
+// Спрашивать ли подтверждение перед сделкой. Живёт в localStorage: выбор
+// переживает F5. На РЕАЛЬНОМ счёте подтверждение спрашивается всегда,
+// независимо от этой галочки (см. intradeFire).
+let intradeConfirmEnabled = localStorage.getItem("intrade_confirm") !== "0";
 // Бот отверг токен: не переподключаемся автоматически, ждём ввода нового.
 let intradeAuthRejected = false;
 // Бот пустил без токена (локальный запуск, panel_token не задан). Тогда
@@ -3964,7 +3983,17 @@ function intradeConnect() {
             intradeShowAuth(false);
             intradeState = msg;
             if (!intradeActiveSymbol && msg.symbols && msg.symbols.length) {
-                intradeActiveSymbol = layout.intradeSymbol || msg.symbols[0];
+                const sorted = msg.symbols.slice().sort((a, b) => a.localeCompare(b));
+                // Сохранённая пара могла исчезнуть из белого списка бота.
+                const saved = layout.intradeSymbol;
+                intradeActiveSymbol = (saved && sorted.indexOf(saved) >= 0)
+                    ? saved : sorted[0];
+            }
+            // Бот считает процент выплаты по выбранной паре — сообщаем свою,
+            // если его представление разошлось с нашим (первый срез, F5).
+            if (intradeActiveSymbol && msg.active_symbol !== intradeActiveSymbol
+                    && msg.symbols && msg.symbols.indexOf(intradeActiveSymbol) >= 0) {
+                intradeSend({cmd: "set_symbol", symbol: intradeActiveSymbol});
             }
             renderIntrade(msg);
         } else if (msg.type === "reply") {
@@ -3996,6 +4025,22 @@ function intradeSetConn(on) {
 }
 
 /**
+ * Включить или выключить подтверждение перед сделкой.
+ *
+ * Выбор живёт в localStorage и переживает F5. На РЕАЛЬНОМ счёте
+ * подтверждение спрашивается всегда — эта галочка его не снимает.
+ * @param {boolean} on Спрашивать ли подтверждение.
+ * @returns {void}
+ */
+function intradeSetConfirm(on) {
+    intradeConfirmEnabled = !!on;
+    try { localStorage.setItem("intrade_confirm", on ? "1" : "0"); }
+    catch (e) { /* приватный режим */ }
+    intradeToast(on ? "подтверждение включено"
+                    : "подтверждение выключено — сделка уйдёт сразу", "ok");
+}
+
+/**
  * Отправить команду в панель бота; при отсутствии связи — тост.
  * @param {object} payload Команда.
  * @returns {void}
@@ -4022,6 +4067,40 @@ function renderIntrade(s) {
             : "—";
     }
 
+    // Текущая выплата площадки по выбранной паре. Красным — когда ниже
+    // порога отсекателя: при таком проценте бот сделку не пропустит.
+    const payoutBox = document.getElementById("itPayoutBox");
+    const payoutEl = document.getElementById("itPayout");
+    if (payoutEl) {
+        if (s.payout_percent != null) {
+            const be = s.payout_breakeven != null
+                ? " (безубыток " + s.payout_breakeven.toFixed(1) + "%)" : "";
+            payoutEl.innerHTML = "<b>" + s.payout_percent + "%</b>" + be;
+            const low = s.min_payout_percent != null
+                        && s.payout_percent < s.min_payout_percent;
+            if (payoutBox) payoutBox.classList.toggle("low", low);
+        } else {
+            payoutEl.textContent = "—";
+            if (payoutBox) payoutBox.classList.remove("low");
+        }
+    }
+
+    // Галочка подтверждения: на реальном счёте оно принудительно и
+    // выключить его нельзя — показываем это состоянием элемента.
+    const confirmEl = document.getElementById("itConfirm");
+    if (confirmEl) {
+        const onRealAcc = s.profile && s.profile.account === "real";
+        confirmEl.checked = onRealAcc ? true : intradeConfirmEnabled;
+        confirmEl.disabled = !!onRealAcc;
+        const label = confirmEl.closest(".it-confirm");
+        if (label) {
+            label.style.opacity = onRealAcc ? "0.6" : "";
+            label.dataset.tip = onRealAcc
+                ? "На РЕАЛЬНОМ счёте подтверждение обязательно"
+                : "Спрашивать подтверждение перед сделкой. На РЕАЛЬНОМ счёте спрашивается всегда.";
+        }
+    }
+
     // Счёт площадки: подсветить активную кнопку ДЕМО/РЕАЛ.
     const acc = (s.profile && s.profile.account) || null;
     document.querySelectorAll(".it-acc-btn").forEach(btn => {
@@ -4030,10 +4109,13 @@ function renderIntrade(s) {
 
     // Пары: активная — одним кликом. Кнопки строим один раз (по числу пар).
     const box = document.getElementById("itSymbols");
-    if (box && box.dataset.rendered !== String((s.symbols || []).length)) {
-        box.dataset.rendered = String((s.symbols || []).length);
+    // Пары — по алфавиту, чтобы порядок не зависел от того, как их вернул
+    // конфиг бота, и не прыгал при добавлении новых инструментов.
+    const symbols = (s.symbols || []).slice().sort((a, b) => a.localeCompare(b));
+    if (box && box.dataset.rendered !== symbols.join(",")) {
+        box.dataset.rendered = symbols.join(",");
         box.innerHTML = "";
-        (s.symbols || []).forEach(sym => {
+        symbols.forEach(sym => {
             const b = document.createElement("button");
             b.className = "it-sym";
             b.textContent = sym;
@@ -4042,6 +4124,9 @@ function renderIntrade(s) {
                 layout.intradeSymbol = sym;
                 StorageLayer.autoSave(layout);
                 highlightIntradeSymbols();
+                // Боту нужна выбранная пара: по ней он считает показываемый
+                // процент выплаты (и экспирацию — у BTC она 5 минут).
+                intradeSend({cmd: "set_symbol", symbol: sym});
             };
             box.appendChild(b);
         });
@@ -4089,11 +4174,19 @@ function intradeFire(direction) {
     const amountEl = document.getElementById("itAmount");
     const amount = parseFloat(amountEl ? amountEl.value : "") || null;
     const onReal = intradeState.profile && intradeState.profile.account === "real";
-    if (intradeState.mode === "demo" || intradeState.mode === "live") {
+    // Подтверждение отключаемо галочкой, НО на реальном счёте спрашивается
+    // всегда: цена ошибочного клика там — живые деньги, и снимать этот
+    // предохранитель настройкой в интерфейсе нельзя.
+    const needConfirm = (intradeState.mode === "demo" || intradeState.mode === "live")
+                        && (onReal || intradeConfirmEnabled);
+    if (needConfirm) {
         const where = onReal ? "РЕАЛЬНЫЙ счёт площадки" : "демо-счёт площадки";
+        const expiry = intradeState.expiry_minutes
+            ? "\nэкспирация " + intradeState.expiry_minutes + " мин" : "";
         if (!confirm("Открыть сделку на " + where + "?\n\n" +
                      direction.toUpperCase() + " " + intradeActiveSymbol +
-                     ", ставка " + (amount != null ? amount : "по умолчанию"))) return;
+                     ", ставка " + (amount != null ? amount : "по умолчанию") +
+                     expiry)) return;
     }
     intradeSend({cmd: direction, symbol: intradeActiveSymbol, amount: amount});
 }
