@@ -416,6 +416,28 @@
     }
     #intradeToast.err { border-color: #ef5350; color: #ef5350; }
     #intradeToast.ok { border-color: #26a69a; color: #26a69a; }
+    /* Экран входа накрывает всю панель: пока токен не принят, ни кнопок
+       Вверх/Вниз, ни сделок видно быть не должно. */
+    #itAuth {
+        position: absolute; inset: 0; z-index: 2002; display: none;
+        align-items: center; justify-content: center; background: var(--panel);
+    }
+    #itAuth.on { display: flex; }
+    #itAuth .it-auth-box {
+        display: flex; flex-direction: column; gap: 7px; align-items: stretch;
+        min-width: 240px; text-align: center;
+    }
+    #itAuth .it-auth-hint { color: var(--muted); }
+    #itAuth .it-auth-hint.bad { color: #ef5350; }
+    #itAuth input {
+        font: inherit; background: var(--btn); color: var(--text);
+        border: 1px solid var(--btn-border); border-radius: 4px; padding: 5px 8px;
+    }
+    #itAuth button {
+        font: inherit; font-weight: 700; cursor: pointer; padding: 5px 8px;
+        border-radius: 4px; border: 1px solid var(--accent);
+        background: var(--accent-soft); color: var(--text);
+    }
     #briefContent { line-height: 1.6; }
     #briefContent h2 {
         font-size: 15px; color: #fff; margin: 0 0 10px 0;
@@ -826,6 +848,18 @@
                     </div>
                     <div class="it-rows" id="itRows"></div>
                 </div>
+                <!-- Экран входа: показывается поверх панели, пока токен не
+                     принят ботом. Токен живёт в localStorage, поэтому вводится
+                     один раз на браузер. -->
+                <div id="itAuth">
+                    <div class="it-auth-box">
+                        <b>Вход в панель</b>
+                        <div class="it-auth-hint" id="itAuthHint">Введите токен доступа к боту</div>
+                        <input id="itAuthInput" type="password" placeholder="токен"
+                               autocomplete="off" spellcheck="false">
+                        <button id="itAuthBtn" onclick="intradeAuthSubmit()">Войти</button>
+                    </div>
+                </div>
                 <div id="intradeToast"></div>
             </div>
             <div class="chart" id="chart2"></div>
@@ -903,10 +937,34 @@ const WS_URL = new URLSearchParams(location.search).get("ws") || "ws://89.107.10
 // поэтому наружу её пускают сознательно (panel_host в bot_config.json) или
 // ssh-туннелем. Данных intrade во фронте нет — их держит бот и шлёт срезом.
 const INTRADE_WS_URL = new URLSearchParams(location.search).get("intrade") || "ws://89.107.10.204:8788";
-// Токен авторизации панели бота: ?intrade_token=<token> в URL или
-// localStorage.intrade_token. При заданном токене панель требует
+// Сколько ждать установки WS к боту. Пакеты в закрытый файрволом порт уходят
+// в DROP, и браузер держит сокет в CONNECTING минутами — без этого сторожа
+// панель молча висит на «нет связи» и не пытается переподключиться.
+const INTRADE_CONNECT_TIMEOUT = 6000;
+// Сколько ждать среза от бота при пустом токене, прежде чем показать форму
+// входа. Бот без пароля отвечает срезом сразу; молчание значит, что он ждёт
+// авторизацию. Заметно меньше AUTH_TIMEOUT бота (10 с), чтобы не держать
+// человека перед надписью «нет связи».
+const INTRADE_NO_TOKEN_GRACE = 1200;
+// Токен авторизации панели бота. При заданном на боте токене панель требует
 // {cmd:"auth", token} первым сообщением — без него связь закрывается.
-const INTRADE_TOKEN = new URLSearchParams(location.search).get("intrade_token") || localStorage.getItem("intrade_token") || "";
+//
+// Источник — localStorage: токен вводится ОДИН РАЗ в экране входа (#itAuth) и
+// живёт до чистки данных сайта. ?intrade_token= в URL поддержан как разовый
+// способ передать токен (закладка, отладка): он тут же переезжает в
+// localStorage, а из адресной строки вычищается — токен в истории браузера и
+// в логах прокси нам не нужен.
+let INTRADE_TOKEN = localStorage.getItem("intrade_token") || "";
+(function adoptTokenFromUrl() {
+    const params = new URLSearchParams(location.search);
+    const fromUrl = params.get("intrade_token");
+    if (!fromUrl) return;
+    INTRADE_TOKEN = fromUrl;
+    try { localStorage.setItem("intrade_token", fromUrl); } catch (e) { /* приватный режим */ }
+    params.delete("intrade_token");
+    const rest = params.toString();
+    history.replaceState(null, "", location.pathname + (rest ? "?" + rest : ""));
+})();
 // ── Шкала R: наша (тики) ↔ TradingView ──────────────────────────────────────
 //
 // Внутри и хабу рэндж-бар всегда задаётся в ПОИНТАХ (тиках, минимальный тик
@@ -3672,6 +3730,11 @@ let intradeState = null;
 let intradeActiveSymbol = null;
 let intradeTab = "open";
 let _itAmountSet = false;
+// Бот отверг токен: не переподключаемся автоматически, ждём ввода нового.
+let intradeAuthRejected = false;
+// Бот пустил без токена (локальный запуск, panel_token не задан). Тогда
+// пустой токен — норма, и экран входа показывать не нужно.
+let intradeAuthOptional = false;
 
 /**
  * Кнопка «Интрейд» в тулбаре: показать/спрятать панель.
@@ -3693,6 +3756,7 @@ function applyIntradeVisibility() {
     const panel = document.getElementById("intradePanel");
     const btn = document.getElementById("intradeBtn");
     if (!panel) return;
+    intradeBindPanelEvents(panel);
     panel.classList.toggle("on", intradeVisible);
     if (btn) btn.classList.toggle("on", intradeVisible);
     if (intradeVisible) {
@@ -3704,39 +3768,176 @@ function applyIntradeVisibility() {
 }
 
 /**
- * Поднять WS к панели бота. Без авторизации: панель отдаёт состояние всем,
- * кто постучался, — порт по умолчанию 127.0.0.1, наружу не торчит.
+ * Разово привязать события панели: Enter в форме входа и перехват ПКМ.
+ *
+ * Панель лежит ВНУТРИ .chart-wrapper, на котором висит контекстное меню
+ * графика. Без остановки всплытия правый клик по панели открывал меню
+ * свечей — панель воспринималась как часть графика.
+ * @param {HTMLElement} panel Корень панели.
+ * @returns {void}
+ */
+function intradeBindPanelEvents(panel) {
+    if (panel.dataset.bound) return;
+    panel.dataset.bound = "1";
+    panel.addEventListener("contextmenu", e => { e.stopPropagation(); });
+    const input = document.getElementById("itAuthInput");
+    if (input) {
+        input.addEventListener("keydown", e => {
+            if (e.key === "Enter") { e.preventDefault(); intradeAuthSubmit(); }
+        });
+    }
+}
+
+/**
+ * Показать или спрятать экран входа (#itAuth).
+ * @param {boolean} on Показывать ли форму ввода токена.
+ * @param {string} [hint] Подсказка; передаётся при отказе бота.
+ * @returns {void}
+ */
+function intradeShowAuth(on, hint) {
+    const box = document.getElementById("itAuth");
+    if (!box) return;
+    box.classList.toggle("on", on);
+    const hintEl = document.getElementById("itAuthHint");
+    if (hintEl) {
+        hintEl.textContent = hint || "Введите токен доступа к боту";
+        hintEl.classList.toggle("bad", !!hint);
+    }
+    if (on) {
+        const input = document.getElementById("itAuthInput");
+        if (input) { input.value = ""; input.focus(); }
+    }
+}
+
+/**
+ * Принять токен из формы входа: сохранить и переподключиться.
+ *
+ * Токен кладётся в localStorage, поэтому вводится один раз на браузер —
+ * перезагрузка страницы и перезапуск бота его не теряют.
+ * @returns {void}
+ */
+function intradeAuthSubmit() {
+    const input = document.getElementById("itAuthInput");
+    const value = input ? input.value.trim() : "";
+    if (!value) {
+        intradeShowAuth(true, "Токен не может быть пустым");
+        return;
+    }
+    INTRADE_TOKEN = value;
+    try { localStorage.setItem("intrade_token", value); } catch (e) { /* приватный режим */ }
+    intradeShowAuth(false);
+    // Рвём текущее соединение: бот уже закрыл его отказом либо ждёт auth,
+    // которого мы не послали. Новое подключение уйдёт с токеном.
+    if (intradeWs) {
+        try { intradeWs.close(); } catch (e) { /* уже закрыт */ }
+        intradeWs = null;
+    }
+    intradeConnect();
+}
+
+/**
+ * Поднять WS к панели бота.
+ *
+ * Если бот требует токен, а его у нас нет — соединение не поднимаем вовсе,
+ * а показываем экран входа: иначе бот закроет связь по AUTH_TIMEOUT, и
+ * пользователь увидит только «время на авторизацию истекло».
  * @returns {void}
  */
 function intradeConnect() {
+    // Токена нет — пробуем подключиться молча: бот без panel_token пустит
+    // и сам пришлёт состояние (localhost-запуск). Если он всё же требует
+    // пароль, то ответит отказом или закроет связь по AUTH_TIMEOUT — тогда
+    // и покажем форму. Гадать на клиенте, нужен ли пароль, нельзя: об этом
+    // знает только бот.
     let ws;
     try { ws = new WebSocket(INTRADE_WS_URL); }
     catch (e) { setTimeout(intradeConnect, 3000); return; }
     intradeWs = ws;
-    ws.onopen = () => {
-        intradeSetConn(true);
-        // Панель с токеном ждёт авторизацию первым сообщением; без токена
-        // (локальный запуск) отправлять нечего.
-        if (INTRADE_TOKEN) {
-            intradeWs.send(JSON.stringify({cmd: "auth", token: INTRADE_TOKEN}));
+    // Дало ли соединение хоть один срез состояния. Закрытие без среза при
+    // пустом токене = бот требует пароль (закрыл по AUTH_TIMEOUT).
+    let gotState = false;
+    // Дошёл ли сокет до открытия: отличает «бот недоступен» от «бот ждал
+    // пароль и закрыл связь».
+    let opened = false;
+    // Сторож на установку связи. Без него недоступный бот (порт закрыт
+    // файрволом, пакеты уходят в DROP) держит сокет в CONNECTING минутами:
+    // onclose не приходит, и панель молча висит на «нет связи».
+    const opening = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) {
+            try { ws.close(); } catch (e) { /* nothing */ }
         }
+    }, INTRADE_CONNECT_TIMEOUT);
+    ws.onopen = () => {
+        clearTimeout(opening);
+        opened = true;
+        intradeSetConn(true);
+        if (INTRADE_TOKEN) {
+            // Панель под токеном ждёт авторизацию первым сообщением.
+            // Шлём в СВОЙ сокет, а не в intradeWs: пока этот открывался,
+            // ввод нового токена мог обнулить глобальную ссылку, и обращение
+            // к ней падало с «Cannot read properties of null».
+            ws.send(JSON.stringify({cmd: "auth", token: INTRADE_TOKEN}));
+            return;
+        }
+        // Токена нет. Бот либо пустит без пароля (localhost-запуск) и сразу
+        // пришлёт срез, либо молча ждёт auth и закроет связь через свой
+        // AUTH_TIMEOUT. Ждать эти 10 секунд вслепую нельзя — человек видит
+        // «нет связи» и не понимает, что от него хотят пароль. Поэтому даём
+        // боту короткую фору на срез, а затем показываем форму.
+        setTimeout(() => {
+            if (!gotState && intradeWs === ws) intradeShowAuth(true);
+        }, INTRADE_NO_TOKEN_GRACE);
     };
     ws.onclose = () => {
+        clearTimeout(opening);
+        // Событие от вытесненного сокета (ввели новый токен — старый закрыли):
+        // он больше ничего не решает, иначе затрёт связь свежего соединения.
+        if (intradeWs !== ws) return;
         intradeSetConn(false);
         intradeWs = null;
+        // Отказ авторизации не переподключаем: бот закроет связь снова, и
+        // мы уйдём в цикл. Ждём нового токена из формы.
+        if (intradeAuthRejected) return;
+        if (opened && !gotState && !INTRADE_TOKEN) {
+            // Связь поднялась, но состояния не дала и закрылась — бот ждал
+            // авторизации (AUTH_TIMEOUT). Пустили бы без пароля — прислали
+            // бы срез сразу. Значит панель под токеном: просим ввести.
+            // Условие opened обязательно: сокет, не дошедший до открытия,
+            // означает недоступный бот, а не запрос пароля.
+            intradeShowAuth(true);
+            return;
+        }
         setTimeout(() => { if (intradeVisible) intradeConnect(); }, 3000);
     };
     ws.onerror = () => { try { ws.close(); } catch (e) { /* nothing */ } };
     ws.onmessage = (ev) => {
+        // Сообщение вытесненного сокета: отказ старому токену не должен
+        // гасить уже принятый новый.
+        if (intradeWs !== ws) return;
         let msg;
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
         if (msg.type === "state") {
+            // Состояние приходит только авторизованным — значит, вход принят.
+            gotState = true;
+            intradeAuthRejected = false;
+            if (!INTRADE_TOKEN) intradeAuthOptional = true;
+            intradeShowAuth(false);
             intradeState = msg;
             if (!intradeActiveSymbol && msg.symbols && msg.symbols.length) {
                 intradeActiveSymbol = layout.intradeSymbol || msg.symbols[0];
             }
             renderIntrade(msg);
         } else if (msg.type === "reply") {
+            // Отказ авторизации — не рядовая ошибка команды: сохранённый
+            // токен не подошёл, надо просить новый, а не мигать тостом.
+            const authFail = msg.status === "error" && /токен|авторизац/i.test(msg.message || "");
+            if (authFail) {
+                intradeAuthRejected = true;
+                try { localStorage.removeItem("intrade_token"); } catch (e) { /* приватный режим */ }
+                INTRADE_TOKEN = "";
+                intradeShowAuth(true, msg.message);
+                return;
+            }
             intradeToast(msg.message, msg.status === "error" ? "error" : "ok");
         }
     };
