@@ -100,16 +100,23 @@ class Engine:
         quotes: Optional[QuoteFeed] = None,
         risk=None,
         clock=None,
+        on_outcome=None,
     ):
         """Создать движок.
 
         Args:
-            config:  BotConfig.
-            journal: Журнал сделок.
-            client:  Клиент площадки; не нужен в режиме dry.
-            quotes:  Поток котировок.
-            risk:    Ограничители (Слой 4); None — проверок нет.
-            clock:   Часы площадки; None — локальное время.
+            config:     BotConfig.
+            journal:    Журнал сделок.
+            client:     Клиент площадки; не нужен в режиме dry.
+            quotes:     Поток котировок.
+            risk:       Ограничители (Слой 4); None — проверок нет.
+            clock:      Часы площадки; None — локальное время.
+            on_outcome: Необязательный колбэк (kind, text) — судьба сигнала:
+                        "rejected" с причиной либо "opened". Нужен панели:
+                        кнопка Call только КЛАДЁТ сигнал в очередь, а решение
+                        принимается здесь, асинхронно, и без этого канала
+                        человек видит «отправлен» и никогда не узнаёт об
+                        отказе. Ядро при этом о панели не знает.
         """
         self.config = config
         self.journal = journal
@@ -117,6 +124,7 @@ class Engine:
         self.quotes = quotes
         self.risk = risk
         self.clock = clock
+        self.on_outcome = on_outcome
 
         self.state = State.IDLE
         self.open_trades: dict = {}      # row_id -> задача сопровождения
@@ -168,6 +176,26 @@ class Engine:
             log.info("ожидание расчёта %d сделок", len(self._settle_tasks))
             await asyncio.gather(*self._settle_tasks, return_exceptions=True)
 
+    def _notify(self, kind: str, text: str) -> None:
+        """Сообщить наблюдателю о судьбе сигнала.
+
+        Ошибка наблюдателя не должна ронять обработку сигнала: канал
+        уведомлений вспомогательный.
+
+        Args:
+            kind: "rejected" или "opened".
+            text: Человекочитаемая причина или описание.
+
+        Returns:
+            None.
+        """
+        if not self.on_outcome:
+            return
+        try:
+            self.on_outcome(kind, text)
+        except Exception as err:
+            log.warning("наблюдатель исхода упал: %s", err)
+
     async def handle(self, signal: Signal) -> Optional[int]:
         """Провести сигнал через машину состояний.
 
@@ -189,6 +217,7 @@ class Engine:
             self.journal.event("risk", f"отказ: {rejection}",
                                detail=f"{signal.symbol} {signal.direction} "
                                       f"от {signal.source}")
+            self._notify("rejected", rejection)
             return None
 
         investment = signal.amount or self.config.default_investment
@@ -206,6 +235,7 @@ class Engine:
                 log.info("сигнал отклонён (%s): выплата %s%%", verdict, payout_percent)
                 self.journal.event("risk", f"отказ: {verdict}",
                                    detail=f"выплата {payout_percent}%")
+                self._notify("rejected", verdict)
                 return None
 
         self.state = State.SENDING
@@ -219,6 +249,7 @@ class Engine:
                 self.rejected += 1
                 log.error("ставка отменена: %s", refusal)
                 self.journal.event("risk", f"отказ: {refusal}")
+                self._notify("rejected", refusal)
                 return None
             return await self._send_real(signal, investment, quote_at_signal,
                                          payout_percent)
@@ -447,6 +478,7 @@ class Engine:
                                       raw_settle=str(err))
             self.journal.event("error", f"отказ площадки: {err.code}",
                                detail=err.raw or str(err), trade_ref=row_id)
+            self._notify("rejected", f"площадка отказала: {err}")
             return row_id
 
         self.state = State.OPEN
@@ -462,6 +494,9 @@ class Engine:
             meta=signal.meta,
         )
         self.journal.event("state", "SENDING → OPEN", trade_ref=row_id)
+        self._notify("opened",
+                     f"{signal.direction.upper()} {signal.symbol} открыта, "
+                     f"ставка {investment}")
         # Кулдаун и лимит одновременных сделок считаются от ФАКТА открытия,
         # а не от попытки: отказ площадки паузу начинать не должен.
         if self.risk:

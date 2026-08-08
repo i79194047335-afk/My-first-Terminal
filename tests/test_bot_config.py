@@ -118,11 +118,23 @@ def test_panel_host_defaults_safe():
                              env_path="/nonexistent/.env")
     check("умолчание — localhost", cfg.panel_host == "127.0.0.1", cfg.panel_host)
 
-    # Открыть наружу можно — но только осознанно, записью в конфиг.
+    # Наружу без токена нельзя даже в dry: у панели есть кнопка Call, и
+    # открытый порт означает её доступность любому, кто знает адрес.
     path = write_config({"panel_host": "0.0.0.0"})
     try:
+        config_module.load(path, env_path="/nonexistent/.env")
+        check("0.0.0.0 без токена отвергнут", False, "конфиг принят")
+    except ValueError as err:
+        check("0.0.0.0 без токена отвергнут", "panel_token" in str(err), str(err))
+    finally:
+        os.unlink(path)
+
+    # С токеном — можно: дверь наружу есть, но она под паролем.
+    path = write_config({"panel_host": "0.0.0.0", "panel_token": "секрет"})
+    try:
         cfg = config_module.load(path, env_path="/nonexistent/.env")
-        check("0.0.0.0 принимается в dry", cfg.panel_host == "0.0.0.0")
+        check("0.0.0.0 с токеном принимается", cfg.panel_host == "0.0.0.0")
+        check("токен прочитан", cfg.panel_token == "секрет", cfg.panel_token)
     finally:
         os.unlink(path)
 

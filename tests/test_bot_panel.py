@@ -919,6 +919,83 @@ def test_auth_correct_token_gets_state():
         cleanup(paths)
 
 
+class FakeEngine:
+    """Заглушка движка: нужна только ради подписки on_outcome."""
+
+    def __init__(self):
+        """Создать заглушку без исходов."""
+        self.on_outcome = None
+
+    def summary(self):
+        """Сводка для среза состояния.
+
+        Returns:
+            Минимальный словарь сводки.
+        """
+        return {"state": "IDLE", "mode": "dry", "processed": 0,
+                "rejected": 0, "failed": 0, "settling": 0}
+
+
+def test_engine_outcome_reaches_browser():
+    """Отказ движка долетает до браузера отдельным сообщением.
+
+    Кнопка Call только КЛАДЁТ сигнал в очередь: панель отвечает «принят», а
+    решение движок принимает асинхронно. Без этой рассылки человек видел бы
+    только «принят» и никогда не узнал, что сделку отклонили.
+    """
+    print("исход из движка доходит до браузера")
+    panel, journal, manual, risk, port, paths = make_panel()
+    engine = FakeEngine()
+    panel.engine = engine
+    engine.on_outcome = panel._on_engine_outcome
+
+    async def scenario():
+        """Подключиться и дождаться исхода, посланного движком.
+
+        Returns:
+            Сообщение-исход либо None.
+        """
+        await panel.start()
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)  # первый срез
+                # Движок отклоняет сигнал уже после ответа на команду.
+                engine.on_outcome("rejected", "баланс ниже порога")
+                for _ in range(8):
+                    message = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("type") == "reply":
+                        return message
+        finally:
+            await panel.stop()
+
+    reply = asyncio.run(asyncio.wait_for(scenario(), timeout=40))
+    try:
+        check("исход доехал", reply is not None, reply)
+        check("помечен ошибкой", reply and reply["status"] == "error", reply)
+        check("причина видна человеку",
+              reply and "баланс ниже порога" in reply["message"], reply)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
+def test_engine_outcome_subscribed_on_construction():
+    """Панель подписывается на движок сама, без внешней проводки."""
+    print("панель подписывается на движок при создании")
+    panel, journal, manual, risk, port, paths = make_panel()
+    engine = FakeEngine()
+    try:
+        wired = Panel(config=panel.config, journal=journal, engine=engine,
+                      risk=risk, manual_source=manual, quotes=FakeQuotes())
+        check("on_outcome проставлен", engine.on_outcome is not None)
+        check("ведёт в панель",
+              engine.on_outcome == wired._on_engine_outcome)
+    finally:
+        journal.close()
+        cleanup(paths)
+
+
 def main():
     """Прогнать все тесты и вернуть код возврата.
 
@@ -935,7 +1012,9 @@ def main():
                  test_ensure_demo_blocked_in_dry,
                  test_auth_wrong_token_rejected,
                  test_auth_no_leak_without_token,
-                 test_auth_correct_token_gets_state):
+                 test_auth_correct_token_gets_state,
+                 test_engine_outcome_reaches_browser,
+                 test_engine_outcome_subscribed_on_construction):
         test()
         print()
 

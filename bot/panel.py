@@ -105,6 +105,12 @@ class Panel:
         # параллельных вызова могли бы переключить счёт туда-обратно.
         self._ensure_lock = asyncio.Lock()
 
+        # Судьба сигнала решается в движке асинхронно, уже после ответа на
+        # команду call/put. Без этой подписки человек видит «сигнал
+        # отправлен» и никогда не узнаёт, что сделку отклонили.
+        if self.engine is not None:
+            self.engine.on_outcome = self._on_engine_outcome
+
     # ── жизненный цикл ─────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -357,8 +363,10 @@ class Panel:
             await self._reply(websocket, "error", "сигнал отброшен (очередь полна)")
             return
 
+        # Это подтверждение ПРИЁМА, а не открытия: решение примет движок и
+        # пришлёт его отдельным сообщением (_on_engine_outcome).
         await self._reply(websocket, "ok",
-                          f"сигнал {direction.upper()} {symbol} отправлен")
+                          f"{direction.upper()} {symbol} принят, проверяю…")
 
     async def _ensure_demo(self, websocket) -> None:
         """Привести счёт площадки к ДЕМО — команда «демо» в панели.
@@ -478,6 +486,42 @@ class Panel:
             }))
         except ConnectionClosed:
             pass
+
+    def _on_engine_outcome(self, kind: str, text: str) -> None:
+        """Разослать в браузеры судьбу сигнала, решённую движком.
+
+        Движок зовёт это синхронно из своего цикла, поэтому рассылка
+        ставится задачей, а не ожидается здесь.
+
+        Args:
+            kind: "rejected" или "opened".
+            text: Причина отказа либо описание открытой сделки.
+
+        Returns:
+            None.
+        """
+        status = "error" if kind == "rejected" else "ok"
+        message = f"отказ: {text}" if kind == "rejected" else text
+        asyncio.create_task(self._broadcast_reply(status, message))
+
+    async def _broadcast_reply(self, status: str, message: str) -> None:
+        """Отправить одинаковый ответ всем подключённым браузерам.
+
+        Args:
+            status:  "ok" или "error".
+            message: Текст для показа человеку.
+
+        Returns:
+            None.
+        """
+        payload = json.dumps({
+            "type": "reply", "status": status, "message": message,
+        })
+        for websocket in list(self.clients):
+            try:
+                await websocket.send(payload)
+            except ConnectionClosed:
+                pass
 
     # ── состояние ──────────────────────────────────────────────────────
 
