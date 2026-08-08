@@ -778,6 +778,72 @@ def test_summary():
         cleanup(path)
 
 
+def test_reconcile_orphans_settles_stuck_trade():
+    """Сделка, оставшаяся от прошлого запуска, разбирается при старте.
+
+    Сопровождение живёт задачей в памяти процесса: остановка бота между
+    открытием и расчётом оставляла запись с result=None навсегда, и панель
+    вечно показывала её в «Открытых» с отсчётом «0 с».
+    """
+    print("разбор осиротевших сделок")
+    engine, journal, client, path = make_setup(mode="demo")
+
+    # Сделка «от прошлого запуска»: экспирация давно прошла, итога нет.
+    stale_id = journal.open_trade(
+        mode="demo", symbol="USD/JPY", direction="call", investment=2,
+        expiry_minutes=1, source="manual", signal_ts=time.time() - 7200,
+        request_ts=time.time() - 7200, open_ts=time.time() - 7195,
+        expiry_ts=time.time() - 7135, trade_id=224828394,
+        entry_price=158.36, raw_response="<tr data-id=224828394>",
+    )
+    # И живая сделка: экспирация впереди, её трогать нельзя.
+    fresh_id = journal.open_trade(
+        mode="demo", symbol="EUR/USD", direction="put", investment=2,
+        expiry_minutes=1, source="manual", signal_ts=time.time(),
+        request_ts=time.time(), open_ts=time.time(),
+        expiry_ts=time.time() + 45, trade_id=224828999,
+        entry_price=1.1, raw_response="<tr data-id=224828999>",
+    )
+
+    closed = asyncio.run(engine.reconcile_orphans())
+    try:
+        check("разобрана одна сделка", closed == 1, closed)
+        stale = journal.get_trade(stale_id)
+        check("зависшая закрыта", stale["result"] is not None, stale["result"])
+        check("итог взят у площадки",
+              stale["result"] == client.settle_outcome, stale["result"])
+        fresh = journal.get_trade(fresh_id)
+        check("живая сделка не тронута", fresh["result"] is None, fresh["result"])
+        check("площадку спросили один раз", client.check_calls == 1,
+              client.check_calls)
+    finally:
+        journal.close()
+        cleanup(path)
+
+
+def test_reconcile_orphans_without_trade_id():
+    """Запись без trade_id закрывается как failed — спрашивать не о чем."""
+    print("осиротевшая запись без trade_id")
+    engine, journal, client, path = make_setup(mode="demo")
+
+    row_id = journal.open_trade(
+        mode="demo", symbol="USD/JPY", direction="call", investment=2,
+        expiry_minutes=1, source="manual", signal_ts=time.time() - 3600,
+        request_ts=time.time() - 3600, raw_response="ответ не получен",
+    )
+
+    closed = asyncio.run(engine.reconcile_orphans())
+    try:
+        check("запись разобрана", closed == 1, closed)
+        row = journal.get_trade(row_id)
+        check("помечена failed", row["result"] == "failed", row["result"])
+        check("площадку не спрашивали", client.check_calls == 0,
+              client.check_calls)
+    finally:
+        journal.close()
+        cleanup(path)
+
+
 def main():
     """Прогнать все тесты и вернуть код возврата.
 
@@ -792,7 +858,9 @@ def main():
                  test_dry_settlement_direction,
                  test_balance_safeguard_blocks_real_account,
                  test_balance_unknown_blocks_bet,
-                 test_profile_safeguard_hard_stop, test_summary):
+                 test_profile_safeguard_hard_stop, test_summary,
+                 test_reconcile_orphans_settles_stuck_trade,
+                 test_reconcile_orphans_without_trade_id):
         test()
         print()
 

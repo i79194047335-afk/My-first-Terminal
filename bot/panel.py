@@ -59,6 +59,11 @@ BROADCAST_INTERVAL = 1.0
 # копились висящие бездельники: не успел представиться — соединение закрыто.
 AUTH_TIMEOUT = 10.0
 
+# Через сколько секунд после экспирации незакрытая сделка считается
+# «зависшей». Штатный расчёт укладывается в SETTLE_ATTEMPTS × SETTLE_INTERVAL
+# (~30 с) плюс задержка площадки; запас берём вдвое.
+STALE_AFTER = 90.0
+
 
 class Panel:
     """HTTP+WS сервер панели наблюдения.
@@ -561,6 +566,12 @@ class Panel:
                 "entry_price": row["entry_price"],
                 "expiry_ts": row["expiry_ts"],
                 "seconds_left": (row["expiry_ts"] - now) if row["expiry_ts"] else None,
+                # Экспирация давно прошла, а итога нет: сделку не сопровождает
+                # ни одна задача (бота останавливали между открытием и
+                # расчётом). Панель обязана показать это как «ждёт итога», а
+                # не как живую позицию с отсчётом «0 с».
+                "stale": bool(row["expiry_ts"]
+                              and row["expiry_ts"] + STALE_AFTER < now),
             }
             for row in self.journal.open_positions()
         ]

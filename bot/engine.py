@@ -150,6 +150,91 @@ class Engine:
 
     # ── основной цикл ──────────────────────────────────────────────────
 
+    async def reconcile_orphans(self) -> int:
+        """Разобрать сделки, оставшиеся незакрытыми от прошлого запуска.
+
+        Сопровождение сделки (`_settle`) живёт задачей в памяти процесса:
+        если бота остановили между открытием и расчётом, задача умирает
+        вместе с ним, и запись навсегда остаётся с result=None. Панель
+        показывает такую сделку в «Открытых» вечно, с отсчётом «0 с», хотя
+        на площадке она давно рассчитана. Проверено живьём: сделка от
+        2026-08-06 висела в открытых 46 часов.
+
+        Ставок здесь не делается — только чтение итога, поэтому вызов
+        безопасен при любом старте. Записи без trade_id (до площадки не
+        дошли) закрываются как failed: спрашивать о них нечего.
+
+        Returns:
+            Сколько записей удалось закрыть.
+        """
+        rows = self.journal.open_positions()
+        if not rows:
+            return 0
+
+        now = self.now()
+        closed = 0
+        loop = asyncio.get_running_loop()
+
+        for row in rows:
+            expiry_ts = row["expiry_ts"]
+            # Не трогаем то, что ещё живёт: экспирация впереди — сделку
+            # сопровождает своя задача этого же запуска.
+            if expiry_ts and expiry_ts + SETTLE_DELAY > now:
+                continue
+
+            row_id = row["id"]
+            trade_id = row["trade_id"]
+
+            if not trade_id:
+                self.journal.settle_trade(
+                    row_id, "failed", pnl=0.0,
+                    raw_settle="осталась без trade_id от прошлого запуска")
+                self.journal.event("state", "осиротевшая сделка → FAILED",
+                                   trade_ref=row_id)
+                closed += 1
+                continue
+
+            if not self.config.touches_platform or not self.client:
+                # Имитационные режимы к площадке не ходят: достоверно
+                # рассчитать их прерванные записи уже нечем.
+                self.journal.settle_trade(
+                    row_id, "unknown", pnl=None,
+                    raw_settle="имитация прервана остановкой бота")
+                self.journal.event("state", "осиротевшая имитация → UNKNOWN",
+                                   trade_ref=row_id)
+                closed += 1
+                continue
+
+            try:
+                result = await loop.run_in_executor(
+                    None,
+                    lambda tid=trade_id, inv=row["investment"]:
+                        self.client.check_trade(tid, inv),
+                )
+            except PlatformError as err:
+                # Не смогли узнать — оставляем как есть. Выдумывать итог
+                # сделки, которая могла быть выигрышной, нельзя.
+                log.warning("не разобрать сделку #%s (%s): %s",
+                            row_id, trade_id, err)
+                continue
+
+            if result.outcome == "unknown":
+                log.warning("площадка не дала итог по сделке #%s (%s)",
+                            row_id, trade_id)
+                continue
+
+            self.journal.settle_trade(row_id, result.outcome, pnl=result.pnl,
+                                      raw_settle=result.raw)
+            self.journal.event(
+                "state", f"осиротевшая сделка → CLOSED ({result.outcome})",
+                trade_ref=row_id)
+            closed += 1
+
+        if closed:
+            log.info("разобрано незакрытых сделок с прошлого запуска: %d", closed)
+            self.journal.event("info", f"разобрано осиротевших сделок: {closed}")
+        return closed
+
     async def run(self, source) -> None:
         """Читать сигналы источника и исполнять их до остановки.
 
@@ -161,6 +246,14 @@ class Engine:
         """
         log.info("движок запущен, режим %s", self.config.mode)
         self.journal.event("info", f"движок запущен, режим {self.config.mode}")
+
+        # Сделки, оставшиеся незакрытыми от прошлого запуска, разбираем до
+        # первого сигнала: иначе они вечно висят в «Открытых».
+        try:
+            await self.reconcile_orphans()
+        except Exception as err:
+            # Разбор старых записей не должен мешать работе движка.
+            log.exception("разбор осиротевших сделок не удался: %s", err)
 
         async for signal in source:
             try:
