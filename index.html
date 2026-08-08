@@ -339,8 +339,12 @@
        (~20%, indicators.js _applyDefaultStretch). Умеет открывать сделки,
        поэтому живёт только за явной кнопкой в тулбаре и закрывает своё WS,
        когда спрятана. */
+    /* Панель — не накладка, а сосед графика в колонке .price-pane: график
+       ужимается, как при добавлении индикатора в отдельной пане, и нижние
+       свечи остаются видны. Отсюда position: relative (а не absolute) и
+       flex: 0 0 30% — фиксированная доля высоты колонки. */
     #intradePanel {
-        position: absolute; left: 0; right: 0; bottom: 0; height: 20%;
+        position: relative; flex: 0 0 30%; min-height: 0;
         background: var(--panel); border-top: 1px solid var(--btn-border);
         color: var(--text); font-size: 11px; z-index: 2000;
         box-sizing: border-box; display: none; flex-direction: column;
@@ -825,43 +829,6 @@
             <!-- Интрейд-панель (бот intrade.bar): баланс, переключение
                  демо/реал, пары одним кликом, кнопки Вверх/Вниз, список
                  сделок. Выдвигается кнопкой «Интрейд» в тулбаре. -->
-            <div id="intradePanel">
-                <div class="it-head">
-                    <b>Интрейд</b>
-                    <span class="it-acc-box">
-                        <button class="it-acc-btn demo" data-acc="demo" onclick="intradeSetAccount('demo')">ДЕМО</button>
-                        <button class="it-acc-btn real" data-acc="real" onclick="intradeSetAccount('real')">РЕАЛ</button>
-                    </span>
-                    <span class="it-bal">Баланс: <span id="itBalance">—</span></span>
-                    <span class="it-conn"><span class="it-dot" id="itDot"></span><span id="itConnText">нет связи</span></span>
-                </div>
-                <div class="it-actions">
-                    <span id="itSymbols"></span>
-                    <span class="it-stake">Ставка <input id="itAmount" type="number" min="1" step="1" value="1"></span>
-                    <button id="itCall" class="it-call" onclick="intradeFire('call')">▲ Вверх</button>
-                    <button id="itPut" class="it-put" onclick="intradeFire('put')">▼ Вниз</button>
-                </div>
-                <div class="it-trades">
-                    <div class="it-tabs">
-                        <button class="it-tab on" id="itTabOpen" onclick="intradeSetTab('open')">Открытые</button>
-                        <button class="it-tab" id="itTabClosed" onclick="intradeSetTab('closed')">Закрытые</button>
-                    </div>
-                    <div class="it-rows" id="itRows"></div>
-                </div>
-                <!-- Экран входа: показывается поверх панели, пока токен не
-                     принят ботом. Токен живёт в localStorage, поэтому вводится
-                     один раз на браузер. -->
-                <div id="itAuth">
-                    <div class="it-auth-box">
-                        <b>Вход в панель</b>
-                        <div class="it-auth-hint" id="itAuthHint">Введите токен доступа к боту</div>
-                        <input id="itAuthInput" type="password" placeholder="токен"
-                               autocomplete="off" spellcheck="false">
-                        <button id="itAuthBtn" onclick="intradeAuthSubmit()">Войти</button>
-                    </div>
-                </div>
-                <div id="intradeToast"></div>
-            </div>
             <div class="chart" id="chart2"></div>
             <div class="tv-countdown" id="countdown2"></div>
             <div class="vol-legend" id="volLegend2"></div>
@@ -874,6 +841,43 @@
             </div>
             <div class="scrollRight" onclick="homeChart(2)">⌂</div>
             <div class="expand" onclick="toggleFull(2)">⛶</div>
+        </div>
+        <div id="intradePanel">
+            <div class="it-head">
+                <b>Интрейд</b>
+                <span class="it-acc-box">
+                    <button class="it-acc-btn demo" data-acc="demo" onclick="intradeSetAccount('demo')">ДЕМО</button>
+                    <button class="it-acc-btn real" data-acc="real" onclick="intradeSetAccount('real')">РЕАЛ</button>
+                </span>
+                <span class="it-bal">Баланс: <span id="itBalance">—</span></span>
+                <span class="it-conn"><span class="it-dot" id="itDot"></span><span id="itConnText">нет связи</span></span>
+            </div>
+            <div class="it-actions">
+                <span id="itSymbols"></span>
+                <span class="it-stake">Ставка <input id="itAmount" type="number" min="1" step="1" value="1"></span>
+                <button id="itCall" class="it-call" onclick="intradeFire('call')">▲ Вверх</button>
+                <button id="itPut" class="it-put" onclick="intradeFire('put')">▼ Вниз</button>
+            </div>
+            <div class="it-trades">
+                <div class="it-tabs">
+                    <button class="it-tab on" id="itTabOpen" onclick="intradeSetTab('open')">Открытые</button>
+                    <button class="it-tab" id="itTabClosed" onclick="intradeSetTab('closed')">Закрытые</button>
+                </div>
+                <div class="it-rows" id="itRows"></div>
+            </div>
+            <!-- Экран входа: показывается поверх панели, пока токен не
+                 принят ботом. Токен живёт в localStorage, поэтому вводится
+                 один раз на браузер. -->
+            <div id="itAuth">
+                <div class="it-auth-box">
+                    <b>Вход в панель</b>
+                    <div class="it-auth-hint" id="itAuthHint">Введите токен доступа к боту</div>
+                    <input id="itAuthInput" type="password" placeholder="токен"
+                           autocomplete="off" spellcheck="false">
+                    <button id="itAuthBtn" onclick="intradeAuthSubmit()">Войти</button>
+                </div>
+            </div>
+            <div id="intradeToast"></div>
         </div>
     </div>
 </div>
@@ -3759,12 +3763,39 @@ function applyIntradeVisibility() {
     intradeBindPanelEvents(panel);
     panel.classList.toggle("on", intradeVisible);
     if (btn) btn.classList.toggle("on", intradeVisible);
+    // Панель стоит в потоке колонки и забирает высоту у графика. LWC сам
+    // размер не пересчитывает — без этого свечи остаются нарисованными на
+    // старую высоту и уезжают под панель.
+    intradeResizeCharts();
     if (intradeVisible) {
         if (!intradeWs) intradeConnect();
     } else if (intradeWs) {
         try { intradeWs.close(); } catch (e) { /* уже закрыт */ }
         intradeWs = null;
     }
+}
+
+/**
+ * Пересчитать размеры графиков после изменения высоты панели.
+ *
+ * Панель — сосед графика в колонке, а не накладка: появляясь, она отбирает
+ * 30% высоты. LWC не следит за размером контейнера, поэтому пересчёт нужен
+ * руками, тем же приёмом, что и при развороте колонки (toggleFull).
+ * @returns {void}
+ */
+function intradeResizeCharts() {
+    requestAnimationFrame(() => {
+        document.body.offsetHeight;   // форсируем пересчёт раскладки
+        Object.keys(panesState).forEach(k => {
+            const st = panesState[k];
+            if (!st || !st.chart) return;
+            const div = document.getElementById("chart" + k);
+            if (!div) return;
+            st.chart.resize(div.clientWidth, div.clientHeight);
+            st.drawingEngine?.resize();
+            applyBarCount(parseInt(k));
+        });
+    });
 }
 
 /**
@@ -4106,6 +4137,7 @@ function renderIntradeTrades(s) {
     const list = intradeTab === "open" ? (s.open_positions || []) : (s.closed_trades || []);
     const sig = intradeTab + "|" + list.map(p =>
         (p.id || "") + ":" + (p.seconds_left != null ? Math.round(p.seconds_left) : "") +
+        ":" + (p.stale ? "s" : "") +
         ":" + (p.result || "") + ":" + (p.pnl != null ? p.pnl.toFixed(2) : "") + ":" + p.symbol
     ).join(",");
     if (sig === box.dataset.sig) return;
@@ -4117,8 +4149,12 @@ function renderIntradeTrades(s) {
             return;
         }
         box.innerHTML = list.map(p => {
-            const left = p.seconds_left != null
-                ? Math.max(0, Math.round(p.seconds_left)) + " с" : "—";
+            // Просроченная сделка (stale) — не живая позиция: экспирация
+            // прошла, а итога нет. Показывать ей «0 с» значит рисовать
+            // отсчёт у того, что уже давно рассчитано площадкой.
+            const left = p.stale ? '<span class="loss">ждёт итога</span>'
+                : (p.seconds_left != null
+                    ? Math.max(0, Math.round(p.seconds_left)) + " с" : "—");
             const dir = p.direction === "call"
                 ? '<span class="win">▲</span>' : '<span class="loss">▼</span>';
             return '<div class="it-row">' +
